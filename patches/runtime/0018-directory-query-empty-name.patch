@@ -1,0 +1,19 @@
+Subject: Directory queries with an empty file name list everything
+
+XAPI's FindFirstFile passes an empty name, not "*", for a "*.*" mask; the query searched for
+"<dir>\" and found nothing, so the game saw no subfolders in a published map's save folder.
+
+---
+diff --git a/src/kernel/kernel_file.c b/src/kernel/kernel_file.c
+--- a/src/kernel/kernel_file.c
++++ b/src/kernel/kernel_file.c
+@@ -693,7 +693,8 @@
+         WCHAR* clean_path = dir_path;
+         if (wcsncmp(clean_path, L"\\\\?\\", 4) == 0)
+             clean_path += 4;
+-        if (FileName && FileName->Buffer) {
++        /* An empty name matches everything: XAPI's FindFirstFile passes one for "*.*" */
++        if (FileName && FileName->Buffer && FileName->Length) {
+             WCHAR pattern_wide[MAX_PATH];
+             MultiByteToWideChar(CP_ACP, 0, FileName->Buffer, FileName->Length,
+                                 pattern_wide, MAX_PATH);
