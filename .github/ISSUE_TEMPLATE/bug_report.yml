@@ -1,5 +1,6 @@
 name: Bug report
 description: The game or the build stopped, crashed or did something wrong
+labels: [bug]
 body:
   - type: markdown
     attributes:
