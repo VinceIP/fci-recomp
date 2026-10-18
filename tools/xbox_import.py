@@ -39,7 +39,8 @@ def under_title(parts):
     for i in range(len(low) - 1):
         if low[i] == "udata" and low[i + 1] == TITLE.lower():
             rest = parts[i + 2 :]
-            if any(p in ("", ".", "..") for p in rest):
+            # zip names split on "/" only: a "\" or drive in a name would act as a path on Windows
+            if any(p in ("", ".", "..") or set(p) & set("\\:/") for p in rest):
                 raise SaveImportError(f"unsafe path {'/'.join(parts)}")
             return tuple(rest)
     return None
@@ -99,6 +100,9 @@ def save_name(files, folder):
 def install(files, save_dir, replace=False, dry_run=False):
     """copy the save folders in; returns [(folder, name, what happened)]"""
     root = Path(save_dir) / "UDATA" / TITLE
+    for key in files:
+        if not root.joinpath(*key).resolve().is_relative_to(root.resolve()):
+            raise SaveImportError(f"unsafe path {'/'.join(key)}")
     stamp = time.strftime("%Y%m%d-%H%M%S")
     report = []
     for folder in sorted({k[0] for k in files if len(k) > 1}):

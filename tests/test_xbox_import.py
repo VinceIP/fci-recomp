@@ -114,5 +114,12 @@ def test_dry_run_writes_nothing(tmp_path):
 def test_rejects_unsafe_paths_and_other_titles(tmp_path):
     with pytest.raises(xbox_import.SaveImportError):
         xbox_import.read_source(write_zip(tmp_path / "bad.zip", {"UDATA/55530008/../../evil.sav": b"x" * 40}))
+    for name in ("SAVE/C:\\Users\\x\\pwn.txt", "SAVE/..\\..\\pwn.txt", "SAVE/D:pwn.txt"):
+        with pytest.raises(xbox_import.SaveImportError):
+            xbox_import.read_source(write_zip(tmp_path / "win.zip", {"UDATA/55530008/" + name: b"x"}))
     with pytest.raises(xbox_import.SaveImportError):
         xbox_import.read_source(write_zip(tmp_path / "other.zip", {"UDATA/4D530004/ABC/x.sav": b"x" * 40}))
+    # install checks every destination too, whatever built the file list
+    with pytest.raises(xbox_import.SaveImportError):
+        xbox_import.install({("SAVE", "..", "..", "pwn.txt"): b"x"}, tmp_path / "save")
+    assert not (tmp_path / "pwn.txt").exists()
