@@ -58,9 +58,9 @@ def find_toolchain(work, accept_license, download=False):
         tc = toolchain.downloaded(folder) if download else toolchain.discover(folder)
         if not tc:
             raise toolchain.ToolchainError("not downloaded yet")
-    except toolchain.ToolchainError:
+    except toolchain.ToolchainError as e:
         if not download:
-            print("Visual Studio with the C++ tools is not installed; downloading Microsoft's compiler instead.")
+            print(f"Visual Studio is not used: {e}\nDownloading Microsoft's compiler instead.")
         try:
             msvc.fetch(folder, accept_license)
         except msvc.DownloadError as e:
