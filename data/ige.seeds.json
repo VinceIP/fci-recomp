@@ -467,6 +467,34 @@
 "evidence": "data pointer into code not covered by any base-lift function"
 },
 {
+"start": "0x0049DF9C",
+"evidence": "handler in the CRT x87 math dispatch table for sinh, tanh"
+},
+{
+"start": "0x004A10CC",
+"evidence": "handler in the CRT x87 math dispatch table for sinh (0x0063048A)"
+},
+{
+"start": "0x004A10E5",
+"evidence": "handler in the CRT x87 math dispatch table for tanh (0x006304CA); measured runtime target (visible stop)"
+},
+{
+"start": "0x004A111E",
+"evidence": "handler in the CRT x87 math dispatch table for cosh (0x006304AA)"
+},
+{
+"start": "0x004A1140",
+"evidence": "handler in the CRT x87 math dispatch table for sinh (0x0063048A)"
+},
+{
+"start": "0x004A114D",
+"evidence": "handler in the CRT x87 math dispatch table for cosh (0x006304AA)"
+},
+{
+"start": "0x004A116D",
+"evidence": "handler in the CRT x87 math dispatch table for tanh (0x006304CA)"
+},
+{
 "start": "0x004E71C0",
 "evidence": "instruction immediate into code not covered by any base-lift function"
 },

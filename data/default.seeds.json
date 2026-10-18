@@ -3757,6 +3757,42 @@
 "observed": true
 },
 {
+"start": "0x004F33CD",
+"evidence": "handler in the CRT x87 math dispatch table for exp (0x006318B2)"
+},
+{
+"start": "0x004F34FD",
+"evidence": "handler in the CRT x87 math dispatch table for exp (0x006318B2)"
+},
+{
+"start": "0x004F3B84",
+"evidence": "handler in the CRT x87 math dispatch table for sinh, tanh"
+},
+{
+"start": "0x004F3B9A",
+"evidence": "handler in the CRT x87 math dispatch table for exp, sinh, cosh, tanh"
+},
+{
+"start": "0x00500275",
+"evidence": "handler in the CRT x87 math dispatch table for tanh (0x00635D3A); measured runtime target (visible stop)"
+},
+{
+"start": "0x005002AE",
+"evidence": "handler in the CRT x87 math dispatch table for cosh (0x00635D1A)"
+},
+{
+"start": "0x005002D0",
+"evidence": "handler in the CRT x87 math dispatch table for sinh (0x00635CFA)"
+},
+{
+"start": "0x005002DD",
+"evidence": "handler in the CRT x87 math dispatch table for cosh (0x00635D1A)"
+},
+{
+"start": "0x005002FD",
+"evidence": "handler in the CRT x87 math dispatch table for tanh (0x00635D3A)"
+},
+{
 "start": "0x005006D8",
 "evidence": "data pointer into code not covered by any base-lift function"
 },
