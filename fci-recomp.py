@@ -32,7 +32,7 @@ import subprocess
 import sys
 import time
 
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 REPO = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO / "tools"))
 IMAGES = {"game": "default.xbe", "editor": "ige.xbe"}

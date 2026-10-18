@@ -13,11 +13,9 @@ This project was made using extensive AI assistance and LLM-related tools. A hum
 
 Regardless of your stance on AI in software development, it's my hope that this project brings value to fans of this game and to those who care about game preservation. This project will be an ongoing development effort. It is not a "one-shot", and not intended to be a quick and dirty, low-quality effort. Please feel free to raise an issue if you spot any aspects of this project that could be refactored, improved, or de-slopped.
 
-<!-- screenshots -->
-
 ## Status
 
-**Version 0.1.0** - story mode and the map editor are fully functioning, as well as saving/loading custom maps
+**Version 0.1.1** - story mode and the map editor are fully functioning, as well as saving/loading custom maps
 and story mode progress. Enhanced visual features powered by a DirectX 12 renderer are implemented.
 Mouse and keyboard controls have been implemented and are customizable.
 
@@ -72,8 +70,7 @@ to your desired settings. Save and relaunch the game.
 - May have some memory management issues, particularly when switching between the map editor mode and back again.
 - Locked to 30 fps for now.
 - The window is blurry when Windows display scaling is above 100%.
-- Not yet tested: the whole single player mode end to end, multiplayer or splitscreen, and importing saves from a
-  real Xbox.
+- Not yet tested: the whole single player mode end to end, multiplayer or splitscreen.
 
 Logs of crashed sessions are kept in `%APPDATA%\fci-recomp\logs`. Consider raising an issue and attaching a crash
 log if your game crashes, or report any other technical issues.

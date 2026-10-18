@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.1.1] - 2026-10-18
+
+### Added
+
+- Import save games and user maps copied from a real Xbox: Action Replay zips or a copied `UDATA` folder.
+  Run `python -B tools/xbox_import.py <zip or folder>...`; it installs them into the save folder so the
+  game accepts them. Existing saves are left alone unless `--replace`, which backs them up first, and
+  `--dry-run` only reports. Imported user maps appear in Splitscreen and System Link map selection.
+
+### Fixed
+
+- Firing the carbine or the scout rifle crashed the game and the map editor's Jump In Map (#18).
+- Every user map showed as "Damaged Map": the game could not list the files inside a map's save folder.
+
+Built against xboxrecomp 193e2995 and Xbox XBE Recomp 65e959d4. Supported disc: title 55530008,
+version 1 (`data/disc.json`).
+
 ## [0.1.0] - 2026-10-17
 
 First public release.
