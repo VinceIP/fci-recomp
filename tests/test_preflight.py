@@ -21,7 +21,7 @@ def levels(found):
 def test_git_missing_is_a_warning_with_the_link(monkeypatch):
     monkeypatch.setattr(preflight.shutil, "which", lambda name: None)
     [(level, text)] = preflight.check_git()
-    assert level == "warning" and "git not found" in text and preflight.GIT_URL in text
+    assert level == "Warning" and "git not found" in text and preflight.GIT_URL in text
     monkeypatch.setattr(preflight.shutil, "which", lambda name: "C:/git.exe")
     assert preflight.check_git() == []
 
@@ -32,7 +32,7 @@ def test_compiler_says_why_visual_studio_is_not_used(monkeypatch, tmp_path):
 
     monkeypatch.setattr(toolchain, "find_msvc", no_vs)
     [(level, text)] = preflight.check_compiler(tmp_path)
-    assert level == "warning" and "No Visual Studio" in text and preflight.VS_URL in text
+    assert level == "Warning" and "No Visual Studio" in text and preflight.VS_URL in text
     # a finished download, or asking for one, needs nothing said
     monkeypatch.setattr(toolchain, "downloaded", lambda folder: {"msvc": "14.51"})
     assert preflight.check_compiler(tmp_path) == []
@@ -46,12 +46,12 @@ def test_space_counts_what_each_drive_needs(monkeypatch, tmp_path):
     free["value"] = 3 * preflight.GB
     [(level, text)] = preflight.check_space(tmp_path / "work", tmp_path / "install", 2, True)
     # one drive for both: game files, two parts and the compiler
-    assert level == "warning" and "3.0 GB free" in text and "about 6 GB" in text
+    assert level == "Warning" and "3.0 GB free" in text and "at least 6 GB" in text
     (tmp_path / "install" / "game").mkdir(parents=True)
     (tmp_path / "install" / "game" / "default.xbe").write_bytes(b"")
     free["value"] = 1.5 * preflight.GB
     [(_, text)] = preflight.check_space(tmp_path / "work", tmp_path / "install", 1, False)
-    assert "about 1 GB" in text  # the game's files are there already
+    assert "at least 1 GB" in text  # the game's files are there already
 
 
 def test_long_onedrive_and_unwritable_folders(monkeypatch, tmp_path):
@@ -60,7 +60,7 @@ def test_long_onedrive_and_unwritable_folders(monkeypatch, tmp_path):
     assert "260 character" in preflight.check_folder(deep, "build")[0][1]
     monkeypatch.setenv("OneDrive", str(tmp_path))
     [(level, text)] = preflight.check_folder(tmp_path / "w", "build")
-    assert level == "warning" and "OneDrive" in text
+    assert level == "Warning" and "OneDrive" in text
 
     def refuse(self, data):
         raise PermissionError("denied")
@@ -68,13 +68,13 @@ def test_long_onedrive_and_unwritable_folders(monkeypatch, tmp_path):
     monkeypatch.delenv("OneDrive")
     monkeypatch.setattr(Path, "write_bytes", refuse)
     [(level, text)] = preflight.check_folder(tmp_path / "w", "build")
-    assert level == "error" and "cannot write" in text
+    assert level == "Error" and "write permissions" in text
 
 
 def test_report_stops_only_on_errors(capsys):
-    assert preflight.report([("warning", "a")])
-    assert not preflight.report([("warning", "a"), ("error", "b")])
-    assert capsys.readouterr().out == "warning: a\nwarning: a\nerror: b\n"
+    assert preflight.report([("Warning", "a")])
+    assert not preflight.report([("Warning", "a"), ("Error", "b")])
+    assert capsys.readouterr().out == "Warning: a\nWarning: a\nError: b\n"
 
 
 @pytest.mark.skipif(not shutil.which("git"), reason="needs git")

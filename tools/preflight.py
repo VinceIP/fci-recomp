@@ -50,7 +50,7 @@ def check_git():
         return []
     return [
         (
-            "Warning:",
+            "Warning",
             "git not found on this machine. The recompiler toolkit will be downloaded as source zips "
             f"from GitHub instead. Consider installing Git if errors occur: {GIT_URL}",
         )
@@ -72,7 +72,7 @@ def check_compiler(work, download=False):
             return []
         return [
             (
-                "Warning:",
+                "Warning",
                 f"Visual Studio is not used: {e} Microsoft's compiler and the Windows SDK will be "
                 f'downloaded instead (about 400 MB). Visual Studio with "Desktop development with C++" '
                 f"avoids that: {VS_URL}",
@@ -98,9 +98,7 @@ def check_space(work, install, parts, download_compiler):
     for drive, n in need.items():
         free = shutil.disk_usage(drive).free
         if free < n + GB:  # a gigabyte to spare
-            found.append(
-                ("Warning:", f"{drive} has {free / GB:.1f} GB free. Build requires at least {n / GB:.0f} GB.")
-            )
+            found.append(("Warning", f"{drive} has {free / GB:.1f} GB free. Build requires at least {n / GB:.0f} GB."))
     return found
 
 
@@ -110,7 +108,7 @@ def check_folder(path, what):
     if len(str(path)) > LONG_PATH:
         found.append(
             (
-                "Warning:",
+                "Warning",
                 f"the {what} folder's path is {len(str(path))} characters long ({path}); files within "
                 "can pass Windows' 260 character limit. Use a shorter folder path if errors occur.",
             )
@@ -120,7 +118,7 @@ def check_folder(path, what):
         if root and path.is_relative_to(Path(root).resolve()):
             found.append(
                 (
-                    "Warning:",
+                    "Warning",
                     f"the {what} folder is in OneDrive ({path}); syncing can lock or offload files during the "
                     "build. Consider moving fci-recomp outside of OneDrive.",
                 )
@@ -134,7 +132,7 @@ def check_folder(path, what):
     except OSError:
         found.append(
             (
-                "Error:",
+                "Error",
                 f"Invalid write permissions in {base}.",
             )
         )
@@ -145,14 +143,14 @@ def check_system():
     found = []
     machine = platform.machine().upper()
     if machine not in ("AMD64", "X86_64", "ARM64"):
-        found.append(("Error:", f"64-bit Windows is required. (detected {machine or 'unknown'})"))
+        found.append(("Error", f"64-bit Windows is required. (detected {machine or 'unknown'})"))
     elif machine == "ARM64":
-        found.append(("Warning:", "Detected ARM64. This architecture is untested and may cause issues."))
+        found.append(("Warning", "Detected ARM64. This architecture is untested and may cause issues."))
     if sys.getwindowsversion().major < 10:
-        found.append(("Error:", "Windows 10 or 11 is required."))
+        found.append(("Error", "Windows 10 or 11 is required."))
     memory = memory_gb()
     if memory < 7.5:
-        found.append(("Warning:", f"{memory:.0f} GB of memory: the build runs one compiler at a time and takes longer"))
+        found.append(("Warning", f"{memory:.0f} GB of memory: the build runs one compiler at a time and takes longer"))
     return found
 
 
@@ -171,7 +169,7 @@ def report(found):
     """print the findings; True when the build can go on"""
     for level, text in found:
         print(f"{level}: {text}")
-    return not any(level == "error" for level, _ in found)
+    return not any(level == "Error" for level, _ in found)
 
 
 def main():

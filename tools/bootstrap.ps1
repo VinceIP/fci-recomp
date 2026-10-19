@@ -59,7 +59,7 @@ if (-not (Test-Path (Join-Path $Root 'ready')) -or -not (Test-Path $Python)) {
         Expand-Archive $wheel (Join-Path $Root 'tools\Lib\site-packages')
         Remove-Item $wheel
         & $Python -c 'import capstone, ssl, ctypes, winreg'
-        if ($LASTEXITCODE) { throw 'error: Python couldn''t start' }
+        if ($LASTEXITCODE) { throw 'Python couldn''t start' }
     } catch {
         Write-Host "error: Python failed to download. $($_.Exception.Message)"
         Write-Host 'Check Internet connection.'
