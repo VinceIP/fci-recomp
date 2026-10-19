@@ -1546,7 +1546,7 @@ void D3D12Backend::LoadShaderCache() {
             fclose(f);
         }
     }
-    LOGI("d3d12: %u shaders from %s", n, shader_cache_.string().c_str());
+    LOGI("d3d12: %u shaders from %s", n, reinterpret_cast<const char*>(shader_cache_.u8string().c_str()));
 }
 
 // one write per shader, the file opened for it: the game and the editor take turns with the same file
@@ -3286,9 +3286,12 @@ void D3D12Backend::MeasureLatency(int64_t present_ns) {
         QueryPerformanceFrequency(&f);
         return 1e9 / double(f.QuadPart);
     }();
-    g_perf.lat_frame += diag::g_frame_ns.load() / 1e6;
-    g_perf.lat_queue += (present_ns - diag::g_swap_ns.load()) / 1e6;
-    g_perf.lat_n++;
+    uint64_t i = presents_ % diag::kLatencyRing;  // this present's entry (MeasureLatency runs before presents_++)
+    if (int64_t frame = diag::g_frame_ns[i].load(); frame >= 0) {
+        g_perf.lat_frame += frame / 1e6;
+        g_perf.lat_queue += (present_ns - diag::g_swap_ns[i].load()) / 1e6;
+        g_perf.lat_n++;
+    }
     UINT id = 0;
     if (SUCCEEDED(swap_->GetLastPresentCount(&id))) presented_ns_[id % 16] = present_ns;
     DXGI_FRAME_STATISTICS st{};

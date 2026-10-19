@@ -301,7 +301,10 @@ void VerticalBlank(X86Context& ctx) {
             last_swaps = swaps;
             if (idle >= 2 && fci_nv2a_overlay_on()) {
                 GuestLock lock(g_lock);
-                if (ComposeOverlay(g_buffers[0])) g_backend->Present(SurfaceOf(g_buffers[0]));
+                if (ComposeOverlay(g_buffers[0])) {
+                    if (diag::Perf()) diag::NotePresent(-1);  // FCI: keeps XBE_PERF's latency ring in step
+                    g_backend->Present(SurfaceOf(g_buffers[0]));
+                }
             }
         }
         SetDev(XDK_CDevice_VBlankCount, count);
@@ -637,9 +640,8 @@ HLE_STDCALL(D3DDevice_Swap, 1) {
     }
     ComposeOverlay(g_buffers[1]);
     if (diag::Perf()) {  // FCI: latency figures (diag.h)
-        int64_t now = diag::NowNs(), start = diag::g_frame_start_ns.load();
-        diag::g_frame_ns = start ? now - start : 0;
-        diag::g_swap_ns = now;
+        int64_t start = diag::g_frame_start_ns.load();
+        diag::NotePresent(start ? diag::NowNs() - start : 0);
     }
     if (g_backend) g_backend->Present(SurfaceOf(g_buffers[1]));
     ReleaseDeferred();
