@@ -15,7 +15,7 @@ Regardless of your stance on AI in software development, it's my hope that this 
 
 ## Status
 
-**Version 0.1.1** - story mode and the map editor are fully functioning, as well as saving/loading custom maps
+**Version 0.1.2** - story mode and the map editor are fully functioning, as well as saving/loading custom maps
 and story mode progress. Enhanced visual features powered by a DirectX 12 renderer are implemented.
 Mouse and keyboard controls have been implemented and are customizable.
 
@@ -35,7 +35,7 @@ aren't interested in making custom maps.
 
 - Windows 10 or 11 64-bit, and a GPU that supports Direct3D 12
 - About 10 GB of free space
-- An internet connection, or access to Python, Windows SDK, and MSVC
+- An internet connection, or access to Git, Python, Windows SDK, and MSVC
 - A dump of your own Far Cry Instincts disc (original Xbox, title ID `55530008`, version 1),
 as an ISO or extracted files
 

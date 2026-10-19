@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.1.2] - 2026-10-19
+
+### Added
+
+- Implemented shader caching. Removes micro stuttering caused by compiling shaders on a new game instance. Shaders
+  are stored in a configurable path in fci.ini. Leaving this path empty disables shader caching.
+- Wrote various fixes and edge-case detection for problems running BuildGame.cmd and BuildEditor.cmd. Scripts now
+  check for requirements first. Should resolve issues with building the game for some users.
+
+### Fixed
+
+- Building without Git stopped with “does not match its digest” (#25).
+- Downloading the compiler failed when the build folder’s path contained a space.
+- BuildGame.cmd failed when started from a PowerShell 7 window.
+- The game couldn’t start from a folder with accented or non-English characters in its path, including the
+  default save folder for such Windows user names.
+
+Built against xboxrecomp 193e2995 and Xbox XBE Recomp 65e959d4. Supported disc: title 55530008,
+version 1 (`data/disc.json`).
+
 ## [0.1.1] - 2026-10-18
 
 ### Added
