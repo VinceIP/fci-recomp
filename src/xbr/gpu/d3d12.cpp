@@ -78,6 +78,13 @@ struct Perf {
     double sig = 0;
     double texup = 0;
     double compile = 0;
+    double pso = 0;  // FCI: creating draw pipelines
+    // FCI: latency, ms summed over frames (MeasureLatency)
+    double lat_frame = 0;
+    double lat_queue = 0;
+    double lat_shown = 0;
+    uint64_t lat_n = 0;
+    uint64_t lat_shown_n = 0;
     double clear = 0;
     double copy = 0;
     double present = 0;
@@ -675,6 +682,10 @@ private:
     ComPtr<ID3D12RootSignature> root_;
     std::unordered_map<uint64_t, ComPtr<ID3DBlob>> blobs_;
     std::unordered_map<uint64_t, uint64_t> shader_src_;  // vertex and pixel program keys to source hash
+    // FCI: compiled shaders kept across sessions (RECOMP_FCI_XBR_SHADER_CACHE); empty: none
+    std::filesystem::path shader_cache_;
+    void LoadShaderCache();
+    void SaveShader(uint64_t hash, ID3DBlob* code);
     std::unordered_map<uint64_t, ComPtr<ID3D12PipelineState>> psos_;
     std::unordered_map<uint64_t, uint32_t> samplers_;
     uint32_t smp_used_ = 0;
@@ -739,6 +750,11 @@ private:
     Assembled asm_;  // kept between draws for its buffers
     bool tearing_ = false;
     uint64_t presents_ = 0;
+    // FCI: XBE_PERF latency: when each recent present was made (by DXGI's present count), to compare with when
+    // DXGI says it was shown
+    int64_t presented_ns_[16] = {};
+    UINT shown_count_ = 0;
+    void MeasureLatency(int64_t present_ns);
     double fps_ = 0;
     std::chrono::steady_clock::time_point fps_t_ = std::chrono::steady_clock::now();
     uint64_t fps_n_ = 0;
@@ -755,6 +771,7 @@ bool D3D12Backend::Init(uint32_t width, uint32_t height) {
     if (!CreateRootSignature()) return false;
     CreateFrames();
     CreateGammaLut();
+    LoadShaderCache();
 #if FCI_XBR_IMGUI
     ImGui_ImplDX12_Init(dev_.Get(), kFrames, DXGI_FORMAT_B8G8R8A8_UNORM, ui_heap_.Get(),
                         ui_heap_->GetCPUDescriptorHandleForHeapStart(), ui_heap_->GetGPUDescriptorHandleForHeapStart());
@@ -1467,7 +1484,82 @@ ID3DBlob* D3D12Backend::Compile(const std::string& src, const char* entry, const
         return nullptr;
     }
     blobs_[hash] = code;
+    SaveShader(hash, code.Get());
     return code.Get();
+}
+
+// FCI: the shader cache file: a header, then per shader its source hash (Compile's), size, a hash of the
+// code, and the code. Compiling on first use stalled the frame (about 20 ms a shader, hundreds of ms when
+// a cutscene or a weapon's first shot brings new effects); a later session finds them here.
+namespace {
+constexpr char kShaderCacheMagic[8] = {'F', 'C', 'I', 'S', 'H', 'D', '0', '1'};
+// D3DCompile's flags and the record layout: a change makes the old file unusable, and it is started again
+constexpr uint64_t kShaderCacheSalt = D3DCOMPILE_OPTIMIZATION_LEVEL1 | 1ull << 32;
+struct ShaderRecord {
+    uint64_t hash;
+    uint64_t check;
+    uint32_t size;
+    uint32_t pad;
+};
+}  // namespace
+
+// reads the whole file at start (one read: a few MB, quick on a hard disk as well)
+void D3D12Backend::LoadShaderCache() {
+    std::filesystem::path dir = app::ShaderCacheDir();
+    if (dir.empty()) return;
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    shader_cache_ = dir / "shaders.bin";
+    std::vector<uint8_t> data;
+    if (FILE* f = _wfopen(shader_cache_.c_str(), L"rb")) {
+        _fseeki64(f, 0, SEEK_END);
+        data.resize(size_t(_ftelli64(f)));
+        _fseeki64(f, 0, SEEK_SET);
+        if (fread(data.data(), 1, data.size(), f) != data.size()) data.clear();
+        fclose(f);
+    }
+    constexpr size_t kHeader = sizeof(kShaderCacheMagic) + 8;
+    size_t at = kHeader, good = 0;
+    bool usable = data.size() >= at && !std::memcmp(data.data(), kShaderCacheMagic, sizeof(kShaderCacheMagic)) &&
+                  !std::memcmp(data.data() + sizeof(kShaderCacheMagic), &kShaderCacheSalt, 8);
+    if (usable) good = kHeader;
+    uint32_t n = 0;
+    while (usable && data.size() - at >= sizeof(ShaderRecord)) {
+        ShaderRecord r;
+        std::memcpy(&r, data.data() + at, sizeof(r));
+        const uint8_t* code = data.data() + at + sizeof(r);
+        if (r.size > data.size() - at - sizeof(r) || Hash(code, r.size) != r.check) break;
+        ComPtr<ID3DBlob> blob;
+        if (FAILED(D3DCreateBlob(r.size, &blob))) break;
+        std::memcpy(blob->GetBufferPointer(), code, r.size);
+        blobs_[r.hash] = blob;
+        at += sizeof(r) + r.size;
+        good = at;
+        n++;
+    }
+    // a missing, older or damaged file: keep what was read and start the file again from that
+    if (!usable || good != data.size()) {
+        if (FILE* f = _wfopen(shader_cache_.c_str(), L"wb")) {
+            fwrite(kShaderCacheMagic, 1, sizeof(kShaderCacheMagic), f);
+            fwrite(&kShaderCacheSalt, 1, 8, f);
+            if (good > kHeader) fwrite(data.data() + kHeader, 1, good - kHeader, f);
+            fclose(f);
+        }
+    }
+    LOGI("d3d12: %u shaders from %s", n, reinterpret_cast<const char*>(shader_cache_.u8string().c_str()));
+}
+
+// one write per shader, the file opened for it: the game and the editor take turns with the same file
+void D3D12Backend::SaveShader(uint64_t hash, ID3DBlob* code) {
+    if (shader_cache_.empty()) return;
+    ShaderRecord r{hash, Hash(code->GetBufferPointer(), code->GetBufferSize()), uint32_t(code->GetBufferSize()), 0};
+    std::vector<uint8_t> rec(sizeof(r) + r.size);
+    std::memcpy(rec.data(), &r, sizeof(r));
+    std::memcpy(rec.data() + sizeof(r), code->GetBufferPointer(), r.size);
+    if (FILE* f = _wfopen(shader_cache_.c_str(), L"ab")) {
+        fwrite(rec.data(), 1, rec.size(), f);
+        fclose(f);
+    }
 }
 
 // a full screen pass's pipeline: solid, no culling, one target, writing all channels; callers set the blend
@@ -1653,6 +1745,7 @@ ID3D12PipelineState* D3D12Backend::EnsurePipeline(const PsoKey& k, ID3DBlob* vs,
     FillPipelineDesc(k, vs, ps, d);
     ComPtr<ID3D12PipelineState> pso;
     g_perf.psos++;
+    PerfScope perf_pso{g_perf.pso};
     if (FAILED(dev_->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&pso)))) LOGE("d3d12: pipeline creation failed");
     psos_[h] = pso;
     return pso.Get();
@@ -3123,11 +3216,15 @@ void LogPerf() {
              g_perf_sync_late.exchange(0) / n);
         LOGI("perf: per frame %.0f draws (%.0f raw) %.0fk verts %.1f MB upload %.1f overflow | %.0f checks %.2f MB "
              "hashed | %.1f tex uploads %.2f MB, %.1f new tex, %.1f new targets, %.1f target uploads, %.1f shrinks, "
-             "%.1f read-backs %.1f late | %llu shaders %llu psos this second",
+             "%.1f read-backs %.1f late | %llu shaders %llu psos (%.0f ms) this second",
              p.draws / n, p.raw / n, p.verts / n / 1000.0, p.upload / n / 1048576.0, p.overflow / n, p.sigs / n,
              p.sig_bytes / n / 1048576.0, p.texups / n, p.texup_bytes / n / 1048576.0, p.newtex / n,
              p.targets / n, p.rtups / n, p.shrinks / n, p.syncs / n, p.lates / n,
-             (unsigned long long)p.shaders, (unsigned long long)p.psos);
+             (unsigned long long)p.shaders, (unsigned long long)p.psos, p.pso);
+        if (p.lat_n)
+            LOGI("perf: latency per frame: title frame %.1f ms (input read to Swap), render thread %.1f ms (Swap to present), shown %.1f ms after present (%llu of %llu frames measured)",
+                 p.lat_frame / p.lat_n, p.lat_queue / p.lat_n, p.lat_shown_n ? p.lat_shown / p.lat_shown_n : 0.0,
+                 (unsigned long long)p.lat_shown_n, (unsigned long long)p.lat_n);
         g_perf = Perf{};
         perf_start = PerfClock::now();
         perf_frames = 0;
@@ -3163,11 +3260,13 @@ void D3D12Backend::Present(const Surface& front) {
     bool vsync = app::Get().vsync && !never_wait;
     UINT flags = (!vsync && tearing_ ? DXGI_PRESENT_ALLOW_TEARING : 0) | (never_wait ? DXGI_PRESENT_DO_NOT_WAIT : 0);
     auto perf_swap = PerfClock::now();
+    int64_t present_ns = diag::Perf() ? diag::NowNs() : 0;
     HRESULT hr = swap_->Present(vsync ? 1 : 0, flags);
     if (hr == DXGI_ERROR_WAS_STILL_DRAWING) hr = S_OK;
     if (Lost(hr)) DeviceLost(dev_.Get(), "Present", hr);
     if (FAILED(hr)) LOG_FIRST(4, "d3d12: Present failed (%08lX)", unsigned long(hr));
     g_perf.swap += PerfMs(perf_swap);
+    if (present_ns && SUCCEEDED(hr)) MeasureLatency(present_ns);
 
     presents_++;
     presents_seen_.store(presents_);
@@ -3178,6 +3277,32 @@ void D3D12Backend::Present(const Surface& front) {
     CountFps();
     if (diag::Perf()) LogPerf();
     ApplySettings();
+}
+
+// FCI: the title's frame (input read to Swap), the render thread's lag behind Swap, and present to shown
+void D3D12Backend::MeasureLatency(int64_t present_ns) {
+    static const double ns_per_qpc = [] {
+        LARGE_INTEGER f;
+        QueryPerformanceFrequency(&f);
+        return 1e9 / double(f.QuadPart);
+    }();
+    uint64_t i = presents_ % diag::kLatencyRing;  // this present's entry (MeasureLatency runs before presents_++)
+    if (int64_t frame = diag::g_frame_ns[i].load(); frame >= 0) {
+        g_perf.lat_frame += frame / 1e6;
+        g_perf.lat_queue += (present_ns - diag::g_swap_ns[i].load()) / 1e6;
+        g_perf.lat_n++;
+    }
+    UINT id = 0;
+    if (SUCCEEDED(swap_->GetLastPresentCount(&id))) presented_ns_[id % 16] = present_ns;
+    DXGI_FRAME_STATISTICS st{};
+    if (FAILED(swap_->GetFrameStatistics(&st)) || st.PresentCount == shown_count_ || !st.PresentCount) return;
+    shown_count_ = st.PresentCount;
+    int64_t made = presented_ns_[st.PresentCount % 16];
+    double ms = (double(st.SyncQPCTime.QuadPart) * ns_per_qpc - double(made)) / 1e6;
+    if (made && ms >= 0 && ms < 1000) {
+        g_perf.lat_shown += ms;
+        g_perf.lat_shown_n++;
+    }
 }
 
 void D3D12Backend::ApplySettings() {
