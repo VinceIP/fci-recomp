@@ -16,6 +16,7 @@ import json
 import os
 from pathlib import Path
 import re
+import struct
 import subprocess
 import sys
 
@@ -156,6 +157,19 @@ REFERENCE = re.compile(rb"\bsub_[0-9A-F]{8}\b")
 
 def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def write_manifest_res(manifest, out):
+    """a compiled resource file (.res) holding the manifest as the executable's RT_MANIFEST 1. The linker takes
+    it through cvtres, which comes with the compiler; /MANIFESTINPUT would need the SDK's mt.exe, which the
+    downloaded compiler lacks"""
+
+    def entry(rtype, name, data, flags):
+        header = struct.pack("<IIHHHHIHHII", len(data), 32, 0xFFFF, rtype, 0xFFFF, name, 0, flags, 0, 0, 0)
+        return header + data + b"\0" * (-len(data) % 4)
+
+    data = Path(manifest).read_bytes()
+    Path(out).write_bytes(entry(0, 0, b"", 0) + entry(24, 1, data, 0x1030))  # the empty first entry every .res has
 
 
 def port_operand(text):
@@ -673,6 +687,8 @@ def main():
     elif action == "link":
         objs = sorted((inputs / "obj").glob("*.obj"))
         out = work / "fci-whole.exe"
+        manifest = work / "fci-whole-manifest.res"
+        write_manifest_res(inputs / "host" / "fci-whole.manifest", manifest)
         argv = (
             [
                 str(link),
@@ -685,12 +701,13 @@ def main():
                 "/PDB:" + str(work / "fci-whole.pdb"),
                 "/MAP:" + str(work / "fci-whole.map"),
                 "/INCREMENTAL:NO",
-                "/MANIFEST:NO",
+                "/MANIFEST:NO",  # src/fci-whole.manifest comes in as a resource
                 "/STACK:16777216",
             ]
             + ["/LIBPATH:" + str(p) for p in libpaths]
             + SYSTEM_LIBS
             + [str(o) for o in objs]
+            + [str(manifest)]
         )
         done = subprocess.run(argv, capture_output=True)
         log = (done.stdout + done.stderr).decode(errors="replace")
