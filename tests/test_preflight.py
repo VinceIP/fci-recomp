@@ -55,8 +55,11 @@ def test_space_counts_what_each_drive_needs(monkeypatch, tmp_path):
 
 
 def test_long_onedrive_and_unwritable_folders(monkeypatch, tmp_path):
+    monkeypatch.delenv("OneDrive", raising=False)
+    # measured from the temp folder, wherever it is (CI's is about 100 characters already)
+    monkeypatch.setattr(preflight, "LONG_PATH", len(str(tmp_path)) + 10)
     assert preflight.check_folder(tmp_path / "w", "build") == []
-    deep = tmp_path / ("x" * preflight.LONG_PATH)
+    deep = tmp_path / ("x" * 20)
     assert "260 character" in preflight.check_folder(deep, "build")[0][1]
     monkeypatch.setenv("OneDrive", str(tmp_path))
     [(level, text)] = preflight.check_folder(tmp_path / "w", "build")

@@ -154,13 +154,13 @@ def check_system():
     return found
 
 
-def checks(work, install, parts=1, download_compiler=False, need_install=True):
+def checks(work, install, parts=1, download_compiler=False):
     found = check_system() + check_git()
     compiler = check_compiler(work, download_compiler)
     found += compiler
     found += check_space(work, install, parts, bool(compiler) or download_compiler)
     found += check_folder(work, "build")
-    if need_install and Path(install).resolve() != Path(work).resolve():
+    if Path(install).resolve() != Path(work).resolve():
         found += check_folder(install, "install")
     return found
 

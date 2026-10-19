@@ -53,11 +53,11 @@ NETWORK_HINT = (
 )
 
 
-def preflight(work, install, parts, download_compiler, need_install=True):
+def preflight(work, install, parts, download_compiler):
     """what this PC lacks, said before anything starts; stops only on what the build cannot get past"""
     import preflight as checks
 
-    if not checks.report(checks.checks(work, install, parts, download_compiler, need_install)):
+    if not checks.report(checks.checks(work, install, parts, download_compiler)):
         raise SystemExit(1)
 
 
@@ -213,7 +213,7 @@ def editor(a):
     install, work = Path(a.install).resolve(), Path(a.work).resolve()
     if not (install / EXES["game"]).exists() or not (install / "game" / "ige.xbe").exists():
         raise SystemExit(f"error: set up the game in {install} first (BuildGame.cmd or: fci-recomp.py setup)")
-    preflight(work, install, 1, a.download_compiler, need_install=False)
+    preflight(work, install, 1, a.download_compiler)
     tc = find_toolchain(work, a.accept_msvc_license, a.download_compiler)
     fetch_deps(work)
     translate(["editor"], install, work)
