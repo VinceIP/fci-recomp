@@ -7,8 +7,8 @@
   xbe-recomp      TGP482's Xbox XBE Recomp: its XDK 5849 signature list (the D3D and DirectSound
                   layer it also provides is vendored in src/xbr)
 
-Each is checked against a digest of its files (SHA-256 over every path and file content, as stored in
-git), so a zip download and a git clone are verified the same way. With git on the PATH the tool
+Each is checked against a digest of its files (SHA-256 over every path and file content, CRLF counted
+as LF), so a zip download and a git clone are verified the same way. With git on the PATH the tool
 clones; otherwise it downloads GitHub's zip of the commit. Line endings are kept as stored: the
 lifter fixes and runtime patches match the files byte for byte.
 """
@@ -27,28 +27,33 @@ DEPS = {
     "xboxrecomp": {
         "repo": "sp00nznet/xboxrecomp",
         "commit": "193e2995ffaec871bb3be43a43bd66aa5fccfeb1",  # v0.13.1
-        "digest": "313cdb5fa5ca42110a99511fdd930fc4d41c901f1c1cdfcaf351aee48155b8e8",
+        "digest": "77c7dcf7e05860df8b69be842f0e7fcbe20275c80b321f57539db77e725f04fb",
     },
     "xbe-recomp": {
         "repo": "TGP482/Xbox-XBERecomp",
         "commit": "65e959d4a5fd0c171dc7b17f3f9b44bab00928e6",
-        "digest": "25ab7d19cf05f2a981cf535e60c8a2e2654163111fb7d56239dc4533bbd9d1fc",
+        "digest": "60ce07b297c7474bb8cdd9922143a4c10120546516b9dd09e4ed31312d06dd94",
     },
 }
 
 
 def tree_digest(root):
-    """SHA-256 over the sorted relative paths and contents of every file under root, .git excluded"""
+    """SHA-256 over the sorted relative paths and contents of every file under root, .git excluded.
+    CRLF counts as LF: a repository with "text=auto" checks out with CRLF from git on Windows and LF
+    from GitHub's zip, and copies fetched either way must verify."""
     h = hashlib.sha256()
     files = sorted(p for p in Path(root).rglob("*") if p.is_file() and ".git" not in p.relative_to(root).parts)
     for p in files:
         h.update(p.relative_to(root).as_posix().encode() + b"\0")
-        h.update(hashlib.sha256(p.read_bytes()).digest())
+        h.update(hashlib.sha256(p.read_bytes().replace(b"\r\n", b"\n")).digest())
     return h.hexdigest()
 
 
 def git_fetch(source, commit, dst):
-    run = lambda *a: subprocess.run(["git", "-c", "core.autocrlf=false", *a], check=True, capture_output=True)  # noqa: E731
+    # files as stored (core.eol=lf for "text=auto"), the same bytes the zip download has
+    run = lambda *a: subprocess.run(  # noqa: E731
+        ["git", "-c", "core.autocrlf=false", "-c", "core.eol=lf", *a], check=True, capture_output=True
+    )
     run("clone", "--quiet", "--no-checkout", source, str(dst))
     run("-C", str(dst), "checkout", "--quiet", "--detach", commit)
 
