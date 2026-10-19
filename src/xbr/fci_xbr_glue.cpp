@@ -558,6 +558,8 @@ std::filesystem::path ExeDir()
     GetModuleFileNameW(nullptr, path, MAX_PATH);
     return std::filesystem::path(path).parent_path();
 }
+std::filesystem::path ShaderCacheDir()
+{ return std::filesystem::u8path(fci_gfx::Value("RECOMP_FCI_XBR_SHADER_CACHE")); }
 
 // the render window, in the frame (1280x960 client), on a thread of its own that pumps its messages
 void* Window()

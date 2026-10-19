@@ -18,6 +18,7 @@ void RenderScale(uint32_t guest_width, uint32_t guest_height, float& sx, float& 
 bool Widescreen();
 void SetWidescreen(bool on);  // FCI: from the title's CreateDevice
 std::filesystem::path ExeDir();
+std::filesystem::path ShaderCacheDir();  // FCI: RECOMP_FCI_XBR_SHADER_CACHE, empty for none
 void* Window();  // HWND
 void SplashFirstFrame();
 bool HandingOver();

@@ -636,10 +636,16 @@ HLE_STDCALL(D3DDevice_Swap, 1) {
         }
     }
     ComposeOverlay(g_buffers[1]);
+    if (diag::Perf()) {  // FCI: latency figures (diag.h)
+        int64_t now = diag::NowNs(), start = diag::g_frame_start_ns.load();
+        diag::g_frame_ns = start ? now - start : 0;
+        diag::g_swap_ns = now;
+    }
     if (g_backend) g_backend->Present(SurfaceOf(g_buffers[1]));
     ReleaseDeferred();
     fci_status_present();  // RECOMP_FCI_STATUS (fci_threads.c)
     app::Pace();
+    if (diag::Perf()) diag::g_frame_start_ns = diag::NowNs();
     // like the XDK, the surfaces stay put and their memory rotates: titles keep back buffer pointers and copy its data
     uint32_t last = g_buffers[g_buffer_count - 1], data = R32(last + 4), lk = R32(last + 8);
     for (uint32_t i = g_buffer_count - 1; i > 0; i--) {
