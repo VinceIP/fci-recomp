@@ -138,6 +138,12 @@ def cabs_of(msi):
     return sorted(set(m.decode() for m in re.findall(rb"[0-9a-f]{32}\.cab", msi.read_bytes())))
 
 
+def msiexec_command(msi, target, log):
+    """one command line: msiexec wants PROPERTY="value", and opens its usage window (even with /qn) for
+    the "PROPERTY=value" a list argument with a space in the path is quoted as"""
+    return f'msiexec.exe /a "{msi}" /qn /l*v "{log}" TARGETDIR="{target}"'
+
+
 def current(info):
     """a finished download of the packages this version of the script selects"""
     return (
@@ -184,9 +190,11 @@ def fetch(root, accept_license=False, log=print):
                 download(sdk_payloads[cab], sdk_dir)
         for p in msis:
             msi = sdk_dir / p["fileName"].split("\\")[-1]
-            done = subprocess.run(["msiexec.exe", "/a", str(msi), "/quiet", "/qn", f"TARGETDIR={root}"])
+            log = root / "msiexec.log"
+            done = subprocess.run(msiexec_command(msi, root, log))
             if done.returncode:
-                raise DownloadError(f"unpacking {msi.name} failed (msiexec {done.returncode})")
+                raise DownloadError(f"unpacking {msi.name} failed (msiexec {done.returncode}); its log is {log}")
+            log.unlink(missing_ok=True)
             (root / msi.name).unlink(missing_ok=True)  # the administrative install copies the .msi too
     shutil.rmtree(cache)
     tools = sorted((root / "VC" / "Tools" / "MSVC").glob(MSVC + ".*"))

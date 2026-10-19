@@ -251,7 +251,7 @@ int fci_default_launch;
 void fci_config_load(int *argc, char ***argv)
 {
     static char exe_dir[MAX_PATH], xbe[MAX_PATH], game[MAX_PATH], save[MAX_PATH], log_dir[MAX_PATH];
-    static char fixed_log[MAX_PATH];
+    static char fixed_log[MAX_PATH], shader_cache[MAX_PATH], shader_cache_arg[MAX_PATH + 32];
     static char lines[96][512];
     static char *args[120];
     int n = 0, opts = 0, i, have_ini = 0, verbosity = 1, limit = 20;
@@ -267,6 +267,7 @@ void fci_config_load(int *argc, char ***argv)
     snprintf(game, sizeof game, "%s\\game", exe_dir);
     expand("%APPDATA%\\fci-recomp\\profile", save, sizeof save);
     expand("%APPDATA%\\fci-recomp\\logs", log_dir, sizeof log_dir);
+    expand("%APPDATA%\\fci-recomp\\shader-cache", shader_cache, sizeof shader_cache);
     xbe[0] = fixed_log[0] = 0;
     snprintf(ini, sizeof ini, "%s\\fci.ini", exe_dir);
     if ((f = fopen(ini, "r")) != NULL) {
@@ -293,6 +294,8 @@ void fci_config_load(int *argc, char ***argv)
                 expand(v, save, sizeof save);
             else if (!_stricmp(key, "log-dir"))
                 expand(v, log_dir, sizeof log_dir);
+            else if (!_stricmp(key, "shader-cache"))
+                expand(v, shader_cache, sizeof shader_cache);
             else if (!_stricmp(key, "log-verbosity"))
                 verbosity = atoi(v);
             else if (!_stricmp(key, "log-limit"))
@@ -332,6 +335,10 @@ void fci_config_load(int *argc, char ***argv)
     args[n++] = "RECOMP_CVAR_e_obj_view_dist_ratio=64";
     args[n++] = "RECOMP_CVAR_e_obj_lod_ratio=16";
     args[n++] = "RECOMP_CVAR_e_obj_sprite_switch_dist_ratio=16";
+    if (shader_cache[0]) {
+        snprintf(shader_cache_arg, sizeof shader_cache_arg, "RECOMP_FCI_XBR_SHADER_CACHE=%s", shader_cache);
+        args[n++] = shader_cache_arg;
+    }
     for (i = 0; i < opts; i++)
         args[n++] = lines[i];
     args[n] = NULL;

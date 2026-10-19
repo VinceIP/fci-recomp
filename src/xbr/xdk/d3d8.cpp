@@ -301,7 +301,10 @@ void VerticalBlank(X86Context& ctx) {
             last_swaps = swaps;
             if (idle >= 2 && fci_nv2a_overlay_on()) {
                 GuestLock lock(g_lock);
-                if (ComposeOverlay(g_buffers[0])) g_backend->Present(SurfaceOf(g_buffers[0]));
+                if (ComposeOverlay(g_buffers[0])) {
+                    if (diag::Perf()) diag::NotePresent(-1);  // FCI: keeps XBE_PERF's latency ring in step
+                    g_backend->Present(SurfaceOf(g_buffers[0]));
+                }
             }
         }
         SetDev(XDK_CDevice_VBlankCount, count);
@@ -636,10 +639,15 @@ HLE_STDCALL(D3DDevice_Swap, 1) {
         }
     }
     ComposeOverlay(g_buffers[1]);
+    if (diag::Perf()) {  // FCI: latency figures (diag.h)
+        int64_t start = diag::g_frame_start_ns.load();
+        diag::NotePresent(start ? diag::NowNs() - start : 0);
+    }
     if (g_backend) g_backend->Present(SurfaceOf(g_buffers[1]));
     ReleaseDeferred();
     fci_status_present();  // RECOMP_FCI_STATUS (fci_threads.c)
     app::Pace();
+    if (diag::Perf()) diag::g_frame_start_ns = diag::NowNs();
     // like the XDK, the surfaces stay put and their memory rotates: titles keep back buffer pointers and copy its data
     uint32_t last = g_buffers[g_buffer_count - 1], data = R32(last + 4), lk = R32(last + 8);
     for (uint32_t i = g_buffer_count - 1; i > 0; i--) {

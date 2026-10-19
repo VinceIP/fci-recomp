@@ -69,3 +69,10 @@ def test_toolchain_reads_a_download(tmp_path):
     tc = toolchain.downloaded(tmp_path)
     assert tc["msvc"] == msvc.MSVC + ".1" and tc["windows_sdk"] == "10.0.26100.0"
     assert tc["cl"].endswith(str(Path(f"VC/Tools/MSVC/{msvc.MSVC}.1/bin/Hostx64/x64/cl.exe")))
+
+
+def test_msiexec_quotes_each_path_its_own_way(tmp_path):
+    root = tmp_path / "Far Cry Instincts" / "work"
+    cmd = msvc.msiexec_command(root / "a b.msi", root, root / "msiexec.log")
+    assert cmd == f'msiexec.exe /a "{root / "a b.msi"}" /qn /l*v "{root / "msiexec.log"}" TARGETDIR="{root}"'
+    assert '"TARGETDIR=' not in cmd  # the form that opens msiexec's usage window

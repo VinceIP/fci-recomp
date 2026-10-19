@@ -558,6 +558,15 @@ std::filesystem::path ExeDir()
     GetModuleFileNameW(nullptr, path, MAX_PATH);
     return std::filesystem::path(path).parent_path();
 }
+// the option holds the folder in the process's code page (fci_config.c expands %APPDATA% with an "A" call);
+// a name it cannot hold comes out unusable, and then there is no cache, never an exception
+std::filesystem::path ShaderCacheDir()
+{
+    std::string v = fci_gfx::Value("RECOMP_FCI_XBR_SHADER_CACHE");
+    wchar_t w[MAX_PATH];
+    int n = v.empty() ? 0 : MultiByteToWideChar(CP_ACP, 0, v.c_str(), -1, w, MAX_PATH);
+    return n > 0 ? std::filesystem::path(w) : std::filesystem::path();
+}
 
 // the render window, in the frame (1280x960 client), on a thread of its own that pumps its messages
 void* Window()
