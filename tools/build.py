@@ -18,7 +18,6 @@ C one file per compiler, as many at once as --jobs; link fci-whole.exe and fci-k
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import ctypes
 import hashlib
 import json
 import os
@@ -34,6 +33,7 @@ sys.path.insert(0, str(TOOLS))
 import image_profile  # noqa: E402
 import lift as lift_tool  # noqa: E402
 import patches  # noqa: E402
+import preflight  # noqa: E402
 import toolchain  # noqa: E402
 
 DATA = REPO / "data"
@@ -44,23 +44,7 @@ BUILD_TOOLS = ("compile.py", "image_profile.py")
 def default_jobs():
     """one compiler per core, as far as the memory goes: an /O1 compile of a generated file takes up to
     about 2 GB, and the rest of the machine keeps 3 GB"""
-
-    class Status(ctypes.Structure):
-        _fields_ = [
-            ("length", ctypes.c_ulong),
-            ("load", ctypes.c_ulong),
-            ("total", ctypes.c_ulonglong),
-            ("avail", ctypes.c_ulonglong),
-            ("page_total", ctypes.c_ulonglong),
-            ("page_avail", ctypes.c_ulonglong),
-            ("virt_total", ctypes.c_ulonglong),
-            ("virt_avail", ctypes.c_ulonglong),
-            ("ext", ctypes.c_ulonglong),
-        ]
-
-    st = Status(ctypes.sizeof(Status))
-    memory = st.total / 2**30 if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(st)) else 8
-    return max(1, min(os.cpu_count() or 1, int((memory - 3) / 2)))
+    return max(1, min(os.cpu_count() or 1, int((preflight.memory_gb() - 3) / 2)))
 
 
 def stage(image, xbe, lift_dir, deps, case, tc):

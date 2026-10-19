@@ -1,6 +1,6 @@
 """Fetch the two upstream projects the build uses, at the commits this project is tested with.
 
-  python -B tools/deps.py <dir>                fetch into <dir>/<name> (skips one already there and verified)
+  python -B tools/deps.py <dir>                fetch into <dir>/<name> (keeps one already there and verified)
   python -B tools/deps.py <dir> --from <path>  clone from local checkouts in <path>/<name> instead (offline)
 
   xboxrecomp      sp00nz's recompiler toolkit and runtime: the lifter, the Xbox kernel, devices
@@ -16,8 +16,10 @@ lifter fixes and runtime patches match the files byte for byte.
 import argparse
 import hashlib
 import io
+import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import sys
 import urllib.request
@@ -62,11 +64,24 @@ def zip_fetch(repo, commit, dst):
     url = f"https://codeload.github.com/{repo}/zip/{commit}"
     with urllib.request.urlopen(url, timeout=120) as r:
         data = r.read()
+    unpack = dst.with_name(dst.name + ".unpack")
+    remove_tree(unpack)
     with zipfile.ZipFile(io.BytesIO(data)) as z:
         top = z.namelist()[0].split("/")[0]  # <repo>-<commit>/
-        z.extractall(dst.parent / "_unpack")
-    shutil.move(str(dst.parent / "_unpack" / top), str(dst))
-    shutil.rmtree(dst.parent / "_unpack")
+        z.extractall(unpack)
+    shutil.move(str(unpack / top), str(dst))
+    remove_tree(unpack)
+
+
+def remove_tree(path):
+    """a folder this tool made, .git's read-only files too"""
+
+    def writable(func, p, _):
+        os.chmod(p, stat.S_IWRITE)
+        func(p)
+
+    if Path(path).exists():
+        shutil.rmtree(path, **({"onexc": writable} if sys.version_info >= (3, 12) else {"onerror": writable}))
 
 
 def fetch(name, root, local=None):
@@ -76,17 +91,25 @@ def fetch(name, root, local=None):
         if tree_digest(dst) == dep["digest"]:
             print(f"{name}: present, verified")
             return dst
-        raise SystemExit(f"error: {dst} exists but does not match {name} at {dep['commit'][:8]}; move it aside")
+        # this folder is the tool's own: an interrupted or older fetch is replaced
+        print(f"{name}: the copy in {dst} does not match {dep['commit'][:8]}; fetching it again")
+        remove_tree(dst)
     dst.parent.mkdir(parents=True, exist_ok=True)
+    # fetched beside it and moved into place once verified, so an interrupted fetch leaves nothing in the way
+    partial = dst.with_name(dst.name + ".partial")
+    remove_tree(partial)
     if local:
-        git_fetch(str(Path(local) / name), dep["commit"], dst)
+        git_fetch(str(Path(local) / name), dep["commit"], partial)
     elif shutil.which("git"):
-        git_fetch(f"https://github.com/{dep['repo']}.git", dep["commit"], dst)
+        git_fetch(f"https://github.com/{dep['repo']}.git", dep["commit"], partial)
     else:
-        zip_fetch(dep["repo"], dep["commit"], dst)
-    got = tree_digest(dst)
+        print(f"{name}: git not found; downloading the source zip of {dep['repo']} from GitHub")
+        zip_fetch(dep["repo"], dep["commit"], partial)
+    got = tree_digest(partial)
     if got != dep["digest"]:
+        remove_tree(partial)
         raise SystemExit(f"error: {name} at {dep['commit'][:8]} does not match its digest ({got}); not using it")
+    partial.rename(dst)
     print(f"{name}: fetched {dep['commit'][:8]}, verified")
     return dst
 

@@ -39,20 +39,32 @@ function Get-Checked($Url, $File, $Algorithm, $Expected) {
     }
 }
 
-if (-not (Test-Path (Join-Path $Root 'ready'))) {
-    Write-Host 'Getting a private copy of Python (about 30 MB, once)'
-    if (Test-Path $Root) { Remove-Item -Recurse -Force $Root }
-    New-Item -ItemType Directory -Force $Root | Out-Null
-    $zip = Join-Path $Root 'python.zip'
-    Get-Checked $PythonPackage.Url $zip 'SHA512' $PythonPackage.Sha512
-    Expand-Archive $zip $Root
-    Remove-Item $zip
-    $wheel = Join-Path $Root 'capstone.zip'
-    Get-Checked $Capstone.Url $wheel 'SHA256' $Capstone.Sha256
-    Expand-Archive $wheel (Join-Path $Root 'tools\Lib\site-packages')
-    Remove-Item $wheel
-    & $Python -c 'import capstone, ssl, ctypes, winreg'
-    if ($LASTEXITCODE) { throw 'the private Python does not start' }
+if ($PSVersionTable.PSVersion.Major -lt 5) {
+    Write-Host 'error: PowerShell 5 or newer is required.'
+    exit 1
+}
+
+# an antivirus can remove the private Python after it was made: then it is made again
+if (-not (Test-Path (Join-Path $Root 'ready')) -or -not (Test-Path $Python)) {
+    Write-Host 'Downloading Python...'
+    try {
+        if (Test-Path $Root) { Remove-Item -Recurse -Force $Root }
+        New-Item -ItemType Directory -Force $Root | Out-Null
+        $zip = Join-Path $Root 'python.zip'
+        Get-Checked $PythonPackage.Url $zip 'SHA512' $PythonPackage.Sha512
+        Expand-Archive $zip $Root
+        Remove-Item $zip
+        $wheel = Join-Path $Root 'capstone.zip'
+        Get-Checked $Capstone.Url $wheel 'SHA256' $Capstone.Sha256
+        Expand-Archive $wheel (Join-Path $Root 'tools\Lib\site-packages')
+        Remove-Item $wheel
+        & $Python -c 'import capstone, ssl, ctypes, winreg'
+        if ($LASTEXITCODE) { throw 'error: Python couldn''t start' }
+    } catch {
+        Write-Host "error: Python failed to download. $($_.Exception.Message)"
+        Write-Host 'Check Internet connection.'
+        exit 1
+    }
     Set-Content (Join-Path $Root 'ready') 'python 3.13.16, capstone 5.0.7'
 }
 

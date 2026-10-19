@@ -48,6 +48,19 @@ def check_python():
         raise SystemExit("error: the capstone package is missing. Run: python -m pip install -r requirements.txt")
 
 
+NETWORK_HINT = (
+    "Check the internet connection; a proxy, firewall or antivirus can also block the download. Run it again to resume."
+)
+
+
+def preflight(work, install, parts, download_compiler, need_install=True):
+    """what this PC lacks, said before anything starts; stops only on what the build cannot get past"""
+    import preflight as checks
+
+    if not checks.report(checks.checks(work, install, parts, download_compiler, need_install)):
+        raise SystemExit(1)
+
+
 def find_toolchain(work, accept_license, download=False):
     """the installed Visual Studio, or Microsoft's compiler downloaded into <work>/toolchain"""
     import msvc
@@ -59,12 +72,13 @@ def find_toolchain(work, accept_license, download=False):
         if not tc:
             raise toolchain.ToolchainError("not downloaded yet")
     except toolchain.ToolchainError:
-        if not download:
-            print("Visual Studio with the C++ tools is not installed; downloading Microsoft's compiler instead.")
+        print("Downloading Microsoft's compiler and the Windows SDK")  # why: the check at the start said
         try:
             msvc.fetch(folder, accept_license)
         except msvc.DownloadError as e:
             raise SystemExit(f"error: {e}")
+        except OSError as e:  # urllib's errors too
+            raise SystemExit(f"error: downloading the compiler failed ({e}). {NETWORK_HINT}")
         tc = toolchain.downloaded(folder)
     print(f"Compiler: MSVC {tc['msvc']}, Windows SDK {tc['windows_sdk']}")
     return tc
@@ -159,13 +173,17 @@ def fetch_deps(work):
     import deps
 
     for name in deps.DEPS:
-        deps.fetch(name, work / "deps")
+        try:
+            deps.fetch(name, work / "deps")
+        except (OSError, subprocess.CalledProcessError) as e:  # network, git and unpacking errors
+            raise SystemExit(f"error: fetching {name} failed ({e}). {NETWORK_HINT}")
 
 
 def setup(a):
     started = time.time()
     check_python()
     install, work = Path(a.install).resolve(), Path(a.work).resolve()
+    preflight(work, install, 2 if a.editor else 1, a.download_compiler)
     install.mkdir(parents=True, exist_ok=True)
     print("1/5 Checking and copying the disc's files")
     copy_game(a.disc, install / "game")
@@ -195,6 +213,7 @@ def editor(a):
     install, work = Path(a.install).resolve(), Path(a.work).resolve()
     if not (install / EXES["game"]).exists() or not (install / "game" / "ige.xbe").exists():
         raise SystemExit(f"error: set up the game in {install} first (BuildGame.cmd or: fci-recomp.py setup)")
+    preflight(work, install, 1, a.download_compiler, need_install=False)
     tc = find_toolchain(work, a.accept_msvc_license, a.download_compiler)
     fetch_deps(work)
     translate(["editor"], install, work)
