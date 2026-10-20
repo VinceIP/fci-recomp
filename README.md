@@ -7,6 +7,8 @@ which runs alongside a reimplementation of the Xbox kernel, Direct3D and audio.
 Note: this repository contains no original copyrighted game code, data, assets, or executables. An original
 game disc is required for the recompilation to run.
 
+DISCORD: https://discord.gg/UhRnapmH2j
+
 ### AI Use Disclosure
 
 This project was made using extensive AI assistance and LLM-related tools. A human with a programming background is in the loop throughout development, and I review as much code and documentation as I can. Every effort has been made by me and my human brain to ensure the contents of this repository are of the highest quality, maintainability, and free of AI slop-isms. This project is the result of many long days of building, testing, researching, documenting, and debugging.
