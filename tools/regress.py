@@ -183,7 +183,7 @@ EVO_SCENARIOS = {
         "save": None,
         "seconds": 15,
         "steps": ["wait:title", "wait:frames:60", "capture"],
-        "block": 60,  # the title's background is a video
+        "block": 140,  # the title's background is a video
         "mean": 20,
     },
     "menu": {
@@ -192,7 +192,7 @@ EVO_SCENARIOS = {
         "save": None,
         "seconds": 25,
         "steps": EVO_TO_MENU + ["capture"],
-        "block": 60,
+        "block": 140,  # the menu backgrounds are videos and the curtain sweeps: only a gross change counts
         "mean": 20,
     },
     "story": {
@@ -243,7 +243,7 @@ EVO_SCENARIOS = {
         + ["pad:start:200", "sleep:2"]
         + ["pad:down:150", "sleep:0.4"] * 6
         + ["pad:a:200", "sleep:2", "pad:up:200", "sleep:1", "pad:a:200", "sleep:12", "capture"],
-        "block": 60,
+        "block": 140,  # the menu backgrounds are videos and the curtain sweeps: only a gross change counts
         "mean": 20,
         "log": ["relaunch: \\Device\\CdRom0;default.xbe", "attract video skipped"],
     },
