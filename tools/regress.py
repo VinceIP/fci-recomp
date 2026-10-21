@@ -245,7 +245,7 @@ EVO_SCENARIOS = {
         + ["pad:start:200", "sleep:2"]
         + ["pad:down:150", "sleep:0.4"] * 6
         + ["pad:a:200", "sleep:2", "pad:up:200", "sleep:1", "pad:a:200", "sleep:12", "capture"],
-        "block": 140,  # the menu backgrounds are videos and the curtain sweeps: only a gross change counts
+        "block": 170,  # as menu, and the relaunch lands anywhere in the background video's loop (144 seen)
         "mean": 20,
         "log": ["relaunch: \\Device\\CdRom0;default.xbe"],
     },
