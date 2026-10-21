@@ -158,6 +158,8 @@ void fci_relaunch(uint32_t page)
         }
     }
     SetEnvironmentVariableA("RECOMP_LAUNCH_DATA", file);
+    /* test input (RECOMP_PAD_LIVE): the next instance only takes lines written after this point */
+    SetEnvironmentVariableA("RECOMP_PAD_LIVE_START", "end");
     if (!in_chain) {
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION limit;
         JOBOBJECT_ASSOCIATE_COMPLETION_PORT assoc;

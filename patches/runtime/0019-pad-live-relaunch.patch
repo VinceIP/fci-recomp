@@ -1,0 +1,32 @@
+Subject: Live pad input: a relaunched process starts after the lines already read
+
+RECOMP_PAD_LIVE=<file> is read from its start. A title that relaunches itself (Evolution's Quit to Main
+Menu, a level load) starts a new process with the same file, which replayed every press so far and
+walked the new instance back through the menus into the level. RECOMP_PAD_LIVE_START=end (set by
+fci_relaunch for the next instance) starts at the end of the file.
+
+---
+diff --git a/src/usb/usb_gamepad.c b/src/usb/usb_gamepad.c
+--- a/src/usb/usb_gamepad.c
++++ b/src/usb/usb_gamepad.c
+@@ -464,7 +464,19 @@ static void pad_live_poll(unsigned long t)
+         checked = 1;
+         path = getenv("RECOMP_PAD_LIVE");
+         if (path && *path) {
+-            fprintf(stderr, "  PAD: live input from %s\n", path);
++            /* RECOMP_PAD_LIVE_START=end: the lines already there were for an
++             * earlier process (a title that relaunched itself); replaying them
++             * would walk the new one back through the same menus. */
++            const char *start = getenv("RECOMP_PAD_LIVE_START");
++            if (start && !strcmp(start, "end")) {
++                FILE *e = fopen(path, "rb");
++                if (e) {
++                    if (fseek(e, 0, SEEK_END) == 0)
++                        consumed = ftell(e);
++                    fclose(e);
++                }
++            }
++            fprintf(stderr, "  PAD: live input from %s (from byte %ld)\n", path, consumed);
+             fflush(stderr);
+         }
+     }

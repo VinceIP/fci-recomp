@@ -11,7 +11,46 @@
     "sub_00362594": [
       "override",
       "The same 37-byte descriptor helper as Instincts' 004B03B4 (addresses masked), sgdt/cli/xchg GDT/sti/ljmp 8"
+    ],
+    "sub_00433763": [
+      "prehook",
+      "DirectSound 5849 effects-image download (Instincts' 00580363 by masked bytes, unique): registers the DSP doorbell with the APU acknowledgement (fci_manual.c)",
+      "00580363"
+    ],
+    "sub_0017B3AB": [
+      "prehook",
+      "the pad poll (XGetDeviceChanges, XInputOpen/Close, XInputGetState 00478C6A per port), Instincts' Input_PollPads: counts polls for RECOMP_FCI_STATUS",
+      "001F6C00"
+    ],
+    "sub_00196D41": [
+      "gate",
+      "the movie player (path, ...), cdecl, called after sprintf(buffer, \"%s%s\", data root, \"Videos\\<name>.bik\") as Instincts' Movie_Play: RECOMP_FCI_SKIP_INTROS / RECOMP_FCI_SKIP_MOVIES (fci_disk.c, re/notes/MOVIES.md)",
+      "00220200"
+    ],
+    "sub_0019674C": [
+      "prehook",
+      "the other video player (PREY.bik, data-named videos), cdecl, the path first: logged (fci_disk.c)"
+    ],
+    "sub_0017EED6": [
+      "prehook",
+      "Console_RegisterFloat (eax = console [0056B4E4]; name, storage, default, flags, help; stdcall, as Instincts' 001FDCD0; Engine3D's e_obj_* at 00343B3C): records the variable and applies RECOMP_CVAR_<name> (fci_cvars.c)",
+      "001FDCD0"
+    ],
+    "sub_0017EFCD": [
+      "prehook",
+      "Console_RegisterInt (as Console_RegisterFloat; e_detail_objects at 003432FC)",
+      "001FDED0"
     ]
   },
-  "evidence": "Exploratory Evolution profile: descriptor helper by masked bytes (unique match); code end = BINKDATA end (as Instincts' 0070C6E4)."
+  "evidence": "Exploratory Evolution profile: descriptor helper by masked bytes (unique match); code end = BINKDATA end (as Instincts' 0070C6E4).",
+  "constants": {
+    "FCI_ATTRACT_WAIT": [
+      "0x0035C128",
+      "WaitForSingleObject(handle, timeout) wrapper (NtWaitForSingleObjectEx through [00479D00], ret 8); the attract function 000FAF1E plays Attract_Mode.bik only while WaitForSingleObject([004EEB30], 0) times out"
+    ],
+    "FCI_ATTRACT_EVENT": [
+      "0x004EEB30",
+      "the manual-reset event 0017EBA6 creates (initially set); clear while a background load runs: 0003C828 loops on it with a loading screen, 0017D4EA waits on it"
+    ]
+  }
 }

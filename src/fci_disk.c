@@ -173,8 +173,9 @@ int fci_volume_size(HANDLE h, void *out, uint32_t length, uint32_t cls, uint32_t
     return 1;
 }
 
-/* Skipped movies return from the game's movie player (00220200) as if played: RECOMP_FCI_SKIP_INTROS=1
- * (startup logos and intro), RECOMP_FCI_SKIP_MOVIES=<name>[,...] (re/notes/MOVIES.md) */
+/* Skipped movies return from the game's movie player (00220200; Evolution's 00196D41) as if played:
+ * RECOMP_FCI_SKIP_INTROS=1 (startup logos and intro, and Evolution's attract video, which also plays on every
+ * return to the main menu), RECOMP_FCI_SKIP_MOVIES=<name>[,...] (re/notes/MOVIES.md) */
 static int movie_listed(const char *list, const char *name, size_t len)
 {
     while (list && *list) {
@@ -187,9 +188,23 @@ static int movie_listed(const char *list, const char *name, size_t len)
     return 0;
 }
 
+/* Evolution's other video player (0019674C: PREY.bik and videos named by data), cdecl, the path first:
+ * logged and counted like Movie_Play's (re/notes/MOVIES.md) */
+void fci_prehook_0019674C(void)
+{
+    extern void fci_status_movie(const char *path); /* RECOMP_FCI_STATUS (fci_threads.c) */
+    char path[260];
+    uint32_t arg = MEM32(g_esp + 4), i;
+    for (i = 0; arg && i < sizeof path - 1 && MEM8(arg + i); i++)
+        path[i] = (char)MEM8(arg + i);
+    path[i] = 0;
+    fci_status_movie(path);
+    fprintf(stderr, "  [FCI] video opened: %s\n", path);
+}
+
 int fci_gate_00220200(void)
 {
-    static const char intros[] = "Ubisoft,Crytek,Intro_FCI";
+    static const char intros[] = "Ubisoft,Crytek,Intro_FCI,Attract_Mode";
     static int skip_intros = -1;
     const char *custom = getenv("RECOMP_FCI_SKIP_MOVIES"), *name, *dot;
     char path[260];
@@ -206,6 +221,7 @@ int fci_gate_00220200(void)
         extern void fci_status_movie(const char *path); /* RECOMP_FCI_STATUS (fci_threads.c) */
         fci_status_movie(path);
     }
+    fprintf(stderr, "  [FCI] movie: %s\n", path);
     if (!skip_intros && !custom)
         return 0;
     name = strrchr(path, '\\');
@@ -216,6 +232,29 @@ int fci_gate_00220200(void)
     if (!(skip_intros && movie_listed(intros, name, (size_t)(dot - name)))
         && !movie_listed(custom, name, (size_t)(dot - name)))
         return 0;
+#ifdef FCI_ATTRACT_EVENT
+    /* Evolution plays its attract video while a background load runs (the event is clear) and goes on when
+     * it ends: skipped, it goes on when the load is done, as after a shorter video (re/notes/MOVIES.md) */
+    if (!_strnicmp(name, "Attract_Mode", (size_t)(dot - name)) && dot - name == 12) {
+        typedef void (*guest_fn)(void);
+        extern guest_fn recomp_lookup(uint32_t va);
+        guest_fn wait = recomp_lookup(FCI_ATTRACT_WAIT);
+        uint32_t saved[7] = {g_eax, g_ecx, g_edx, g_ebx, g_ebp, g_esi, g_edi}, esp = g_esp;
+        if (wait) {
+            g_esp -= 4;
+            MEM32(g_esp) = 0xFFFFFFFFu; /* INFINITE: the kernel wait lets the loader run */
+            g_esp -= 4;
+            MEM32(g_esp) = MEM32(FCI_ATTRACT_EVENT);
+            g_esp -= 4;
+            MEM32(g_esp) = 0; /* return address: the stdcall body pops it and the arguments */
+            wait();
+            fprintf(stderr, "  [FCI] attract video skipped once the load it covers was done (wait %08X)\n",
+                    g_eax);
+        }
+        g_eax = saved[0], g_ecx = saved[1], g_edx = saved[2], g_ebx = saved[3];
+        g_ebp = saved[4], g_esi = saved[5], g_edi = saved[6], g_esp = esp;
+    }
+#endif
     fprintf(stderr, "  [FCI] movie skipped: %s\n", path);
     g_eax = 0;
     g_esp += 4; /* ret: the caller pops the arguments */

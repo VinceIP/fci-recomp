@@ -51,6 +51,11 @@ def profile_header(profile):
             if not re.fullmatch(r"[A-Za-z0-9 ._\\-]+", profile[key]):
                 raise ValueError(f"invalid {key}")
             lines.append(f'#define {define} "{profile[key].replace(chr(92), chr(92) * 2)}"')
+    # addresses a runtime feature needs in this executable, each with its evidence: {"FCI_X": ["0x...", "why"]}
+    for define, (value, _why) in sorted(profile.get("constants", {}).items()):
+        if not re.fullmatch(r"FCI_[A-Z0-9_]+", define) or not re.fullmatch(r"0x[0-9A-F]{8}", value):
+            raise ValueError(f"invalid constant {define}")
+        lines.append(f"#define {define} {value}u")
     lines.append("")
     return "\n".join(lines)
 
