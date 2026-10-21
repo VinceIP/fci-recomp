@@ -295,6 +295,12 @@ int main(int argc, char **argv)
     g_apu_state = mcpx_apu_init_standalone((uint8_t *)xbox_GetMemoryBase());
     fprintf(stderr, "[FCI] APU model %s\n", g_apu_state ? "up" : "FAILED");
     xbox_InputInit();
+    /* the console's front sockets: four root ports on the first controller, root port 2 being controller 1
+     * (then 3, 0, 1 for controllers 2 to 4); with the toolkit's two ports the pad was controller 3 */
+    if (!getenv("RECOMP_USB_NDP"))
+        _putenv_s("RECOMP_USB_NDP", "4");
+    if (!getenv("RECOMP_USB_PORT"))
+        _putenv_s("RECOMP_USB_PORT", "2");
     xbox_OhciInit(); /* inert unless RECOMP_USB=1 */
     fprintf(stderr, "[FCI] guest memory offset %llX code [%08X,%08X)\n",
             (unsigned long long)g_xbox_mem_offset, g_xbox_code_lo, g_xbox_code_hi);

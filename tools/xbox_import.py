@@ -1,11 +1,14 @@
 """Import save games and user maps copied from an Xbox: Action Replay zips or a copied UDATA folder.
 
-  python -B tools/xbox_import.py <zip | folder>... [--save-dir <dir>] [--replace] [--dry-run]
+  python -B tools/xbox_import.py <zip | folder>... [--title instincts|evolution] [--save-dir <dir>] [--replace]
+                                 [--dry-run]
 
-Each save folder under UDATA/55530008 is copied into the folder the game keeps saves in (by default
-%APPDATA%\\fci-recomp\\profile, `save-dir` in fci.ini), with its files signed the way this runtime signs
-saves, so the game accepts them. A save folder already there is left alone unless --replace, which
-first moves the old one to <save dir>/import-backup/<time>. Published user maps are save folders too:
+Each save folder under UDATA/<title> (Far Cry Instincts 55530008, Evolution 55530060; tools/titles.py) is
+copied into the folder that game keeps saves in (by default %APPDATA%\\fci-recomp\\profile for Instincts,
+%APPDATA%\\fci-recomp\\evolution\\profile for Evolution, `save-dir` in its fci.ini), with its files signed
+the way this runtime signs saves, so the game accepts them. A source with both games' saves needs --title.
+A save folder already there is left alone unless --replace, which first moves the old one to
+<save dir>/import-backup/<time>. Published user maps are save folders too:
 the game lists them in Splitscreen and System Link.
 """
 
@@ -19,7 +22,10 @@ import sys
 import time
 import zipfile
 
-TITLE = "55530008"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import titles  # noqa: E402
+
+TITLE = "55530008"  # Far Cry Instincts, the default
 RUNTIME_KEY = bytes(16)  # the runtime's save signatures are HMAC-SHA1 under this key
 SIGNED = {".sav", ".fcs", ".mt", ".ren"}  # signature in the last 20 bytes
 NOT_COPIED = {"datelinfo.xbx", "gameid.ini"}  # the Action Replay's own files
@@ -33,11 +39,11 @@ def mac(data):
     return hmac.new(RUNTIME_KEY, data, hashlib.sha1).digest()
 
 
-def under_title(parts):
-    """the path below UDATA/55530008, or None for anything else"""
+def under_title(parts, title=TITLE):
+    """the path below UDATA/<title>, or None for anything else"""
     low = [p.lower() for p in parts]
     for i in range(len(low) - 1):
-        if low[i] == "udata" and low[i + 1] == TITLE.lower():
+        if low[i] == "udata" and low[i + 1] == title.lower():
             rest = parts[i + 2 :]
             # zip names split on "/" only: a "\" or drive in a name would act as a path on Windows
             if any(p in ("", ".", "..") or set(p) & set("\\:/") for p in rest):
@@ -46,25 +52,46 @@ def under_title(parts):
     return None
 
 
-def read_source(path):
-    """{(folder, ..., name): bytes} for every file under UDATA/55530008 in a zip or a folder"""
+def names_in(path):
+    """every file's path parts in a zip or under a folder"""
+    path = Path(path)
+    if path.is_file():
+        with zipfile.ZipFile(path) as zf:
+            return [PurePosixPath(i.filename).parts for i in zf.infolist() if not i.is_dir()]
+    if path.is_dir():
+        return [p.relative_to(path.parent).parts for p in path.rglob("*") if p.is_file()]
+    raise SaveImportError(f"{path} not found")
+
+
+def titles_in(path):
+    """the known games with saves in a zip or folder"""
+    ids = {t.title_id: t for t in titles.TITLES.values()}
+    found = set()
+    for parts in names_in(path):
+        low = [p.lower() for p in parts]
+        found |= {low[i + 1] for i in range(len(low) - 1) if low[i] == "udata"}
+    return [ids[i] for i in sorted(ids) if i.lower() in found]
+
+
+def read_source(path, title=TITLE):
+    """{(folder, ..., name): bytes} for every file under UDATA/<title> in a zip or a folder"""
     path = Path(path)
     files = {}
     if path.is_file():
         with zipfile.ZipFile(path) as zf:
             for info in zf.infolist():
-                rest = under_title(PurePosixPath(info.filename).parts)
+                rest = under_title(PurePosixPath(info.filename).parts, title)
                 if rest and not info.is_dir():
                     files[rest] = zf.read(info)
     elif path.is_dir():
         for p in path.rglob("*"):
-            rest = under_title(p.relative_to(path.parent).parts)
+            rest = under_title(p.relative_to(path.parent).parts, title)
             if rest and p.is_file():
                 files[rest] = p.read_bytes()
     else:
         raise SaveImportError(f"{path} not found")
     if not files:
-        raise SaveImportError(f"{path}: no UDATA/{TITLE} folder in it")
+        raise SaveImportError(f"{path}: no UDATA/{title} folder in it")
     return {k: v for k, v in files.items() if k[-1].lower() not in NOT_COPIED}
 
 
@@ -97,9 +124,9 @@ def save_name(files, folder):
     return "?"
 
 
-def install(files, save_dir, replace=False, dry_run=False):
+def install(files, save_dir, replace=False, dry_run=False, title=TITLE):
     """copy the save folders in; returns [(folder, name, what happened)]"""
-    root = Path(save_dir) / "UDATA" / TITLE
+    root = Path(save_dir) / "UDATA" / title
     for key in files:
         if not root.joinpath(*key).resolve().is_relative_to(root.resolve()):
             raise SaveImportError(f"unsafe path {'/'.join(key)}")
@@ -133,15 +160,26 @@ def install(files, save_dir, replace=False, dry_run=False):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("sources", nargs="+", help="Action Replay zips or folders with UDATA/55530008 in them")
-    ap.add_argument("--save-dir", default=os.path.expandvars(r"%APPDATA%\fci-recomp\profile"))
+    ap.add_argument("sources", nargs="+", help="Action Replay zips or folders with UDATA/<title> in them")
+    ap.add_argument("--title", choices=sorted(titles.TITLES), help="the game, when a source has both games' saves")
+    ap.add_argument("--save-dir", help="default: the game's own save folder under %%APPDATA%%")
     ap.add_argument("--replace", action="store_true", help="overwrite save folders already there")
     ap.add_argument("--dry-run", action="store_true", help="only say what would be imported")
     a = ap.parse_args(argv)
     try:
         for src in a.sources:
-            for folder, name, what in install(resign(read_source(src)), a.save_dir, a.replace, a.dry_run):
-                print(f"{Path(src).name}: {folder} {name!r}: {what}")
+            found = [titles.TITLES[a.title]] if a.title else titles_in(src)
+            if len(found) != 1:
+                raise SaveImportError(
+                    f"{src}: saves of both games; choose one with --title"
+                    if found
+                    else f"{src}: no saves of Far Cry Instincts (UDATA/55530008) or Evolution (UDATA/55530060)"
+                )
+            game = found[0]
+            save_dir = a.save_dir or os.path.expandvars(f"%APPDATA%\\{game.appdata}\\profile")
+            files = resign(read_source(src, game.title_id))
+            for folder, name, what in install(files, save_dir, a.replace, a.dry_run, game.title_id):
+                print(f"{Path(src).name}: {game.name} {folder} {name!r}: {what}")
     except (SaveImportError, zipfile.BadZipFile) as e:
         raise SystemExit(f"error: {e}")
     return 0

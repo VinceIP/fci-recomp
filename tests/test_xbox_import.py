@@ -123,3 +123,25 @@ def test_rejects_unsafe_paths_and_other_titles(tmp_path):
     with pytest.raises(xbox_import.SaveImportError):
         xbox_import.install({("SAVE", "..", "..", "pwn.txt"): b"x"}, tmp_path / "save")
     assert not (tmp_path / "pwn.txt").exists()
+
+
+def test_evolution_saves_go_to_their_own_title_folder(tmp_path):
+    evo = {k.replace("55530008", "55530060"): v for k, v in exported().items()}
+    src = write_zip(tmp_path / "evo.zip", evo)
+    assert [t.key for t in xbox_import.titles_in(src)] == ["evolution"]
+    save = tmp_path / "save"
+    assert xbox_import.main([str(src), "--save-dir", str(save)]) == 0
+    profile = save / "UDATA" / "55530060" / "9FBDF33E7A0C" / "profile.sav"
+    body = profile.read_bytes()[:-20]
+    assert profile.read_bytes()[-20:] == mac(xbox_import.RUNTIME_KEY, body)
+    assert not (save / "UDATA" / "55530008").exists()
+
+
+def test_both_games_in_one_source_need_a_title(tmp_path):
+    both = dict(exported(), **{k.replace("55530008", "55530060"): v for k, v in exported().items()})
+    src = write_zip(tmp_path / "both.zip", both)
+    with pytest.raises(SystemExit):
+        xbox_import.main([str(src), "--save-dir", str(tmp_path / "save")])
+    assert xbox_import.main([str(src), "--save-dir", str(tmp_path / "save"), "--title", "evolution"]) == 0
+    assert (tmp_path / "save" / "UDATA" / "55530060" / "9FBDF33E7A0C").is_dir()
+    assert not (tmp_path / "save" / "UDATA" / "55530008").exists()

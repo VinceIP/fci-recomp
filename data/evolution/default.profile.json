@@ -40,6 +40,16 @@
       "prehook",
       "Console_RegisterInt (as Console_RegisterFloat; e_detail_objects at 003432FC)",
       "001FDED0"
+    ],
+    "sub_000B8CF5": [
+      "prehook",
+      "Camera_BuildViews(view), as Instincts' 000F0500: calls the actor's Player_ProcessInput (vtable +0xD4) with view+0x8C8 at 000B905D; counts 3D frames and records the view for RECOMP_FCI_STATUS and direct mouse aim",
+      "000F0500"
+    ],
+    "sub_00075C3E": [
+      "prehook",
+      "Player_ProcessInput(block), as Instincts' 00098AE0 (the same reads: angles +0x18, turnYaw +0xBC, turnPitch +0xC0; vtable 004B04E8 slot +0xD4): direct mouse aim (fci_aim.c)",
+      "00098AE0"
     ]
   },
   "evidence": "Exploratory Evolution profile: descriptor helper by masked bytes (unique match); code end = BINKDATA end (as Instincts' 0070C6E4).",
@@ -51,6 +61,10 @@
     "FCI_ATTRACT_EVENT": [
       "0x004EEB30",
       "the manual-reset event 0017EBA6 creates (initially set); clear while a background load runs: 0003C828 loops on it with a loading screen, 0017D4EA waits on it"
+    ],
+    "FCI_GAMEVIEW_INPUT": [
+      "0x000008C8",
+      "the view's ViewInput block: Camera_BuildViews passes view+0x8C8 to Player_ProcessInput (000B9056)"
     ]
   }
 }

@@ -164,6 +164,67 @@ SCENARIOS = {
 }
 
 
+# Evolution (FCI_TITLE=evolution): each run makes a new profile, so no fixtures; the attract video that
+# follows a return to the main menu is skipped with the intros
+EVO_TO_MENU = ["wait:title", "sleep:2", "pad:start:200", "sleep:4", "pad:a:200", "sleep:4"]
+# 3D frames start with the level's opening scene in the jeep (about 20 s); the gun is free after it
+EVO_TO_GAME = EVO_TO_MENU + ["pad:a:200", "sleep:4", "pad:a:200", "wait:ingame", "sleep:25"]
+EVO_SCENARIOS = {
+    "boot": {
+        "what": "Evolution boots to the title screen (intro movies skipped)",
+        "kind": "driven",
+        "save": None,
+        "seconds": 15,
+        "steps": ["wait:title", "wait:frames:60", "capture"],
+        "block": 60,  # the title's background is a video
+        "mean": 20,
+    },
+    "menu": {
+        "what": "Start: a new profile (Jack Carver) on the virtual keyboard, accepted, the main menu",
+        "kind": "driven",
+        "save": None,
+        "seconds": 25,
+        "steps": EVO_TO_MENU + ["capture"],
+        "block": 60,
+        "mean": 20,
+    },
+    "story": {
+        "what": "Story Mode, Easy: the first level in the jeep's mounted gun, then the stick turns it",
+        "kind": "driven",
+        "save": None,
+        "seconds": 85,
+        "steps": EVO_TO_GAME + ["capture", "pad:rleft:1500", "sleep:1", "capture"],
+        "block": 60,
+        "mean": 15,
+    },
+    "mouse-aim": {
+        "what": "direct mouse aim in the first level: 1000 counts turn the gun 50 degrees and back",
+        "kind": "driven",
+        "save": None,
+        "seconds": 85,
+        "steps": EVO_TO_GAME
+        + ["capture", "mouse:1000:0", "sleep:0.5", "capture", "mouse:-1000:0", "sleep:0.5", "capture"],
+        "block": 60,
+        "mean": 15,
+    },
+    "quit-menu": {
+        "what": "pause, Quit to Main Menu, OK: the game relaunches, skips the attract video and shows the main menu",
+        "kind": "driven",
+        "save": None,
+        "seconds": 90,
+        "steps": EVO_TO_GAME
+        + ["pad:start:200", "sleep:2"]
+        + ["pad:down:150", "sleep:0.4"] * 6
+        + ["pad:a:200", "sleep:2", "pad:up:200", "sleep:1", "pad:a:200", "sleep:12", "capture"],
+        "block": 60,
+        "mean": 20,
+        "log": ["relaunch: \\Device\\CdRom0;default.xbe", "attract video skipped"],
+    },
+}
+if game_driver.TITLE.key == "evolution":
+    SCENARIOS, FIXTURE_NAMES = EVO_SCENARIOS, ()
+
+
 def fixture(name, src):
     if name not in FIXTURE_NAMES:
         raise SystemExit("fixtures: " + ", ".join(FIXTURE_NAMES))
@@ -491,7 +552,8 @@ def run(names, bless):
     import hashlib
 
     for label, exe in (("game", GAME_EXE), ("editor", EDITOR_EXE)):
-        report["builds"][label] = hashlib.sha256(exe.read_bytes()).hexdigest()
+        if exe.exists():  # a game without its editor build
+            report["builds"][label] = hashlib.sha256(exe.read_bytes()).hexdigest()
     rows = []
     for name in names:
         sc = SCENARIOS[name]
