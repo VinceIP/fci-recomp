@@ -8,6 +8,7 @@
 #include <windows.h>
 #include <xaudio2.h>
 
+#include <algorithm>
 #include <atomic>
 #include <thread>
 #include <vector>
@@ -16,6 +17,9 @@
 #include "core/log.h"
 
 namespace audio {
+
+// FCI: silence while a notice holds the game (fci_manual.c); the mixer is not run, so nothing advances
+std::atomic<bool> g_held{false};
 
 namespace {
 // FCI: a critical error (the output device removed or changed) stops the engine for good; the output is made
@@ -93,7 +97,10 @@ void StartOutput(std::function<void(float*, uint32_t)> render) {
                 Sleep(2);
                 continue;
             }
-            render(b, kFrames);
+            if (g_held)
+                std::fill(b, b + kFrames * 2, 0.0f);
+            else
+                render(b, kFrames);
             XAUDIO2_BUFFER xb{};
             xb.AudioBytes = kFrames * 8;
             xb.pAudioData = reinterpret_cast<const BYTE*>(b);
@@ -107,3 +114,5 @@ void StartOutput(std::function<void(float*, uint32_t)> render) {
 }
 
 }  // namespace audio
+
+extern "C" void fci_audio_hold(int on) { audio::g_held = on != 0; }

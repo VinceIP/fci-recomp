@@ -594,8 +594,8 @@ void* Window()
             // whatever window the user is typing into
             bool background = Option("RECOMP_FCI_XBR_BACKGROUND", false);
             bool editor = fci_xbe_path && std::strstr(fci_xbe_path, "ige.xbe");
-            const wchar_t* title = editor ? L"Far Cry Instincts Map Editor (recompiled)"
-                                          : L"Far Cry Instincts (recompiled)";
+            const wchar_t* title = editor ? L"" FCI_TITLE_NAME " Map Editor (recompiled)"
+                                          : L"" FCI_TITLE_NAME " (recompiled)";
             const char* fe = std::getenv("RECOMP_FCI_FRAME");
             HWND frame = fe ? reinterpret_cast<HWND>(uintptr_t(std::strtoull(fe, nullptr, 16))) : nullptr;
             if (frame && IsWindow(frame)) {
@@ -715,6 +715,14 @@ extern "C" unsigned long fci_window_handoff(void** frame, int* own)
     if (own)
         *own = app::g_own_frame;
     return app::g_window_thread;
+}
+
+// The frame window and the thread that runs it, for a notice shown over the game (fci_manual.c)
+extern "C" void* fci_frame_window(unsigned long* thread)
+{
+    if (thread)
+        *thread = app::g_window_thread;
+    return app::g_frame;
 }
 
 // ---- start-up -------------------------------------------------------------------------------

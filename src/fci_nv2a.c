@@ -7,6 +7,7 @@
 #include <windows.h>
 
 #include "recomp_types.h"
+#include "fci_image.h"
 
 #define APERTURE      0xFD000000u
 #define APERTURE_SIZE 0x01000000u
@@ -676,7 +677,7 @@ static DWORD WINAPI window_thread(LPVOID unused)
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
     RegisterClassA(&wc);
     AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
-    window = CreateWindowA("FciWhole", "Far Cry Instincts (recompiled)", WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+    window = CreateWindowA("FciWhole", FCI_TITLE_NAME " (recompiled)", WS_OVERLAPPEDWINDOW | WS_VISIBLE,
                            CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top, NULL, NULL,
                            wc.hInstance, NULL);
     while (GetMessageA(&m, NULL, 0, 0) > 0) {

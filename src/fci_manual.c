@@ -74,6 +74,20 @@ static void wait_for_chain(HANDLE job, HANDLE port, HANDLE first)
     ExitProcess(code);
 }
 
+/* A message over the game, owned by its frame so it shows in front even when fullscreen. The caller holds
+ * the guest CPU, so the game's threads wait; the audio output plays silence until it is answered. */
+void fci_notice(const char *text)
+{
+    extern void *fci_frame_window(unsigned long *thread); /* xbr/fci_xbr_glue.cpp */
+    extern void fci_audio_hold(int on);                   /* xbr/audio/xaudio2.cpp */
+    HWND frame = (HWND)fci_frame_window(NULL);
+
+    fci_audio_hold(1);
+    MessageBoxA(frame && IsWindow(frame) ? frame : NULL, text, FCI_TITLE_NAME " (recompiled)",
+                MB_OK | MB_ICONINFORMATION | MB_TOPMOST | MB_SETFOREGROUND);
+    fci_audio_hold(0);
+}
+
 void fci_relaunch(uint32_t page)
 {
     char exe[MAX_PATH], image[MAX_PATH], file[MAX_PATH], cmd[32768], path[256];
@@ -99,17 +113,18 @@ void fci_relaunch(uint32_t page)
     }
     if (!GetModuleFileNameA(NULL, exe, sizeof exe) || !(slash = strrchr(exe, '\\')))
         return;
-    snprintf(slash + 1, sizeof(exe) - (size_t)(slash + 1 - exe), "%s",
-             !strcmp(target, "ige.xbe") ? "FarCryInstinctsEditor.exe" : "FarCryInstincts.exe");
+    /* the same image again (a level load, back to the menu) is this executable, whatever its name; the
+     * other image is the title's other executable beside it */
+    if (strcmp(target, FCI_IMAGE_FILENAME))
+        snprintf(slash + 1, sizeof(exe) - (size_t)(slash + 1 - exe), "%s",
+                 !strcmp(target, "ige.xbe") ? FCI_EDITOR_EXE_NAME : FCI_GAME_EXE_NAME);
     if (GetFileAttributesA(exe) == INVALID_FILE_ATTRIBUTES) {
         /* the map editor is built separately (BuildEditor.cmd); without it the game cannot go on */
         fprintf(stderr, "[FCI] relaunch: %s is not installed\n", exe);
-        MessageBoxA(NULL,
-                    !strcmp(target, "ige.xbe")
-                            ? "The map editor is not built yet. Run BuildEditor.cmd in the installation "
-                              "folder, then choose Map Editor again.\n\nThe game will close now."
-                            : "FarCryInstincts.exe is missing from the installation folder.",
-                    "Far Cry Instincts (recompiled)", MB_OK | MB_ICONINFORMATION);
+        fci_notice(!strcmp(target, "ige.xbe")
+                           ? "The map editor is not built yet. Run BuildEditor.cmd in the installation "
+                             "folder, then choose Map Editor again.\n\nThe game will close now."
+                           : FCI_GAME_EXE_NAME " is missing from the installation folder.");
         fci_log_session_end();
         ExitProcess(0);
     }
@@ -288,6 +303,7 @@ void recomp_icall_not_code_log(uint32_t va) { stop(82, "indirect call to non-cod
 void recomp_unimpl(const char *text, uint32_t va) { stop(83, "untranslated instruction", va, text); }
 void fci_unresolved_stub(uint32_t va) { stop(84, "undetected call target", va, NULL); }
 void fci_quarantined_lift(uint32_t va) { stop(85, "quarantined lift", va, NULL); }
+void fci_fell_off_end(uint32_t va) { stop(89, "control ran off the end of a lifted function", va, NULL); }
 
 /* stops called from the runtime patches (patches/runtime) */
 void fci_unbridged_ordinal(unsigned ordinal, int slot)

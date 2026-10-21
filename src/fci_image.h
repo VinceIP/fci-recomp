@@ -19,4 +19,18 @@
 #ifndef FCI_HAS_SUPPLEMENT
 #define FCI_HAS_SUPPLEMENT 0
 #endif
+/* the title's name in windows and messages, and the installed executables a relaunch switches between */
+#ifndef FCI_TITLE_NAME
+#define FCI_TITLE_NAME "Far Cry Instincts"
+#endif
+#ifndef FCI_GAME_EXE_NAME
+#define FCI_GAME_EXE_NAME "FarCryInstincts.exe"
+#endif
+#ifndef FCI_EDITOR_EXE_NAME
+#define FCI_EDITOR_EXE_NAME "FarCryInstinctsEditor.exe"
+#endif
+/* the title's folder under %APPDATA%: profile, logs, shader-cache */
+#ifndef FCI_APPDATA
+#define FCI_APPDATA "fci-recomp"
+#endif
 #endif

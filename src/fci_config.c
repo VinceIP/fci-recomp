@@ -247,7 +247,8 @@ void fci_log_session_end(void)
 int fci_default_launch;
 
 /* Started without arguments: the arguments come from fci.ini. Defaults: the game files in "game" beside
- * the executable, saves and logs under %APPDATA%\fci-recomp, host Direct3D and DirectSound. */
+ * the executable, saves and logs under the title's %APPDATA% folder (FCI_APPDATA), host Direct3D and
+ * DirectSound. */
 void fci_config_load(int *argc, char ***argv)
 {
     static char exe_dir[MAX_PATH], xbe[MAX_PATH], game[MAX_PATH], save[MAX_PATH], log_dir[MAX_PATH];
@@ -265,9 +266,9 @@ void fci_config_load(int *argc, char ***argv)
     if ((slash = strrchr(exe_dir, '\\')) != NULL)
         *slash = 0;
     snprintf(game, sizeof game, "%s\\game", exe_dir);
-    expand("%APPDATA%\\fci-recomp\\profile", save, sizeof save);
-    expand("%APPDATA%\\fci-recomp\\logs", log_dir, sizeof log_dir);
-    expand("%APPDATA%\\fci-recomp\\shader-cache", shader_cache, sizeof shader_cache);
+    expand("%APPDATA%\\" FCI_APPDATA "\\profile", save, sizeof save);
+    expand("%APPDATA%\\" FCI_APPDATA "\\logs", log_dir, sizeof log_dir);
+    expand("%APPDATA%\\" FCI_APPDATA "\\shader-cache", shader_cache, sizeof shader_cache);
     xbe[0] = fixed_log[0] = 0;
     snprintf(ini, sizeof ini, "%s\\fci.ini", exe_dir);
     if ((f = fopen(ini, "r")) != NULL) {
