@@ -1,0 +1,46 @@
+Subject: File times: a zero time is left as it is; set through a handle with attribute access
+
+FileBasicInformation passed all three times to SetFileTime, zero ones included, and ignored a failure.
+Xbox CreateFile handles carry no FILE_WRITE_ATTRIBUTES, so Windows refused it: Evolution's copies into
+its Z: cache never got the disc file's time, every boot copied them again while the menu music streamed
+from them, the copy failed on a sharing violation and the loader thread stopped in the game's fatal error
+screen (re/notes/MOVIES.md). The time is now set through a reopened handle with attribute access, and a
+zero time leaves that time unchanged, as NtSetInformationFile does.
+
+---
+diff --git a/src/kernel/kernel_file.c b/src/kernel/kernel_file.c
+--- a/src/kernel/kernel_file.c
++++ b/src/kernel/kernel_file.c
+@@ -498,13 +498,31 @@ NTSTATUS __stdcall xbox_NtSetInformationFile(
+         case XboxFileBasicInformation: {
+             PXBOX_FILE_BASIC_INFORMATION info = (PXBOX_FILE_BASIC_INFORMATION)FileInformation;
+             FILETIME ct, at, wt;
++            HANDLE attrs;
++            BOOL ok;
+             ct.dwLowDateTime = info->CreationTime.LowPart;
+             ct.dwHighDateTime = info->CreationTime.HighPart;
+             at.dwLowDateTime = info->LastAccessTime.LowPart;
+             at.dwHighDateTime = info->LastAccessTime.HighPart;
+             wt.dwLowDateTime = info->LastWriteTime.LowPart;
+             wt.dwHighDateTime = info->LastWriteTime.HighPart;
+-            SetFileTime(FileHandle, &ct, &at, &wt);
++            /* A zero time leaves that time as it is (as on the Xbox). */
++            ok = SetFileTime(FileHandle, info->CreationTime.QuadPart ? &ct : NULL,
++                             info->LastAccessTime.QuadPart ? &at : NULL,
++                             info->LastWriteTime.QuadPart ? &wt : NULL);
++            /* Xbox CreateFile handles carry no FILE_WRITE_ATTRIBUTES, which Windows wants for this:
++             * Evolution stamps its Z: cache copies with the disc file's time and re-copies when they differ. */
++            if (!ok && GetLastError() == ERROR_ACCESS_DENIED &&
++                (attrs = ReOpenFile(FileHandle, FILE_WRITE_ATTRIBUTES,
++                                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, 0))
++                    != INVALID_HANDLE_VALUE) {
++                ok = SetFileTime(attrs, info->CreationTime.QuadPart ? &ct : NULL,
++                                 info->LastAccessTime.QuadPart ? &at : NULL,
++                                 info->LastWriteTime.QuadPart ? &wt : NULL);
++                CloseHandle(attrs);
++            }
++            if (!ok)
++                fprintf(stderr, "  [FILE] SetFileTime failed: err=%lu\n", GetLastError());
+             IoStatusBlock->Status = STATUS_SUCCESS;
+             return STATUS_SUCCESS;
+         }

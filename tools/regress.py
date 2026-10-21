@@ -7,7 +7,7 @@ variables) in a folder of its own with copied fixtures, drives the pad, captures
   - each captured frame is not black,
   - each frame against its reference: a 160x120 greyscale copy, by the mean absolute difference and
     by the worst 8x8 block (a missing piece of a model is local),
-  - scenario extras (one window across relaunches).
+  - scenario extras (one window across relaunches; the Z: cache copies carry the disc files' times).
 References and fixtures come from the game, so they live in the test folder (FCI_REGRESS, default
 build/regress), never in Git. Fixtures, each copied in once:
   save-tunnel        a save folder whose checkpoint is Story Mode's Training tunnel
@@ -194,6 +194,8 @@ EVO_SCENARIOS = {
         "steps": EVO_TO_MENU + ["capture"],
         "block": 140,  # the menu backgrounds are videos and the curtain sweeps: only a gross change counts
         "mean": 20,
+        # the Z: copies carry the disc files' times, or every boot copies them again (runtime patch 0020)
+        "cache_times": True,
     },
     "story": {
         "what": "Story Mode, Easy: the first level in the jeep's mounted gun, then the stick turns it",
@@ -235,7 +237,7 @@ EVO_SCENARIOS = {
         "mean": 15,
     },
     "quit-menu": {
-        "what": "pause, Quit to Main Menu, OK: the game relaunches, skips the attract video and shows the main menu",
+        "what": "pause, Quit to Main Menu, OK: the game relaunches and shows the main menu",
         "kind": "driven",
         "save": None,
         "seconds": 90,
@@ -245,7 +247,7 @@ EVO_SCENARIOS = {
         + ["pad:a:200", "sleep:2", "pad:up:200", "sleep:1", "pad:a:200", "sleep:12", "capture"],
         "block": 140,  # the menu backgrounds are videos and the curtain sweeps: only a gross change counts
         "mean": 20,
-        "log": ["relaunch: \\Device\\CdRom0;default.xbe", "attract video skipped"],
+        "log": ["relaunch: \\Device\\CdRom0;default.xbe"],
     },
 }
 if game_driver.TITLE.key == "evolution":
@@ -484,6 +486,19 @@ def flow_timeline(sc, folder, start, child, frames, windows):
     return child.poll()
 
 
+def cache_time_problems(cache, disc):
+    """the game's copies in its Z: cache against the disc files: the game copies again when the times differ"""
+    originals = {p.name.lower(): p for p in disc.glob("*.ss2")} if disc.is_dir() else {}
+    copies = sorted(cache.glob("*.ss2")) if cache.is_dir() else []
+    if not copies:
+        return [f"no cache copies in {cache}"]
+    return [
+        f"cache copy {c.name} has another time than the disc's"
+        for c in copies
+        if c.name.lower() in originals and c.stat().st_mtime_ns != originals[c.name.lower()].stat().st_mtime_ns
+    ]
+
+
 def check(name, sc, result, folder, bless):
     problems, notes = [], []
     text = "".join(p.read_text(errors="replace") for p in result["logs"] if p.exists())
@@ -500,6 +515,8 @@ def check(name, sc, result, folder, bless):
     for needle, count in sc.get("log_count", {}).items():
         if text.count(needle) < count:
             problems.append(f"log line {needle!r} seen {text.count(needle)} times, {count} expected")
+    if sc.get("cache_times"):
+        problems += cache_time_problems(folder / "save" / "Cache" / "sounds_xb", GAME_DIR / "sounds_xb")
     if "windows" in result:
         w = result["windows"]
         if any(x["frames"] != 1 for x in w):

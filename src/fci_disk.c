@@ -232,29 +232,6 @@ int fci_gate_00220200(void)
     if (!(skip_intros && movie_listed(intros, name, (size_t)(dot - name)))
         && !movie_listed(custom, name, (size_t)(dot - name)))
         return 0;
-#ifdef FCI_ATTRACT_EVENT
-    /* Evolution plays its attract video while a background load runs (the event is clear) and goes on when
-     * it ends: skipped, it goes on when the load is done, as after a shorter video (re/notes/MOVIES.md) */
-    if (!_strnicmp(name, "Attract_Mode", (size_t)(dot - name)) && dot - name == 12) {
-        typedef void (*guest_fn)(void);
-        extern guest_fn recomp_lookup(uint32_t va);
-        guest_fn wait = recomp_lookup(FCI_ATTRACT_WAIT);
-        uint32_t saved[7] = {g_eax, g_ecx, g_edx, g_ebx, g_ebp, g_esi, g_edi}, esp = g_esp;
-        if (wait) {
-            g_esp -= 4;
-            MEM32(g_esp) = 0xFFFFFFFFu; /* INFINITE: the kernel wait lets the loader run */
-            g_esp -= 4;
-            MEM32(g_esp) = MEM32(FCI_ATTRACT_EVENT);
-            g_esp -= 4;
-            MEM32(g_esp) = 0; /* return address: the stdcall body pops it and the arguments */
-            wait();
-            fprintf(stderr, "  [FCI] attract video skipped once the load it covers was done (wait %08X)\n",
-                    g_eax);
-        }
-        g_eax = saved[0], g_ecx = saved[1], g_edx = saved[2], g_ebx = saved[3];
-        g_ebp = saved[4], g_esi = saved[5], g_edi = saved[6], g_esp = esp;
-    }
-#endif
     fprintf(stderr, "  [FCI] movie skipped: %s\n", path);
     g_eax = 0;
     g_esp += 4; /* ret: the caller pops the arguments */

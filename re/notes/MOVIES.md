@@ -41,15 +41,26 @@ Found 2026-10-20 from the `Videos\*.bik` strings and their references.
   0x2F) and the title page's entry (000FABAC, when [[0056B594]+0x2FA] is set: back from the game)
   both go through 000FAF1E, which plays the video only while `WaitForSingleObject([004EEB30], 0)`
   times out (a manual-reset event cleared while a background load runs; 0003C828 loops on it with a
-  loading screen) and then moves on (00122774). After Quit to Main Menu (a relaunch into default.xbe)
-  the load is still running, so the video plays in full, about 100 s, before the main menu.
+  loading screen) and then moves on (00122774) whether or not the load is done.
+  The load it covers is the loader thread's (0017E811), which copies the music streams (`*.ss2`) from
+  the disc into the Z: cache (001F0742: `T:\$u%s%s` or `D:%s%s` to `Z:%s%s`, when 001F0510 finds the
+  copy missing or its time or size different; 001F106B copies and stamps the copy with the disc file's
+  time). Until runtime patch 0020 that stamp failed, every boot copied again while the menu music
+  streamed from the copy, the copy's open failed on a sharing violation and the loader stopped in the
+  game's fatal error screen (0018FCC2/0018FAD7: draw the message, then `jmp $`): the event stayed clear
+  and the video played after every Start and every Quit to Main Menu (and the spinning thread cost the
+  menus a third of their frame rate). With the loader done, Start goes straight on.
 - A second player, 0019674C (path first), opens the menus' background videos
   (`StartMenu_boat.bik`, `MenusBack_sun.bik`) and `PREY.bik` (000F9FF7).
 - The Special Features menu (000FB2FF) plays `INTRO`, `FCI_02`, `PREDATOR`, `MULTI`,
   `PREDATOR_MULTI`, `MAP_EDITOR`, `Previews_GR3_ntsc` and `Previews_R6L`.
 
 Skipping: 00196D41 is gated by the same `fci_gate_00220200` (data/evolution/default.profile.json).
-`RECOMP_FCI_SKIP_INTROS` skips Ubisoft, Intro_FCI and Attract_Mode. For Attract_Mode the gate first
-waits on the event (profile constants `FCI_ATTRACT_WAIT` 0035C128, `FCI_ATTRACT_EVENT` 004EEB30) through
-the game's own wait, so the title goes on as after a short video. Checked (regression scenario
-`quit-menu`, 2026-10-20): Quit to Main Menu reaches the main menu about 4 s after the relaunch.
+`RECOMP_FCI_SKIP_INTROS` skips Ubisoft, Intro_FCI and Attract_Mode, the last as if the video had ended
+at once: 000FAF1E goes on, and 0003C828's loading screen covers a load still running. (An earlier gate
+waited for the event first; with the loader stopped, that hung Start for good.) Checked 2026-10-21: Start
+pressed as the title appears reaches the main menu, on a fresh save and on a save with an old cache;
+regression scenarios `menu` (the cache copies' times) and `quit-menu`. A cache written before patch 0020
+keeps its wrong times, and the copy of a stream already playing still fails: such a cache folder has to
+go once (the game fills Z: again). On a first boot the menu music's streamer opens its copy while the
+loader still writes it and fails once on a sharing violation, without harm (Instincts does the same).
