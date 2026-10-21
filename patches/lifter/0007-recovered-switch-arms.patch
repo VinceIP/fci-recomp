@@ -1,0 +1,42 @@
+Subject: Switch dispatches in recovered code keep their arms
+
+A switch dispatch that only branch recovery (0003) decoded was emitted as an indirect tail jump: its
+arms were never decoded, and _leading_arms judged them by func_end, which recovery does not move. Each
+arm then had to be a translated function, and was not. Evolution's 00228E32 (a list walk with a
+13-entry table, its body past a 6-byte function the sweep cut short) stopped with exit 81 at its case
+00228E4D when a story checkpoint was saved. fci_direct.py now recovers the arms of a recovered
+`jmp [reg*4 + table]` (entries between the function start and the table), and arms are inside when
+recovery owns them. The recovered set is cleared when a function's decode starts: the switch census runs
+before recovery and read the previous function's set (Evolution's 00228E9A lost three arms that way).
+
+---
+diff --git a/tools/recomp/lifter.py b/tools/recomp/lifter.py
+--- a/tools/recomp/lifter.py
++++ b/tools/recomp/lifter.py
+@@ -2588,8 +2588,13 @@ class Lifter:
+     def _leading_arms(self, targets):
+         """Entries up to the first one outside the current function."""
+         inside = []
++        # recovered code (fci_direct) reaches past func_end: its own instructions are the function
++        local = getattr(self, 'fci_local_addresses', None)
+         for target in targets:
+-            if not (self.func_start <= target < self.func_end):
++            if local is not None:
++                if target not in local:
++                    break
++            elif not (self.func_start <= target < self.func_end):
+                 break
+             inside.append(target)
+         return inside
+diff --git a/tools/recomp/translator.py b/tools/recomp/translator.py
+--- a/tools/recomp/translator.py
++++ b/tools/recomp/translator.py
+@@ -1983,6 +1983,8 @@
+         # Set function bounds for the lifter
+         self.lifter.func_start = start
+         self.lifter.func_end = end
++        # the previous function's recovered code (fci_direct) is not this one's
++        self.lifter.fci_local_addresses = None
+         validated_jump_tables = recovered["jump_tables"] if recovered else None
+         self.lifter.icall_site_targets = self.icall_sites
+ 

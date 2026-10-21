@@ -6,6 +6,20 @@ kept as decoded.
 """
 
 
+def table_arms(translator, insn, keep):
+    """a `jmp [reg*4 + table]`'s arms: its table's entries up to the first that keep(target, table) refuses"""
+    ops = insn.operands
+    if not insn.is_jump or len(ops) != 1 or ops[0].type != "mem" or not ops[0].mem_index or not ops[0].mem_disp:
+        return []
+    table = ops[0].mem_disp
+    arms = []
+    for target in translator.lifter._read_jump_table(table):
+        if not keep(target, table):
+            break
+        arms.append(target)
+    return arms if len(arms) >= 2 else []
+
+
 def recover_direct(translator, start, end, instructions, blocks):
     from . import config
 
@@ -77,6 +91,9 @@ def recover_direct(translator, start, end, instructions, blocks):
                 and insn.jump_target not in translator.func_db
             ):
                 pending.append(insn.jump_target)
+            # arms to decode: between the function start and the table, where MSVC parks it after the code
+            arms = table_arms(translator, insn, lambda t, table: start <= t < table and t not in translator.func_db)
+            pending.extend(a for a in arms if a not in decoded)
         added += len(stream)
     if not added:
         return instructions, blocks
@@ -97,6 +114,10 @@ def recover_direct(translator, start, end, instructions, blocks):
             leaders.add(right.address)
     # Keep existing switch/computed-jump leaders from the original decode.
     leaders.update(bb.start for bb in blocks)
+    # A switch arm is a label even where the code before it runs straight into it (the arms the lifter takes:
+    # patches/lifter/0007, _leading_arms).
+    for insn in ordered:
+        leaders.update(table_arms(translator, insn, lambda t, table: t in decoded))
     rebuilt = translator.disasm.build_basic_blocks(
         ordered, lower, upper, extra_leaders=leaders, stop_mnemonics=("int3", "ud2", "hlt", "iret", "iretd")
     )
