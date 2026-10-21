@@ -134,3 +134,18 @@ def test_title_names_reach_the_header():
     profile["game_exe"] = 'x.exe" injected'
     with pytest.raises(ValueError):
         image_profile.profile_header(profile)
+
+
+def test_evolution_profile_constants_and_hook_names():
+    evo = json.loads((REPO / "data" / "evolution" / "default.profile.json").read_text())
+    header = image_profile.profile_header(evo)
+    assert "#define FCI_GAMEVIEW_INPUT 0x000008C8u" in header
+    assert "#define FCI_ATTRACT_EVENT 0x004EEB30u" in header
+    assert "fci_override_00362594" in header
+    assert evo["replacements"]["sub_00196D41"][:3:2] == ["gate", "00220200"]  # Instincts' movie gate
+    bad = dict(evo, constants={"OTHER": ["0x00000001", "not an FCI_ name"]})
+    with pytest.raises(ValueError):
+        image_profile.profile_header(bad)
+    bad = dict(evo, replacements=dict(evo["replacements"], sub_00075C3E=["prehook", "why", "not hex"]))
+    with pytest.raises(ValueError):
+        image_profile.profile_header(bad)
