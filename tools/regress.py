@@ -169,6 +169,13 @@ SCENARIOS = {
 EVO_TO_MENU = ["wait:title", "sleep:2", "pad:start:200", "sleep:4", "pad:a:200", "sleep:4"]
 # 3D frames start with the level's opening scene in the jeep (about 20 s); the gun is free after it
 EVO_TO_GAME = EVO_TO_MENU + ["pad:a:200", "sleep:4", "pad:a:200", "wait:ingame", "sleep:25"]
+# Map Editor (a relaunch into the editor), Skip Xbox Live Sign-In, OK, Create a New Map, Tropical: the terrain tool
+EVO_TO_EDITOR = (
+    EVO_TO_MENU
+    + ["pad:down:150", "sleep:0.5"] * 3
+    + ["pad:a:200", "sleep:28", "pad:down:150", "sleep:0.5", "pad:a:200", "sleep:2", "pad:up:150", "sleep:0.5"]
+    + ["pad:a:200", "sleep:5", "pad:a:200", "sleep:5", "pad:a:200", "sleep:20"]
+)
 EVO_SCENARIOS = {
     "boot": {
         "what": "Evolution boots to the title screen (intro movies skipped)",
@@ -194,8 +201,9 @@ EVO_SCENARIOS = {
         "save": None,
         "seconds": 85,
         "steps": EVO_TO_GAME + ["capture", "pad:rleft:1500", "sleep:1", "capture"],
-        "block": 60,
-        "mean": 15,
+        # the jeep drives on: a second earlier or later is another view, so only a gross change counts
+        "block": 170,
+        "mean": 40,
     },
     "mouse-aim": {
         "what": "direct mouse aim in the first level: 1000 counts turn the gun 50 degrees and back",
@@ -204,6 +212,25 @@ EVO_SCENARIOS = {
         "seconds": 85,
         "steps": EVO_TO_GAME
         + ["capture", "mouse:1000:0", "sleep:0.5", "capture", "mouse:-1000:0", "sleep:0.5", "capture"],
+        "block": 170,  # the jeep drives on, as in story
+        "mean": 40,
+    },
+    "editor-terrain": {
+        "what": "Map Editor from the main menu (a relaunch): a new Tropical map, Y raises a hill with the terrain tool",
+        "kind": "driven",
+        "save": None,
+        "seconds": 120,
+        "steps": EVO_TO_EDITOR + ["capture", "pad:y:3000", "sleep:1", "capture"],
+        "block": 60,
+        "mean": 15,
+        "log": [r"relaunch: \Device\CdRom0;ige.xbe"],
+    },
+    "editor-jump": {
+        "what": "Map Editor: Jump In Map (Back) walks the new map",
+        "kind": "driven",
+        "save": None,
+        "seconds": 130,
+        "steps": EVO_TO_EDITOR + ["pad:back:300", "sleep:12", "capture", "pad:lup:1500", "sleep:0.5", "capture"],
         "block": 60,
         "mean": 15,
     },

@@ -1,0 +1,27 @@
+{
+  "id": "fcie-original-xbox-editor",
+  "image_name": "ige.xbe",
+  "image_sha256": "0c8611a365e1106d4cc34b46d42829ca5b0744597972e572c90d1b4dd02b1e25",
+  "image_bytes": 6803456,
+  "entry_va": "0x00095872",
+  "code_end": "0x00735A60",
+  "descriptor_helper": "0x0009A6C4",
+  "descriptor_jump": "0x0009A6E4",
+  "replacements": {
+    "sub_0009A6C4": [
+      "override",
+      "The same 37-byte descriptor helper as Instincts' game 004B03B4 and editor 0005FBA4 (addresses masked, unique match), sgdt/cli/xchg GDT/sti/ljmp 8"
+    ],
+    "sub_000A4920": [
+      "prehook",
+      "Console_RegisterFloat (Instincts' editor 0006A1D0 by masked bytes; e_obj_lod_ratio's registration calls it at 0027364C): records the variable and applies RECOMP_CVAR_<name> (fci_cvars.c)",
+      "0006A1D0"
+    ],
+    "sub_000A4AD0": [
+      "prehook",
+      "Console_RegisterInt (as Console_RegisterFloat; e_detail_objects at 00272E1A)",
+      "0006A380"
+    ]
+  },
+  "evidence": "Exploratory Evolution editor profile: descriptor helper and console registration by masked bytes from Instincts' editor; code end = BINKDATA end (00728500 + D560)."
+}
