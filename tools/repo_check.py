@@ -3,7 +3,7 @@
   python -B tools/repo_check.py [file ...]     the given files, or every file git tracks
 
 A file fails if it is over 1 MB, has a game file's extension, or has the size and SHA-256 of a file on the
-disc (data/disc.json). The pre-commit hook and CI run it.
+disc of any game (every data/**/disc.json). The pre-commit hook and CI run it.
 """
 
 import hashlib
@@ -18,8 +18,11 @@ GAME_EXTENSIONS = {".iso", ".xiso", ".xbe", ".xex", ".dat", ".fat", ".bik", ".xw
 
 
 def problems(paths):
-    disc = json.loads((REPO / "data" / "disc.json").read_text(encoding="utf-8"))["files"]
-    game = {(f["size"], f["sha256"]) for f in disc.values()}
+    game = {
+        (f["size"], f["sha256"])
+        for manifest in sorted((REPO / "data").rglob("disc.json"))
+        for f in json.loads(manifest.read_text(encoding="utf-8"))["files"].values()
+    }
     sizes = {size for size, _ in game}
     out = []
     for path in paths:

@@ -1,6 +1,7 @@
 @echo off
-rem Drag your Far Cry Instincts disc image (or the folder with the disc's files) onto this file.
-rem The game is checked, recompiled and built on this PC, then installed in "Far Cry Instincts" here.
+rem Drag your Far Cry Instincts or Far Cry Instincts Evolution disc image (or the folder with the disc's
+rem files) onto this file. The game is checked, recompiled and built on this PC, then installed in a folder
+rem named after it here ("Far Cry Instincts" or "Far Cry Instincts Evolution").
 setlocal
 rem started from PowerShell 7, its module path would hide Windows PowerShell's own commands
 set "PSModulePath="
@@ -10,7 +11,7 @@ where powershell >nul 2>nul || goto no_powershell
 if /i "%PROCESSOR_ARCHITECTURE%"=="x86" if not defined PROCESSOR_ARCHITEW6432 goto not_64bit
 set "DISC=%~1"
 if "%DISC%"=="" (
-    echo Drag your Far Cry Instincts disc image, or the folder with the disc's files, onto BuildGame.cmd.
+    echo Drag your Far Cry Instincts or Evolution disc image, or the folder with the disc's files, onto BuildGame.cmd.
     echo Or drag it into this window now and press Enter:
     set /p "DISC="
 )
@@ -22,7 +23,7 @@ if errorlevel 1 (
     echo Build error. Check dependencies, and run BuildGame.cmd again to resume.
 ) else (
     echo.
-    echo Build complete. Start "Far Cry Instincts\FarCryInstincts.exe".
+    echo Build complete. The game is in the folder named after it, beside BuildGame.cmd.
 )
 goto end
 

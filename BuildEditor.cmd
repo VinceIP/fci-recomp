@@ -1,5 +1,5 @@
 @echo off
-rem Build the map editor for the game BuildGame.cmd set up. The game's Map Editor menu then starts it.
+rem Build the map editor for a game BuildGame.cmd set up. The game's Map Editor menu then starts it.
 setlocal
 rem started from PowerShell 7, its module path would hide Windows PowerShell's own commands
 set "PSModulePath="
@@ -7,7 +7,18 @@ rem what must be here before anything runs: the files beside this one, PowerShel
 if not exist "%~dp0tools\bootstrap.ps1" goto not_extracted
 where powershell >nul 2>nul || goto no_powershell
 if /i "%PROCESSOR_ARCHITECTURE%"=="x86" if not defined PROCESSOR_ARCHITEW6432 goto not_64bit
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\bootstrap.ps1" editor
+rem both games set up here: ask which one the editor is for
+set "TITLE="
+set "PICK="
+if exist "%~dp0Far Cry Instincts\game\default.xbe" if exist "%~dp0Far Cry Instincts Evolution\game\default.xbe" (
+    echo Build the map editor for which game?
+    echo   1 - Far Cry Instincts
+    echo   2 - Far Cry Instincts Evolution
+    set /p "PICK=1 or 2: "
+)
+if "%PICK%"=="1" set "TITLE=--title instincts"
+if "%PICK%"=="2" set "TITLE=--title evolution"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\bootstrap.ps1" editor %TITLE%
 if errorlevel 1 (
     echo.
     echo Build error. Check dependencies, and run BuildEditor.cmd again to resume.

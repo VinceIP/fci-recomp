@@ -1,7 +1,7 @@
 """Build the game or the map editor from a lift: the generated C, the runtime and this project's host code.
 
   python -B tools/build.py <default.xbe | ige.xbe> --xbe <file> --lift <dir> --deps <dir> --out <dir>
-                           [--jobs N] [--toolchain <dir>]
+                           [--jobs N] [--toolchain <dir>] [--obj-cache <dir>]
 
   --xbe    the executable from the disc (checked; the map editor's profile is built from it)
   --lift   tools/lift.py's output for this executable
@@ -9,6 +9,8 @@
   --out    created; the build happens in <out>/case, the result goes to <out>/bin
   --jobs   compilers at once (default: by the processor's cores and the memory, about 2 GB each)
   --toolchain  tools/msvc.py's folder, used when Visual Studio is not installed
+  --obj-cache  a folder of compiled generated files kept between builds; a file whose rewritten source,
+               headers, compiler and flags are unchanged is copied instead of compiled (runtime work)
 
 Steps: find Visual Studio and the Windows SDK (tools/toolchain.py); stage the build (the runtime from
 xboxrecomp with patches/runtime, src/, the generated C); match the XDK library functions the D3D and
@@ -31,9 +33,9 @@ REPO = Path(__file__).resolve().parents[1]
 TOOLS = REPO / "tools"
 sys.path.insert(0, str(TOOLS))
 import image_profile  # noqa: E402
-import lift as lift_tool  # noqa: E402
 import patches  # noqa: E402
 import preflight  # noqa: E402
+import titles  # noqa: E402
 import toolchain  # noqa: E402
 
 DATA = REPO / "data"
@@ -47,7 +49,7 @@ def default_jobs():
     return max(1, min(os.cpu_count() or 1, int((preflight.memory_gb() - 3) / 2)))
 
 
-def stage(image, xbe, lift_dir, deps, case, tc):
+def stage(image, title, xbe, lift_dir, deps, case, tc):
     inputs = case / "inputs"
     inputs.mkdir(parents=True)
     (case / "work").mkdir()
@@ -61,9 +63,9 @@ def stage(image, xbe, lift_dir, deps, case, tc):
         shutil.copytree(lift_dir / "supp", inputs / "supp")
     for tool in BUILD_TOOLS:
         shutil.copy2(TOOLS / tool, inputs / tool)
-    profile = DATA / f"{Path(image).stem}.profile.json"
+    profile = title.data / f"{Path(image).stem}.profile.json"
     if profile.exists():
-        image_profile.stage_profile(profile, xbe, inputs)
+        image_profile.stage_profile(profile, xbe, inputs, title)
     (inputs / "xbr-symbols").mkdir()
     signatures = deps / "xbe-recomp" / "xdk" / "5849" / "signatures.toml"
     done = subprocess.run(
@@ -75,7 +77,7 @@ def stage(image, xbe, lift_dir, deps, case, tc):
             str(signatures),
             str(case / "symbols.json"),
             str(inputs / "xbr-symbols" / "image_symbols.h"),
-            str(DATA / f"{Path(image).stem}.pins.json"),
+            str(title.data / f"{Path(image).stem}.pins.json"),
         ],
         capture_output=True,
         text=True,
@@ -85,13 +87,14 @@ def stage(image, xbe, lift_dir, deps, case, tc):
     return len(applied)
 
 
-def compile_all(case, jobs, log):
+def compile_all(case, jobs, log, obj_cache=None):
     inputs, work = case / "inputs", case / "work"
     build = [sys.executable, "-B", str(inputs / "compile.py")]
+    env = dict(os.environ, **({"FCI_OBJ_CACHE": str(Path(obj_cache).resolve())} if obj_cache else {}))
 
     def run(args, compilers):
         done = subprocess.run(
-            build + list(args), capture_output=True, text=True, env=dict(os.environ, FCI_JOBS=str(compilers))
+            build + list(args), capture_output=True, text=True, env=env | {"FCI_JOBS": str(compilers)}
         )
         with open(log, "a", encoding="utf-8") as f:
             f.write(f"== {' '.join(args)}\n{done.stdout}{done.stderr}\n")
@@ -140,12 +143,13 @@ def compile_all(case, jobs, log):
     step("kinit")
 
 
-def build(image, xbe, lift_dir, deps, out, jobs=None, tc=None):
-    if lift_tool.sha256(xbe) != lift_tool.IMAGE_SHA256[image]:
-        raise SystemExit(f"error: {xbe} is not the supported release of {image}")
+def build(image, xbe, lift_dir, deps, out, jobs=None, tc=None, obj_cache=None):
+    title = titles.of_image(image, xbe)
+    if not title:
+        raise SystemExit(f"error: {xbe} is not the supported release of {image} of any title")
     record = json.loads((lift_dir / "lift.json").read_text())
-    if record["image"] != image:
-        raise SystemExit(f"error: {lift_dir} is a lift of {record['image']}")
+    if record["image"] != image or record.get("xbe_sha256") != title.images[image]:
+        raise SystemExit(f"error: {lift_dir} is a lift of another executable ({record['image']})")
     out = Path(out)
     if out.exists():
         raise SystemExit(f"error: {out} exists; build into a new folder")
@@ -153,9 +157,9 @@ def build(image, xbe, lift_dir, deps, out, jobs=None, tc=None):
     tc = tc or toolchain.discover()
     started = time.time()
     case = out / "case"
-    patches = stage(image, Path(xbe).resolve(), lift_dir, deps, case, tc)
-    print(f"building {image}: staged ({patches} runtime patches), compiling with {jobs} jobs")
-    compile_all(case, jobs, out / "build.log")
+    patches = stage(image, title, Path(xbe).resolve(), lift_dir, deps, case, tc)
+    print(f"building {title.name} {image}: staged ({patches} runtime patches), compiling with {jobs} jobs")
+    compile_all(case, jobs, out / "build.log", obj_cache)
     (out / "bin").mkdir()
     for name in ("fci-whole.exe", "fci-whole.pdb", "fci-kinit.dll"):
         shutil.copy2(case / "work" / name, out / "bin" / name)
@@ -163,6 +167,7 @@ def build(image, xbe, lift_dir, deps, out, jobs=None, tc=None):
         json.dumps(
             {
                 "image": image,
+                "title": title.key,
                 "inputs_sha256": inputs_digest(lift_dir, tc),
                 "msvc": tc["msvc"],
                 "windows_sdk": tc["windows_sdk"],
@@ -184,8 +189,8 @@ def inputs_digest(lift_dir, tc):
     h.update((Path(lift_dir) / "lift.json").read_bytes())
     h.update(json.dumps(tc, sort_keys=True).encode())
     files = sorted(p for p in HOST.rglob("*") if p.is_file() and "__pycache__" not in p.parts)
-    files += patches.series("runtime") + sorted(DATA.glob("*.json"))
-    files += [TOOLS / n for n in ("build.py", "patches.py", "sigmatch.py", *BUILD_TOOLS)]
+    files += patches.series("runtime") + sorted(DATA.rglob("*.json"))
+    files += [TOOLS / n for n in ("build.py", "patches.py", "sigmatch.py", "titles.py", *BUILD_TOOLS)]
     for p in files:
         h.update(p.relative_to(REPO).as_posix().encode() + b"\0" + p.read_bytes().replace(b"\r\n", b"\n"))
     return h.hexdigest()
@@ -202,19 +207,20 @@ def current(out, lift_dir, tc):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("image", choices=sorted(lift_tool.IMAGE_SHA256))
+    ap.add_argument("image", choices=titles.IMAGES)
     ap.add_argument("--xbe", required=True)
     ap.add_argument("--lift", required=True)
     ap.add_argument("--deps", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--jobs", type=int, help="parallel compilers, about 2 GB of memory each")
     ap.add_argument("--toolchain", help="tools/msvc.py's folder, when Visual Studio is not installed")
+    ap.add_argument("--obj-cache", help="compiled generated files kept between builds")
     a = ap.parse_args()
     try:
         tc = toolchain.discover(a.toolchain)
     except toolchain.ToolchainError as e:
         raise SystemExit(f"error: {e}")
-    build(a.image, a.xbe, Path(a.lift), Path(a.deps), a.out, a.jobs, tc)
+    build(a.image, a.xbe, Path(a.lift), Path(a.deps), a.out, a.jobs, tc, a.obj_cache)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,532 @@
+{
+ "comment": "Far Cry Instincts Evolution (original Xbox), the disc release this project supports: every file's size and SHA-256, from the maintainer's disc (not yet compared with a second dump). tools/disc.py checks a disc against it.",
+ "title_id": "55530060",
+ "version": 3,
+ "not_copied": [
+  "dashupdate.xbe",
+  "downloader.xbe",
+  "update.xbe"
+ ],
+ "files": {
+  "common.dat": {
+   "size": 14068499,
+   "sha256": "558d9d165c054147e632fd0da10ff7c5f3591597edd37b692e00e69d0c2abd72"
+  },
+  "common.fat": {
+   "size": 13376,
+   "sha256": "03a6d5f8a9a535b8a33f54ea7fe04c91824531d4aeb3b5bfe938be15d8c39480"
+  },
+  "dashupdate.xbe": {
+   "size": 58421248,
+   "sha256": "833da722de940f46bc89ec8b4cdcd7a07b1506e985813809403af5affa34f347"
+  },
+  "default.xbe": {
+   "size": 5337088,
+   "sha256": "ced4d535bbfcc66567d0f95772d14f965f970fdeaf39cfbd556142c7c2ada68d"
+  },
+  "downloader.xbe": {
+   "size": 1150976,
+   "sha256": "e1897648c6578da49ac59ff7d6ffeea09894a1585a5f4def1c446f4f8ae7c056"
+  },
+  "DVDsound.dat": {
+   "size": 145134184,
+   "sha256": "c1d227320ed384139853c3e967d7a86cd705d91f9f639386b209acda89df5626"
+  },
+  "DVDsound.fat": {
+   "size": 7004,
+   "sha256": "150e869380db49060fffdd62e31a4462aa9a3a4601abed8ddea0f2b91c8cb4ca"
+  },
+  "farcryed.dat": {
+   "size": 77255139,
+   "sha256": "37f16c6020240b17f98c07bbff56074eda9659648991a0c28e41bdd7859f3900"
+  },
+  "farcryed.fat": {
+   "size": 30176,
+   "sha256": "632912c2b802e17401ba8351711c6833843396339ff3390230d0863bbde14c52"
+  },
+  "HDsound.dat": {
+   "size": 126058496,
+   "sha256": "bcc2706eb45b59b1a9697bc3ac81b57787f6719efc4ca3ca50a0afa3d6b8b789"
+  },
+  "HDsound.fat": {
+   "size": 236,
+   "sha256": "72cdbfdd8ffddaf28bbd1b7649fdd904d5c22958429df11d11c696a676eb007a"
+  },
+  "ige.xbe": {
+   "size": 6803456,
+   "sha256": "0c8611a365e1106d4cc34b46d42829ca5b0744597972e572c90d1b4dd02b1e25"
+  },
+  "levels/20_TUTORIAL/20_tutorial.dat": {
+   "size": 40363427,
+   "sha256": "54f5691cac29e988ef0770b81b5413aa2ca0fff652ea6428cb4defb5ec2decbe"
+  },
+  "levels/20_TUTORIAL/20_tutorial.fat": {
+   "size": 34112,
+   "sha256": "57bd08d196ed2300685d6f83e4537c2a2627950b8c9c852c04b1e72fcd84b00f"
+  },
+  "levels/21_DUNEA/21_dunea.dat": {
+   "size": 45089763,
+   "sha256": "b458df31bb2323effd1872e7e7bf5c19799eccc315adaba2f895cf92aeb6a4b8"
+  },
+  "levels/21_DUNEA/21_dunea.fat": {
+   "size": 34748,
+   "sha256": "a074a239453f10e0001e861f525e7d548184ceb43fda82e007820b83e87cf154"
+  },
+  "levels/22_DUNEB/22_duneb.dat": {
+   "size": 49860159,
+   "sha256": "8343d2f6e6aa000d1d1da0201a909d90ac8a0bc422bfbebae5371e84e1755ba0"
+  },
+  "levels/22_DUNEB/22_duneb.fat": {
+   "size": 37784,
+   "sha256": "7e5ebf963cfe37e18dcd0bdd79669937d20a82c4be56d0a81dc3a6d430623004"
+  },
+  "levels/23_DUNEC/23_dunec.dat": {
+   "size": 49190264,
+   "sha256": "f4ec68230d00d7eb7843bda7e5cdfed26982f5e867f996c0d6a20d64313fbc45"
+  },
+  "levels/23_DUNEC/23_dunec.fat": {
+   "size": 34148,
+   "sha256": "64617381889fd6a1db919a0327aff3a9b53534d544f700e6197540bac70f7015"
+  },
+  "levels/24_SHANTYDAY/24_shantyday.dat": {
+   "size": 57457808,
+   "sha256": "0aecc12eb3a3fa07c597542c978e25ec3e6feb68b84bd39632014de23517d369"
+  },
+  "levels/24_SHANTYDAY/24_shantyday.fat": {
+   "size": 39536,
+   "sha256": "57e5ec22dcc2db7dfc8bd33dc94fe859f00908ddcfed85614e1191c100fa2c18"
+  },
+  "levels/26_SHANTYNIGHT/26_shantynight.dat": {
+   "size": 61177671,
+   "sha256": "37e5c1979bae60313400b0643463a1ba0d0beef94c6ed0720e10b97f7e06f09a"
+  },
+  "levels/26_SHANTYNIGHT/26_shantynight.fat": {
+   "size": 40964,
+   "sha256": "2869d00c7d3d013e67b4296f16ea2dd5785c190bc81aaad7d46e3845fcdf44f9"
+  },
+  "levels/28_JUNGLE/28_jungle.dat": {
+   "size": 54526516,
+   "sha256": "ac9cae5386b38faa5599f361dda739d2542a51ea42ad3da5b56cab5b8808dba1"
+  },
+  "levels/28_JUNGLE/28_jungle.fat": {
+   "size": 37964,
+   "sha256": "691584749a6452ba736e83aba8d89b00b218aa098bcdf7f08bafa5be527d2239"
+  },
+  "levels/29_FOREST/29_forest.dat": {
+   "size": 52849635,
+   "sha256": "42346b17bca47ddec8b645e43855f90f9168fa8b19bbd1b284f3f6913eb76b24"
+  },
+  "levels/29_FOREST/29_forest.fat": {
+   "size": 36740,
+   "sha256": "de785a33f7cb4af48f461b387e002d0cc8bc033fce6fe0b6b812eb35c4e67e7c"
+  },
+  "levels/30_MOUNTAIN/30_mountain.dat": {
+   "size": 42676078,
+   "sha256": "a06736fc8f1517e83cf11ee5090b3778d96dd397fc3a602fc7f0b4e7a0a0aa21"
+  },
+  "levels/30_MOUNTAIN/30_mountain.fat": {
+   "size": 36188,
+   "sha256": "0375b06e0f7b0f8290fdf49e19954f6f519454b9a7c39a7384ace055fbf87c11"
+  },
+  "levels/M20_SHANTYTOWN/m20_shantytown.dat": {
+   "size": 18490728,
+   "sha256": "9eac96e5f4baba1d8038cfa68a0e2a206b0e4c6dfec56082a9ff14c4e2861e07"
+  },
+  "levels/M20_SHANTYTOWN/m20_shantytown.fat": {
+   "size": 13112,
+   "sha256": "d79cddcaf614e185878f77f6898c3f6d8185f6354f8719f046f3d0e694a526cf"
+  },
+  "levels/M21_RICEFIELD/m21_ricefield.dat": {
+   "size": 17705415,
+   "sha256": "907287543317539d913e96f78a001e93bbb3dd5ec36725c9fd58f47ad8d4bd35"
+  },
+  "levels/M21_RICEFIELD/m21_ricefield.fat": {
+   "size": 13268,
+   "sha256": "f747e6db1609445896537f99ecfbffc3733075a3b832f9c70b7b3bdc2d00d171"
+  },
+  "levels/M22_DUNES/m22_dunes.dat": {
+   "size": 20044547,
+   "sha256": "5b0881982191998958cf690a7a33f7fd9cb5f27a996d90d3fe888eeeb536d223"
+  },
+  "levels/M22_DUNES/m22_dunes.fat": {
+   "size": 14084,
+   "sha256": "75bc1e582be016ce09c7301f07dda1c72688b602ae0cd0c388d3ce06a66e86ad"
+  },
+  "levels/M23_REFINERY/m23_refinery.dat": {
+   "size": 19154772,
+   "sha256": "68890e551c62dcc181888e35589d272982aa02165cdd4d7e44a70f1470caefa2"
+  },
+  "levels/M23_REFINERY/m23_refinery.fat": {
+   "size": 12992,
+   "sha256": "0affd1322b67c9fb0ea763ef02db1856846738ff2826a3ac5ad9378b39cf78c0"
+  },
+  "levels/M24_DEATHRIVER/m24_deathriver.dat": {
+   "size": 21124238,
+   "sha256": "09c2c4eecb7d08025d34bd59b31a1af395b50d33e594eba7d0afb309eccc3415"
+  },
+  "levels/M24_DEATHRIVER/m24_deathriver.fat": {
+   "size": 13808,
+   "sha256": "485f748e5c1bf1ad132a06c09e3f409b75f3668a661a3497032a292a4b5a42fe"
+  },
+  "levels/M26_FORTRESS/m26_fortress.dat": {
+   "size": 20844313,
+   "sha256": "b13b181657deac0bff11b1ba2c179ae44528ae62b7fae3a1061dd5666fccb4b5"
+  },
+  "levels/M26_FORTRESS/m26_fortress.fat": {
+   "size": 13832,
+   "sha256": "81e3c2ee4513c5dd89e6c59f45556666ae89bfe17a8e179d6716f44899a8bcc5"
+  },
+  "levels/M28_CARVERHOUSE/m28_carverhouse.dat": {
+   "size": 18989477,
+   "sha256": "c87ce0f9bcb7c0890b63822771be7d22f8d87501616cfd95ec5d7d1b0bab44eb"
+  },
+  "levels/M28_CARVERHOUSE/m28_carverhouse.fat": {
+   "size": 14084,
+   "sha256": "a224a2760262f09631c82e5a5de9fd9d15944185d04ea10e3959f14836784738"
+  },
+  "levels/M29_BAR/m29_bar.dat": {
+   "size": 16415778,
+   "sha256": "acec51360b57d67e3debe864b1fc9d6498ff60f73ca3b84e6fe54b1b4cabec70"
+  },
+  "levels/M29_BAR/m29_bar.fat": {
+   "size": 13340,
+   "sha256": "6620d842262c1f59af0ff8e0d1c184a5fc4a3bce5cee38da10587756a0b1f8e6"
+  },
+  "levels/MET_Beach_Military/met_beach_military.dat": {
+   "size": 17042167,
+   "sha256": "a72366a544c20bf24908e313ebe74551e1051a1cfced7093a3e19fc54275883b"
+  },
+  "levels/MET_Beach_Military/met_beach_military.fat": {
+   "size": 11684,
+   "sha256": "c12af50a34403d2db2c9b7e3493ded499e2996ca20cd2bed8bdab9f28c02dd90"
+  },
+  "levels/MET_BEACH_REFINERY/met_beach_refinery.dat": {
+   "size": 18102225,
+   "sha256": "cd00874ec168541268814d004cc7491e34e02485a1b8d5838fb8ee52c2bdc6ec"
+  },
+  "levels/MET_BEACH_REFINERY/met_beach_refinery.fat": {
+   "size": 12152,
+   "sha256": "5bcbdd6ae0f6867e3b54c0ca4d82deb449a483f16a83ad8ef1628bb72749c523"
+  },
+  "levels/MET_Beach_Research/met_beach_research.dat": {
+   "size": 17163564,
+   "sha256": "0b7ca82daeb66a09ed416aeccbe92a9cfccc4f84d21c3941926e175216f1deb0"
+  },
+  "levels/MET_Beach_Research/met_beach_research.fat": {
+   "size": 11708,
+   "sha256": "e3e468a31c69301dcac883daaad369c82be37c447c07121e1a204a53c2f89580"
+  },
+  "levels/MET_Beach_Ruins/met_beach_ruins.dat": {
+   "size": 17315591,
+   "sha256": "c190d668619db761e0d62b5689dfc0cc4da8c017156a3655bd8292c140782704"
+  },
+  "levels/MET_Beach_Ruins/met_beach_ruins.fat": {
+   "size": 11684,
+   "sha256": "c22cce25681ecb43603a686e7e3df8f701c7524795f331973680e6091d697fbd"
+  },
+  "levels/MET_Dependency/met_dependency.dat": {
+   "size": 18170385,
+   "sha256": "04c707b6db9313d8fcc487982460eacc28ac5b76654faa19dd729d0b1953e682"
+  },
+  "levels/MET_Dependency/met_dependency.fat": {
+   "size": 12476,
+   "sha256": "747f17cf8e6d7d3bc68657f56835a0ca1bf68003af38b732b6851138db5ed068"
+  },
+  "levels/MET_FOREST_MILITARY/met_forest_military.dat": {
+   "size": 17540199,
+   "sha256": "84be4bf853310785e8a896017dc2b370723b82113d429b91e456047e565680d3"
+  },
+  "levels/MET_FOREST_MILITARY/met_forest_military.fat": {
+   "size": 11720,
+   "sha256": "71922a77e5d544381b65d052f3568e780c93833eebcbc1adfb79e814bc660417"
+  },
+  "levels/MET_FOREST_REFINERY/met_forest_refinery.dat": {
+   "size": 18610628,
+   "sha256": "6bce00c3cbb67b2aae46f45e1d1a3de077364cde98f10a4358a5f44f76fd0b27"
+  },
+  "levels/MET_FOREST_REFINERY/met_forest_refinery.fat": {
+   "size": 12188,
+   "sha256": "b3f5036369313df0651f6deb2f6bdf5dd60622549a575852471bff6696e2a31d"
+  },
+  "levels/MET_FOREST_RESEARCH/met_forest_research.dat": {
+   "size": 17649818,
+   "sha256": "349704e3a987cb5aea5b399a78fe166452647a897e5cf03a6b3f05d398046603"
+  },
+  "levels/MET_FOREST_RESEARCH/met_forest_research.fat": {
+   "size": 11756,
+   "sha256": "a048b40b1f95c48053fc870fcd3042f94062edef5c7d8b5bb4ae47ef7b143d00"
+  },
+  "levels/MET_FOREST_RUINS/met_forest_ruins.dat": {
+   "size": 17827262,
+   "sha256": "58de47ccb611861899c93bf0eeb121144242fa45646de6654ddfdbfe0ebcb448"
+  },
+  "levels/MET_FOREST_RUINS/met_forest_ruins.fat": {
+   "size": 11720,
+   "sha256": "c253c3c7792f55760d44cde56ebb254936cb69b917b7cbd408a5ee0f9c0133bb"
+  },
+  "levels/MET_Jungle_Military/met_jungle_military.dat": {
+   "size": 17136743,
+   "sha256": "e4abbd5e02e9ef84afb2312bc0fc50887fe36a28eb0875878cc353eb6cc035b6"
+  },
+  "levels/MET_Jungle_Military/met_jungle_military.fat": {
+   "size": 11708,
+   "sha256": "0854b8a23a94c4adae836b879e9c1e0abe029dad7c91a6c6bf1569227d965e6b"
+  },
+  "levels/MET_JUNGLE_REFINERY/met_jungle_refinery.dat": {
+   "size": 18195171,
+   "sha256": "7a8ab443a40af660c8db5a51b5d6d0d8842f975e73beeb05168de6c4992d4644"
+  },
+  "levels/MET_JUNGLE_REFINERY/met_jungle_refinery.fat": {
+   "size": 12176,
+   "sha256": "19a4f2c609985bdee43f18d54da8dc125b761d5d241a178e181960e95973f745"
+  },
+  "levels/MET_Jungle_Research/met_jungle_research.dat": {
+   "size": 17229477,
+   "sha256": "ae06ca7f927397dd9f1657fe9c4dcda802ca32e537b6ed2e92885c143d7e4293"
+  },
+  "levels/MET_Jungle_Research/met_jungle_research.fat": {
+   "size": 11732,
+   "sha256": "07a7afdef67b121adae5ce4e30dd73c825212288af28d45ef7882555844a7523"
+  },
+  "levels/MET_Jungle_Ruins/met_jungle_ruins.dat": {
+   "size": 17406313,
+   "sha256": "d38f84bbc934046fe1bdab08e75c11eb7028a3bdec8db2e2ee4cb8958831ee17"
+  },
+  "levels/MET_Jungle_Ruins/met_jungle_ruins.fat": {
+   "size": 11696,
+   "sha256": "0635f41fa465571cce1c927b87e79bc7c81fd19802870ceb75fcb721579df139"
+  },
+  "levels/MET_Swamp_Military/met_swamp_military.dat": {
+   "size": 17047293,
+   "sha256": "fdd1398b85b4fb796c205105a01a8b28accd724786c36f56a1ba59d357e0bec3"
+  },
+  "levels/MET_Swamp_Military/met_swamp_military.fat": {
+   "size": 11648,
+   "sha256": "fbfc56899f34f094c1e6bb4d00a4648d0378badb891ed10111f75a3fb4c1ad8e"
+  },
+  "levels/MET_SWAMP_REFINERY/met_swamp_refinery.dat": {
+   "size": 18024345,
+   "sha256": "d059e49a4990806b0954d167dfafc9199b27dc7ac1ca607bf8e15a3fcd2eb61a"
+  },
+  "levels/MET_SWAMP_REFINERY/met_swamp_refinery.fat": {
+   "size": 12116,
+   "sha256": "f9fd3174db59fd54ac27b46e415fd4d6f9a44518bfbce351b152814092077183"
+  },
+  "levels/MET_Swamp_Research/met_swamp_research.dat": {
+   "size": 17057534,
+   "sha256": "51351188f4db04b36cc3d0529756c48954c25e0d4896326aa144ff93576717c8"
+  },
+  "levels/MET_Swamp_Research/met_swamp_research.fat": {
+   "size": 11672,
+   "sha256": "9884fba7677b9afd169ce4cc1cd72c7a2438781cb0aee53a7a72b85084bf1e3b"
+  },
+  "levels/MET_Swamp_Ruins/met_swamp_ruins.dat": {
+   "size": 17235211,
+   "sha256": "536a512c5e746e633360bbed7bc635df24f3e53374267fae12317fbe848560ae"
+  },
+  "levels/MET_Swamp_Ruins/met_swamp_ruins.fat": {
+   "size": 11636,
+   "sha256": "78df48f67aae6dd0394e034ffe624fe6da1d3ab83339a145d94f1142dbd82e20"
+  },
+  "liveupdate.dat": {
+   "size": 61068,
+   "sha256": "045ba5d516c609fb0b9c948b91efaf46391595e46eb1206bc55baf673d5d3bba"
+  },
+  "liveupdate.fat": {
+   "size": 44,
+   "sha256": "611836f8bb0451082d991bbd8ad2274883ff0ac59c2655d92a9adf1a713fc04a"
+  },
+  "lua.dat": {
+   "size": 2089248,
+   "sha256": "d6790a0d2563c4e8f320932446c8d2e51399069c6b06c802fa05e291d3a408a1"
+  },
+  "lua.fat": {
+   "size": 5384,
+   "sha256": "96c1f217d371849043f01a655d68b96c56db5a41f579615ab482b769dfe14315"
+  },
+  "media/ArialUni.Ttf": {
+   "size": 23274572,
+   "sha256": "58e770f0690df91f847b2eb71b5bea357e3ebea51203682cc19b91d74810480e"
+  },
+  "media/dlcustom.xpr": {
+   "size": 1574912,
+   "sha256": "a36efb3038b26a866702af55443e78d6fb2ebb796d63d47aecd4c4051c7b785e"
+  },
+  "media/Sound.xsb": {
+   "size": 684,
+   "sha256": "beab472ec813941530caafedc62d0e85f88d3b855d642fe527cc0b542030e569"
+  },
+  "media/Wave.xwb": {
+   "size": 190012,
+   "sha256": "25a5ea6b6fb2f62fbc3b1247d36498e3b6caf88bb98bbb78648fc5ea6e5679dd"
+  },
+  "sounds_xb/dsstdfx.bin": {
+   "size": 18608,
+   "sha256": "abbcabe339455786fda506c9427005a1881958b3e31ab3ba889342232cba6f52"
+  },
+  "sounds_xb/English/fc15_ferals.LS2": {
+   "size": 6236160,
+   "sha256": "ef7b23228394b586ab9e86c50115701f3e00176c91bcdffdf08ff72aa814c70d"
+  },
+  "sounds_xb/English/fc15_pirates.LS2": {
+   "size": 34174976,
+   "sha256": "23da880bebaded620f51474683288b564be7681f4f6a6e10a9b3593c68c1def0"
+  },
+  "sounds_xb/English/fc15_rebels.LS2": {
+   "size": 35090432,
+   "sha256": "ffe13600645857a3a28b27a7830acdc450651f8b8e176a24d729758adccaa58b"
+  },
+  "sounds_xb/English/fc15_singlemaps.LS2": {
+   "size": 36452352,
+   "sha256": "6cbe6cd1708c9156007a18ab45f905af0be92a93eaef590e027307bc03d5eb07"
+  },
+  "sounds_xb/English/GameCommon.LS2": {
+   "size": 7290880,
+   "sha256": "6c2b2d6773aaee797e40c6e7498374cacc5e4390463f9871bf643534e431a256"
+  },
+  "sounds_xb/fc15_menumusic.SS2": {
+   "size": 12300288,
+   "sha256": "a9a5b50fa59dba317170d2bef208dfcb6c9fe16ef9dd948ab4550983edbfee78"
+  },
+  "sounds_xb/fc15_multimaps.SS2": {
+   "size": 3293184,
+   "sha256": "1eaeef5b120d79c451c4411958052b9452e725a71ea5091680974d1439ba1835"
+  },
+  "sounds_xb/fc15_singlemaps.SS2": {
+   "size": 59209728,
+   "sha256": "9050e32f0deaa3daf4cb2f92ea61dd16f79e355af6ada7a0ab066346ff6b773e"
+  },
+  "sounds_xb/French/fc15_ferals.LS2": {
+   "size": 6864896,
+   "sha256": "aff4f46948806ee89c49c45189add26c57ff24ce6f4fba817a27f80fd21097b2"
+  },
+  "sounds_xb/French/fc15_pirates.LS2": {
+   "size": 32188416,
+   "sha256": "488cca9b17ce3bf0308474a06f761355ea0541a17c12145b97fdeffe2f75b042"
+  },
+  "sounds_xb/French/fc15_rebels.LS2": {
+   "size": 33413120,
+   "sha256": "cf690ffdc3313c6e38f0988c36b4cd0ad61a204ec9dafbd49cb73d20c11a1745"
+  },
+  "sounds_xb/French/fc15_singlemaps.LS2": {
+   "size": 34979840,
+   "sha256": "1600a4179afc99752e1b49ade6d6def4be0ae0b6c2ddb84a79c17b9cdc0a0a8a"
+  },
+  "sounds_xb/French/GameCommon.LS2": {
+   "size": 6961152,
+   "sha256": "9f7b6ee0cb4624af29da525af34baef06ac33414788b14feb53bff9ed9b11e37"
+  },
+  "sounds_xb/GameCommon.SS2": {
+   "size": 117522432,
+   "sha256": "90fc5dba45d78369bda59a1d5dd9f8c6411e8d88be50605608e213373a598ffe"
+  },
+  "sounds_xb/German/fc15_ferals.LS2": {
+   "size": 5810176,
+   "sha256": "cdf2d8cc6ec549fa8db1f0777b0047f48d265ed9dd034b534c41026a30f0da37"
+  },
+  "sounds_xb/German/fc15_pirates.LS2": {
+   "size": 34220032,
+   "sha256": "ce98deb95d84201e8884bbc4c93df8896ed0802a7f8d5cbaf34a03ac5e5b07fd"
+  },
+  "sounds_xb/German/fc15_rebels.LS2": {
+   "size": 35442688,
+   "sha256": "51bf743dc228215b6bdb878d0ffbea9a18dd07a2c2c02f7ee6c756ba33cb6b13"
+  },
+  "sounds_xb/German/fc15_singlemaps.LS2": {
+   "size": 36909056,
+   "sha256": "54c20f882d115e1074148b041ae477520913ca51a7755e5ce0c0ae862cb364d3"
+  },
+  "sounds_xb/German/GameCommon.LS2": {
+   "size": 7491584,
+   "sha256": "89827a70086e5868b1b68ab5dc1d4208c1a0396887fee02a1e10e50b3ef05c41"
+  },
+  "sounds_xb/Italian/fc15_ferals.LS2": {
+   "size": 6070272,
+   "sha256": "1fd6555d32d6622a9318ba35a9677f750a93fa9b1a000db334cb37ea29d4ed5f"
+  },
+  "sounds_xb/Italian/fc15_pirates.LS2": {
+   "size": 36210688,
+   "sha256": "de644d7448b25a84adb99823b72a63c99514a72a88f97e6c0a3635cecdd9caa9"
+  },
+  "sounds_xb/Italian/fc15_rebels.LS2": {
+   "size": 33708032,
+   "sha256": "29b6ea8230da8eae5610ccdc48e949865b4eda7a7cdec3e03fb7716d0dddc3f2"
+  },
+  "sounds_xb/Italian/fc15_singlemaps.LS2": {
+   "size": 35209216,
+   "sha256": "92dce7aaff304b79e2eac313ab6e9a052d8b7910eef3f10d1f4d7b1ff7e88742"
+  },
+  "sounds_xb/Italian/GameCommon.LS2": {
+   "size": 6864896,
+   "sha256": "4df7ff99bae563bf9ed33ab6928cf9fd18b37c7ea2fcafff38ca71c077ada258"
+  },
+  "sounds_xb/m_menu_intromusic.SS2": {
+   "size": 13580288,
+   "sha256": "3a2ffa2f6615ef07d3713672809ca627560e7e22a8e103d30a5a62ffdf275543"
+  },
+  "sounds_xb/M_MenuMusic.SS2": {
+   "size": 12929024,
+   "sha256": "02adf709be2e74498575ca4893ffe37487e7157319d6d757cb7a90ea0678bd39"
+  },
+  "sounds_xb/Spanish/fc15_ferals.LS2": {
+   "size": 7532544,
+   "sha256": "a54d18cb4c2b4bbde269b4355a2847fbb947f02f0a70e5f3607e12b53876497a"
+  },
+  "sounds_xb/Spanish/fc15_pirates.LS2": {
+   "size": 35852288,
+   "sha256": "fbc5d39f582b4dbc6934624d7368d432390de7162194e5ff3798ded6e65dcdbd"
+  },
+  "sounds_xb/Spanish/fc15_rebels.LS2": {
+   "size": 35254272,
+   "sha256": "bef36b969407993c1ebbe4354490d90c8a53f7ab7a653169b6cbc24547f804bb"
+  },
+  "sounds_xb/Spanish/fc15_singlemaps.LS2": {
+   "size": 32477184,
+   "sha256": "43ff6080164e9dcc79cf16aef4fe9f027f6ebea7e04ea12de575bd641f263f34"
+  },
+  "sounds_xb/Spanish/GameCommon.LS2": {
+   "size": 6666240,
+   "sha256": "0f2df72af7f145cc6d24ef33634bbb840aea1b3be4dc34c039811fb912e76b66"
+  },
+  "update.xbe": {
+   "size": 2342912,
+   "sha256": "6ffeb90a2a8b2dd0f7dfcf11a78db36b196d7727bd841cccb60a2a239bac0aeb"
+  },
+  "Videos/Attract_Mode.bik": {
+   "size": 57363228,
+   "sha256": "f5a185c88a94a041d00ee1eddbd933e8b9f36c864b9ad4618159cce2b7fe4ccc"
+  },
+  "Videos/Credits.bik": {
+   "size": 9244524,
+   "sha256": "c5caf03b3e73fbd17ad1d7d7a96f7aa8307c5ab35936c9857a7abc9944e41573"
+  },
+  "Videos/Crytek.bik": {
+   "size": 1589352,
+   "sha256": "6b2297b4581c8da91a9874287097c0ef5595a8eed83f5e33f1bc57697b8c4fbd"
+  },
+  "Videos/Intro_FCI.bik": {
+   "size": 6562120,
+   "sha256": "d345ea29a951af5953452848c321d95606bc74641ffcec3a653440823c89ddd5"
+  },
+  "Videos/MenusBack_sun.bik": {
+   "size": 4005360,
+   "sha256": "7083026ae5eb6f0ac5433069b38cdb137f3d29d1e38ada2b6693ed18fcd279cd"
+  },
+  "Videos/StartMenu_boat.bik": {
+   "size": 4005360,
+   "sha256": "7083026ae5eb6f0ac5433069b38cdb137f3d29d1e38ada2b6693ed18fcd279cd"
+  },
+  "Videos/Ubisoft.bik": {
+   "size": 2836116,
+   "sha256": "9fd26a46e5d4c29735a6770922b821980850dae294b9b10ba683fe74f0c631f5"
+  },
+  "weaponpack.dat": {
+   "size": 4312081,
+   "sha256": "594b4c307a394236f304775f766641b064bb5929f93fea7e7ca63fdab804a907"
+  },
+  "weaponpack.fat": {
+   "size": 8720,
+   "sha256": "522706abf9d2d1281481fdd2b1dc4c947020ad0a9d79b071238298e83356926e"
+  }
+ }
+}

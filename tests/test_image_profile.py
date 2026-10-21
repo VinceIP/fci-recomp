@@ -119,3 +119,18 @@ def test_argument_overflow_fails_without_overwrite(launch_dll):
     assert launch_dll.fci_quote_arg(buf, 4, c.byref(used), b"too long") == 0
     assert buf.raw[4:] == b"EFGH\0"
     assert used.value < 4
+
+
+def test_title_names_reach_the_header():
+    import titles
+
+    profile = json.loads(PROFILE.read_text())
+    evo = titles.TITLES["evolution"]
+    profile.update(title_name=evo.name, game_exe=evo.game_exe, editor_exe=evo.editor_exe, appdata=evo.appdata)
+    header = image_profile.profile_header(profile)
+    assert '#define FCI_TITLE_NAME "Far Cry Instincts Evolution"' in header
+    assert '#define FCI_EDITOR_EXE_NAME "FarCryEvolutionEditor.exe"' in header
+    assert r'#define FCI_APPDATA "fci-recomp\\evolution"' in header  # a C string's escaped backslash
+    profile["game_exe"] = 'x.exe" injected'
+    with pytest.raises(ValueError):
+        image_profile.profile_header(profile)

@@ -20,8 +20,9 @@ Runs in <regress>/drive/<name>-<time> and prints each step's time. The builds un
 <regress>/bin first, so the installed game stays free to play or rebuild; the game is ended at the end,
 whatever happened.
 
-  FCI_INSTALL   the installed game (default: "Far Cry Instincts" in the repository): FarCryInstincts.exe,
-                FarCryInstinctsEditor.exe, fci-kinit.dll and the game files in game/
+  FCI_TITLE     the game: instincts (default) or evolution (tools/titles.py: its executables' names)
+  FCI_INSTALL   the installed game (default: the game's folder in the repository): its executable, the
+                map editor's, fci-kinit.dll and the game files in game/
   FCI_GAME_EXE, FCI_EDITOR_EXE, FCI_GAME_DIR   other builds or game files instead
   FCI_REGRESS   the test folder: fixtures, references and runs (default: build/regress); it holds data
                 from the game, so it stays out of Git
@@ -37,15 +38,19 @@ import threading
 import time
 
 REPO = Path(__file__).resolve().parents[1]
-INSTALL = Path(os.environ.get("FCI_INSTALL", REPO / "Far Cry Instincts"))
+sys.path.insert(0, str(REPO / "tools"))
+import titles  # noqa: E402
+
+TITLE = titles.TITLES[os.environ.get("FCI_TITLE", "instincts")]
+INSTALL = Path(os.environ.get("FCI_INSTALL", REPO / TITLE.install))
 GAME_DIR = Path(os.environ.get("FCI_GAME_DIR", INSTALL / "game"))
-SOURCE_GAME_EXE = Path(os.environ.get("FCI_GAME_EXE", INSTALL / "FarCryInstincts.exe"))
-SOURCE_EDITOR_EXE = Path(os.environ.get("FCI_EDITOR_EXE", INSTALL / "FarCryInstinctsEditor.exe"))
+SOURCE_GAME_EXE = Path(os.environ.get("FCI_GAME_EXE", INSTALL / TITLE.game_exe))
+SOURCE_EDITOR_EXE = Path(os.environ.get("FCI_EDITOR_EXE", INSTALL / TITLE.editor_exe))
 REGRESS = Path(os.environ.get("FCI_REGRESS", REPO / "build" / "regress"))
 FIXTURES = REGRESS / "fixtures"
 # the copies that run (stage_builds)
-GAME_EXE = REGRESS / "bin" / "FarCryInstincts.exe"
-EDITOR_EXE = REGRESS / "bin" / "FarCryInstinctsEditor.exe"
+GAME_EXE = REGRESS / "bin" / TITLE.game_exe
+EDITOR_EXE = REGRESS / "bin" / TITLE.editor_exe
 KINIT = REGRESS / "bin" / "fci-kinit.dll"
 
 
@@ -58,6 +63,8 @@ def stage_builds():
         (SOURCE_GAME_EXE.with_name("fci-kinit.dll"), KINIT),
     ):
         if not src.exists():
+            if dst == EDITOR_EXE:  # an install without the editor; only --editor runs need it
+                continue
             raise SystemExit(f"error: {src} is missing (set FCI_INSTALL or FCI_GAME_EXE / FCI_EDITOR_EXE)")
         if not dst.exists() or dst.read_bytes() != src.read_bytes():
             shutil.copy2(src, dst)

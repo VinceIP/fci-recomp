@@ -7,18 +7,21 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 import build  # noqa: E402
 import lift  # noqa: E402
+import titles  # noqa: E402
 
 TC = {"msvc": "14.51.1", "windows_sdk": "10.0.26100.0", "cl": "cl.exe"}
 
 
 def test_lift_is_current_only_with_the_same_inputs(tmp_path):
-    assert not lift.current("default.xbe", tmp_path)  # nothing there
+    fci, evo = titles.TITLES["instincts"], titles.TITLES["evolution"]
+    assert not lift.current("default.xbe", fci, tmp_path)  # nothing there
     record = tmp_path / "lift.json"
-    record.write_text(json.dumps({"inputs_sha256": lift.inputs_digest("default.xbe")}))
-    assert lift.current("default.xbe", tmp_path)
-    assert not lift.current("ige.xbe", tmp_path)  # the editor's seeds and profile differ
+    record.write_text(json.dumps({"inputs_sha256": lift.inputs_digest("default.xbe", fci)}))
+    assert lift.current("default.xbe", fci, tmp_path)
+    assert not lift.current("ige.xbe", fci, tmp_path)  # the editor's seeds and profile differ
+    assert not lift.current("default.xbe", evo, tmp_path)  # another game's seeds and profile
     record.write_text(json.dumps({"inputs_sha256": "0" * 64}))  # made before an update
-    assert not lift.current("default.xbe", tmp_path)
+    assert not lift.current("default.xbe", fci, tmp_path)
 
 
 def test_build_is_current_only_with_the_same_lift_and_compiler(tmp_path):

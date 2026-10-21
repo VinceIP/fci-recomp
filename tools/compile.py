@@ -16,6 +16,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import struct
 import subprocess
 import sys
@@ -92,7 +93,10 @@ GEN_OPT = "/O1"  # the generated C, optimised for size
 #  override: instructions the lifter cannot express (privileged CPU state); src/fci_cpu.c implements them
 #  prehook: fci_prehook_<va>() runs, then the unchanged lifted body
 #  gate: fci_gate_<va>() runs first; nonzero means it returned for the function and the body is skipped
-# The map editor's replacements come from its image profile (data/ige.profile.json).
+# The map editor's and other games' replacements come from their image profiles (data/ige.profile.json,
+# data/<title>/*.profile.json). There a third element names the runtime's hook by the address it was written
+# for, when it is the same function in another executable: ["prehook", "why", "001F6C00"] calls
+# fci_prehook_001F6C00.
 REPLACE = {
     "sub_000674C6": (
         "quarantine",
@@ -294,15 +298,16 @@ def replace_bodies(source, work, record, prefix=""):
         kind = REPLACE[name][0]
         head = b"\nvoid " + name.encode() + b"(void)\n{"
         n = name.encode()
+        hook = REPLACE[name][2].encode() if len(REPLACE[name]) > 2 else n[4:]
         if kind == "prehook":
             text = text.replace(head, b"\nvoid " + n + b"_fci_body(void)\n{", 1)
-            text += b"\nvoid " + n + b"(void) { fci_prehook_" + n[4:] + b"(); " + n + b"_fci_body(); }\n"
-            protos += [b"void fci_prehook_" + n[4:] + b"(void);", b"void " + n + b"_fci_body(void);"]
+            text += b"\nvoid " + n + b"(void) { fci_prehook_" + hook + b"(); " + n + b"_fci_body(); }\n"
+            protos += [b"void fci_prehook_" + hook + b"(void);", b"void " + n + b"_fci_body(void);"]
             continue
         if kind == "gate":
             text = text.replace(head, b"\nvoid " + n + b"_fci_body(void)\n{", 1)
-            text += b"\nvoid " + n + b"(void) { if (fci_gate_" + n[4:] + b"()) return; " + n + b"_fci_body(); }\n"
-            protos += [b"int fci_gate_" + n[4:] + b"(void);", b"void " + n + b"_fci_body(void);"]
+            text += b"\nvoid " + n + b"(void) { if (fci_gate_" + hook + b"()) return; " + n + b"_fci_body(); }\n"
+            protos += [b"int fci_gate_" + hook + b"(void);", b"void " + n + b"_fci_body(void);"]
             continue
         start = text.index(head) + len(head)
         end = text.index(b"\n}\n", start)
@@ -565,7 +570,11 @@ def compile_groups(group, inputs, work, obj, base, inc, winrt, dumpbin, record):
         # FCI_CALL_PROFILE=1 (diagnostic): every direct call counts its target (fci_probe.c)
         prof = ["/DRECOMP_CALL_PROFILE"] if os.environ.get("FCI_CALL_PROFILE") == "1" else []
         record["call_profile"] = bool(prof)
-        groups.append(([GEN_OPT, "/W0", *parallel, *prof] + ["/I" + str(p) for p in [gen] + inc], sources))
+        cache = os.environ.get("FCI_OBJ_CACHE")
+        if cache:  # build.py --obj-cache: an unchanged file's object from an earlier build
+            sources = cached_objects(Path(cache), sources, gen, inputs, base + [GEN_OPT, "/W0", *prof], obj, record)
+        if sources:
+            groups.append(([GEN_OPT, "/W0", *parallel, *prof] + ["/I" + str(p) for p in [gen] + inc], sources))
     else:
         raise ValueError("unknown group")
     record["compiles"] = []
@@ -582,6 +591,33 @@ def compile_groups(group, inputs, work, obj, base, inc, winrt, dumpbin, record):
             break
     if group == "xbr" and all(c["exit"] == 0 for c in record["compiles"]):
         list_xbr(inputs, work, obj, base, inc, dumpbin, record)
+    if record.get("cache_keys") and all(c["exit"] == 0 for c in record["compiles"]):
+        for name, key in record["cache_keys"].items():
+            shutil.copy2(obj / (Path(name).stem + ".obj"), Path(os.environ["FCI_OBJ_CACHE"]) / (key + ".obj"))
+
+
+def cached_objects(cache, sources, gen, inputs, flags, obj, record):
+    """copy the objects the cache has for these sources into obj and return the rest; the key is what
+    the compile reads (the rewritten source, the generated headers, the profile header it force-includes,
+    the compiler) and its flags without the build's own paths"""
+    cache.mkdir(parents=True, exist_ok=True)
+    shared = hashlib.sha256(record["compiler_sha256"].encode())
+    shared.update("\0".join(f for f in flags if not f.startswith(("/FI", "/I", "/Fo"))).encode())
+    for header in [*sorted(gen.glob("*.h")), inputs / "image-profile.h"]:
+        if header.exists():
+            shared.update(header.name.encode() + b"\0" + header.read_bytes())
+    missing, record["cached"], record["cache_keys"] = [], [], {}
+    for source in sources:
+        h = shared.copy()
+        h.update(source.read_bytes())
+        key = h.hexdigest()
+        if (cache / (key + ".obj")).exists():
+            shutil.copy2(cache / (key + ".obj"), obj / (source.stem + ".obj"))
+            record["cached"].append(source.name)
+        else:
+            missing.append(source)
+            record["cache_keys"][source.name] = key
+    return missing
 
 
 def list_xbr(inputs, work, obj, base, inc, dumpbin, record):

@@ -7,8 +7,9 @@
   --out       created; receives the lifter's copy of the toolkit, its analysis and the generated C
 
 Steps: copy the toolkit and apply this project's lifter patches (patches/lifter); parse the XBE;
-disassemble from the image's seed list (data/<image>.seeds.json: function starts the automatic analysis
-misses); identify functions and their calling conventions; translate every function to C in <out>/gen.
+disassemble from the image's seed list (<title data>/<image>.seeds.json, tools/titles.py: function starts
+the automatic analysis misses); identify functions and their calling conventions; translate every function
+to C in <out>/gen.
 For the map editor, the entries measured at run time (data/ige.profile.json "supplemental_entries") are
 translated into <out>/supp. The result is the same, byte for byte, on any machine.
 
@@ -25,12 +26,9 @@ import sys
 import time
 
 REPO = Path(__file__).resolve().parents[1]
-DATA = REPO / "data"
 LIFTER_HELPER = REPO / "patches" / "lifter" / "fci_direct.py"
-IMAGE_SHA256 = {
-    "default.xbe": "9796c818c350a05e6756bd6f87e7cbe5e028e9b7b30563c674df9ea019fc4ae1",
-    "ige.xbe": "8d6f9da1c2d9e588f8e4eaf4ad8a68a0212ca1310adb76616bf31e8f489b1968",
-}
+sys.path.insert(0, str(REPO / "tools"))
+import titles  # noqa: E402
 
 
 def sha256(path):
@@ -167,9 +165,9 @@ def supplement(toolkit, xbe, profile, out):
     return len(entries)
 
 
-def inputs_digest(image):
-    """what a lift of image takes from this repository: the toolkit pin, the lifter patches, the seeds and
-    the image profile (line endings normalised)"""
+def inputs_digest(image, title):
+    """what a lift of title's image takes from this repository: the toolkit pin, the lifter patches, the seeds
+    and the image profile (line endings normalised)"""
     sys.path.insert(0, str(REPO / "tools"))
     import patches
 
@@ -181,29 +179,30 @@ def inputs_digest(image):
         REPO / "tools" / "patches.py",
         *patches.series("lifter"),
         LIFTER_HELPER,
-        DATA / f"{stem}.seeds.json",
-        DATA / f"{stem}.profile.json",
+        title.data / f"{stem}.seeds.json",
+        title.data / f"{stem}.profile.json",
     ):
         if p.exists():
             h.update(p.name.encode() + b"\0" + p.read_bytes().replace(b"\r\n", b"\n"))
     return h.hexdigest()
 
 
-def current(image, out):
-    """out holds a finished lift of image from the repository's present inputs"""
+def current(image, title, out):
+    """out holds a finished lift of title's image from the repository's present inputs"""
     try:
         record = json.loads((Path(out) / "lift.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return False
-    return record.get("inputs_sha256") == inputs_digest(image)
+    return record.get("inputs_sha256") == inputs_digest(image, title)
 
 
 def lift(image, xbe, toolkit, out, tag=None):
     """tag: the lift runs beside another one; its progress lines carry this name"""
-    if image not in IMAGE_SHA256:
+    if image not in titles.IMAGES:
         raise SystemExit(f"error: unknown image {image} (default.xbe or ige.xbe)")
-    if sha256(xbe) != IMAGE_SHA256[image]:
-        raise SystemExit(f"error: {xbe} is not the supported release of {image}")
+    title = titles.of_image(image, xbe)
+    if not title:
+        raise SystemExit(f"error: {xbe} is not the supported release of {image} of any title")
     if not (Path(toolkit) / "tools" / "recomp").is_dir():
         raise SystemExit(f"error: {toolkit} is not an xboxrecomp checkout")
     out = Path(out)
@@ -213,14 +212,15 @@ def lift(image, xbe, toolkit, out, tag=None):
     started = time.time()
     lifter = out / "toolkit"
     fixes = prepare_toolkit(Path(toolkit), lifter)
-    print(f"lifting {image}: toolkit prepared ({len(fixes)} lifter patches)")
-    run_steps(lifter, Path(xbe).resolve(), DATA / f"{Path(image).stem}.seeds.json", out, out / "lift.log", tag)
-    profile_path = DATA / f"{Path(image).stem}.profile.json"
+    print(f"lifting {title.name} {image}: toolkit prepared ({len(fixes)} lifter patches)")
+    run_steps(lifter, Path(xbe).resolve(), title.data / f"{Path(image).stem}.seeds.json", out, out / "lift.log", tag)
+    profile_path = title.data / f"{Path(image).stem}.profile.json"
     extra = supplement(lifter, xbe, json.loads(profile_path.read_text()), out) if profile_path.exists() else 0
     record = {
         "image": image,
-        "xbe_sha256": IMAGE_SHA256[image],
-        "inputs_sha256": inputs_digest(image),
+        "title": title.key,
+        "xbe_sha256": title.images[image],
+        "inputs_sha256": inputs_digest(image, title),
         "lifter_patches": fixes,
         "generated": {p.name: sha256(p) for p in sorted((out / "gen").iterdir())},
         "supplemental_entries": extra,
@@ -237,7 +237,7 @@ def lift(image, xbe, toolkit, out, tag=None):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("image", choices=sorted(IMAGE_SHA256))
+    ap.add_argument("image", choices=titles.IMAGES)
     ap.add_argument("--xbe", required=True)
     ap.add_argument("--toolkit", required=True)
     ap.add_argument("--out", required=True)

@@ -1,17 +1,20 @@
-"""Build Far Cry Instincts for Windows from your own copy of the original Xbox disc.
+"""Build Far Cry Instincts or Evolution for Windows from your own copy of the original Xbox disc.
 
   python fci-recomp.py setup <disc> [--install <folder>] [--editor] [--work <folder>] [--jobs N]
-  python fci-recomp.py editor [--install <folder>] [--work <folder>] [--jobs N]
+  python fci-recomp.py editor [--title instincts|evolution] [--install <folder>] [--work <folder>] [--jobs N]
 
   setup        check the disc, copy its files, recompile and build the game, install it
   editor       build the map editor for a game set up earlier (the game's Map Editor menu starts it)
 
-  <disc>       an Xbox disc image (XISO or full dump) or a folder with the disc's files
-  --install    where the game goes: FarCryInstincts.exe, fci.ini and the game files (default:
-               "Far Cry Instincts" in this folder)
+  <disc>       an Xbox disc image (XISO or full dump) or a folder with the disc's files; which game it is
+               decides the rest (tools/titles.py)
+  --install    where the game goes: its executable, fci.ini and the game files (default: the game's name,
+               "Far Cry Instincts" or "Far Cry Instincts Evolution", in this folder)
+  --title      for editor: which game, when both are set up here
   --editor     build the map editor too
   --work       where the toolkit, the compiler, the generated C and the build go (default: build/ in
-               this folder); about 10 GB, and it can be deleted afterwards
+               this folder); about 10 GB per game, and it can be deleted afterwards. Both games share the
+               compiler and the toolkit.
   --jobs       compilers at once (default: by the processor's cores and the memory, about 2 GB each)
   --accept-msvc-license   accept Microsoft's Build Tools license terms without asking (only used when
                Visual Studio is not installed and its compiler is downloaded)
@@ -35,8 +38,16 @@ import time
 VERSION = "0.1.2"
 REPO = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO / "tools"))
+import titles  # noqa: E402
+
 IMAGES = {"game": "default.xbe", "editor": "ige.xbe"}
-EXES = {"game": "FarCryInstincts.exe", "editor": "FarCryInstinctsEditor.exe"}
+
+
+def parts_dir(work, title, kind, image):
+    """work/<kind>/<image stem>; a game other than Instincts under work/<kind>/<title>/ (Instincts keeps the
+    folders of earlier versions, so its builds resume)"""
+    base = work / kind if title.key == "instincts" else work / kind / title.key
+    return base / Path(image).stem
 
 
 def check_python():
@@ -93,30 +104,45 @@ def repository_commit():
         return None
 
 
-def copy_game(disc_path, game):
+def open_disc(disc_path):
+    """the disc and the game on it"""
     import disc
 
-    if (game / "default.xbe").exists():
-        print("  the game files are in place already")
-        return
     try:
         source = disc.open_disc(disc_path)
     except disc.DiscError as e:
         raise SystemExit(f"error: {e}")
-    problems = disc.verify(source)
+    title = disc.identify(source)
+    if title is None:
+        raise SystemExit(
+            "error: this disc is not a supported release: its default.xbe matches neither Far Cry Instincts "
+            "(title 55530008, version 1) nor Far Cry Instincts Evolution (title 55530060, version 3)"
+        )
+    return source, title
+
+
+def copy_game(source, title, game):
+    import disc
+
+    if (game / "default.xbe").exists():
+        if titles.of_image("default.xbe", game / "default.xbe") != title:
+            raise SystemExit(f"error: {game} holds another game's files; choose another --install folder")
+        print("  the game files are in place already")
+        return
+    problems = disc.verify(source, title=title)
     if problems:
-        print("This is not the supported Far Cry Instincts release (title 55530008, version 1):")
+        print(f"This is not the supported {title.name} release (title {title.title_id}):")
         for p in problems[:20]:
             print("  " + p)
         raise SystemExit(1)
     partial = game.with_name(game.name + ".partial")
     if partial.exists():
         shutil.rmtree(partial)
-    disc.extract(source, partial)
+    disc.extract(source, partial, title)
     partial.rename(game)
 
 
-def translate(parts, install, work):
+def translate(parts, title, install, work):
     """lift the game and/or the editor to C; two lifts run side by side (each is one process). A lift
     made from the same inputs earlier is kept; one from older inputs (an updated repository) is redone."""
     from concurrent.futures import ThreadPoolExecutor
@@ -126,8 +152,8 @@ def translate(parts, install, work):
     todo = []
     for part in parts:
         image = IMAGES[part]
-        out = work / "lift" / Path(image).stem
-        if lift.current(image, out):
+        out = parts_dir(work, title, "lift", image)
+        if lift.current(image, title, out):
             print(f"  {image}: recompiled to C earlier")
             continue
         if out.exists():
@@ -144,26 +170,31 @@ def translate(parts, install, work):
             f.result()
 
 
-def compile_part(part, install, work, jobs, tc):
+def compile_part(part, title, install, work, jobs, tc):
     """build the game or the editor from its lift, then install its executable"""
     import build
 
     image = IMAGES[part]
     stem = Path(image).stem
-    lifted, built = work / "lift" / stem, work / "build" / stem
+    lifted, built = parts_dir(work, title, "lift", image), parts_dir(work, title, "build", image)
     if build.current(built, lifted, tc):
         print(f"  {image}: built earlier")
     else:
         if built.exists():
             shutil.rmtree(built)
         build.build(image, install / "game" / image, lifted, work / "deps", built, jobs, tc)
-    shutil.copy2(built / "bin" / "fci-whole.exe", install / EXES[part])
+    shutil.copy2(built / "bin" / "fci-whole.exe", install / title.exe(image))
     if part == "game":
         shutil.copy2(built / "bin" / "fci-kinit.dll", install / "fci-kinit.dll")
     record = install / "build.json"
     info = json.loads(record.read_text(encoding="utf-8")) if record.exists() else {}
     info.update(
-        {"version": VERSION, "repository_commit": repository_commit(), "built": time.strftime("%Y-%m-%d %H:%M")}
+        {
+            "version": VERSION,
+            "title": title.key,
+            "repository_commit": repository_commit(),
+            "built": time.strftime("%Y-%m-%d %H:%M"),
+        }
     )
     info.setdefault("lift", {})[stem] = json.loads((lifted / "lift.json").read_text())["xbe_sha256"]
     record.write_text(json.dumps(info, indent=1) + "\n", encoding="utf-8")
@@ -179,48 +210,79 @@ def fetch_deps(work):
             raise SystemExit(f"error: fetching {name} failed ({e}). {NETWORK_HINT}")
 
 
+def install_ini(title, install):
+    """the options file, its default folders under the title's %APPDATA% folder"""
+    if not (install / "fci.ini").exists():
+        text = (REPO / "src" / "fci.ini").read_text(encoding="utf-8")
+        text = text.replace("%APPDATA%\\fci-recomp\\", f"%APPDATA%\\{title.appdata}\\")
+        (install / "fci.ini").write_text(text, encoding="utf-8")
+
+
 def setup(a):
     started = time.time()
     check_python()
-    install, work = Path(a.install).resolve(), Path(a.work).resolve()
+    source, title = open_disc(a.disc)
+    print(title.name)
+    install, work = Path(a.install or REPO / title.install).resolve(), Path(a.work).resolve()
     preflight(work, install, 2 if a.editor else 1, a.download_compiler)
     install.mkdir(parents=True, exist_ok=True)
     print("1/5 Checking and copying the disc's files")
-    copy_game(a.disc, install / "game")
+    copy_game(source, title, install / "game")
     print("2/5 Finding the compiler")
     tc = find_toolchain(work, a.accept_msvc_license, a.download_compiler)
     print("3/5 Fetching the recompiler toolkit")
     fetch_deps(work)
     parts = ["game", "editor"] if a.editor else ["game"]
     print("4/5 Recompiling the game's code to C" + (" (the game and the map editor side by side)" if a.editor else ""))
-    translate(parts, install, work)
+    translate(parts, title, install, work)
     print("5/5 Building")
     for part in parts:
-        compile_part(part, install, work, a.jobs, tc)
-    if not (install / "fci.ini").exists():
-        shutil.copy2(REPO / "src" / "fci.ini", install / "fci.ini")
+        compile_part(part, title, install, work, a.jobs, tc)
+    install_ini(title, install)
     print(
-        f"Done in {(time.time() - started) / 60:.0f} minutes. Start {install / EXES['game']}; "
+        f"Done in {(time.time() - started) / 60:.0f} minutes. Start {install / title.game_exe}; "
         f"settings are in {install / 'fci.ini'}."
     )
     if not a.editor:
         print("The map editor is not built; run BuildEditor.cmd (or: fci-recomp.py editor) to add it.")
 
 
+def installed_title(a):
+    """the game an editor build is for: --install's, --title's, or the one game set up here"""
+    if a.install:
+        game = Path(a.install) / "game" / "default.xbe"
+        title = titles.of_image("default.xbe", game) if game.exists() else None
+        if title is None:
+            raise SystemExit(f"error: set up the game in {a.install} first (BuildGame.cmd or: fci-recomp.py setup)")
+        return title, Path(a.install).resolve()
+    if a.title:
+        title = titles.TITLES[a.title]
+        return title, (REPO / title.install).resolve()
+    found = [t for t in titles.TITLES.values() if (REPO / t.install / "game" / "default.xbe").exists()]
+    if len(found) != 1:
+        raise SystemExit(
+            "error: set up a game first (BuildGame.cmd)"
+            if not found
+            else "error: both games are set up here; choose one with --title instincts or --title evolution"
+        )
+    return found[0], (REPO / found[0].install).resolve()
+
+
 def editor(a):
     started = time.time()
     check_python()
-    install, work = Path(a.install).resolve(), Path(a.work).resolve()
-    if not (install / EXES["game"]).exists() or not (install / "game" / "ige.xbe").exists():
+    title, install = installed_title(a)
+    work = Path(a.work).resolve()
+    if not (install / title.game_exe).exists() or not (install / "game" / "ige.xbe").exists():
         raise SystemExit(f"error: set up the game in {install} first (BuildGame.cmd or: fci-recomp.py setup)")
     preflight(work, install, 1, a.download_compiler)
     tc = find_toolchain(work, a.accept_msvc_license, a.download_compiler)
     fetch_deps(work)
-    translate(["editor"], install, work)
-    compile_part("editor", install, work, a.jobs, tc)
+    translate(["editor"], title, install, work)
+    compile_part("editor", title, install, work, a.jobs, tc)
     print(
         f"Done in {(time.time() - started) / 60:.0f} minutes. The game's Map Editor menu starts "
-        f"{install / EXES['editor']}."
+        f"{install / title.editor_exe}."
     )
 
 
@@ -231,8 +293,9 @@ def main():
     s.add_argument("disc")
     s.add_argument("--editor", action="store_true")
     e = sub.add_parser("editor", help="build the map editor for a game set up earlier")
+    e.add_argument("--title", choices=sorted(titles.TITLES))
     for p in (s, e):
-        p.add_argument("--install", default=str(REPO / "Far Cry Instincts"))
+        p.add_argument("--install")
         p.add_argument("--work", default=str(REPO / "build"))
         p.add_argument("--jobs", type=int)
         p.add_argument("--accept-msvc-license", action="store_true")

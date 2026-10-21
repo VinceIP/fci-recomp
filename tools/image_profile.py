@@ -30,20 +30,37 @@ def profile_header(profile):
     if expected not in profile["replacements"]:
         raise ValueError("descriptor override missing")
     for fn, action in profile["replacements"].items():
-        if not re.fullmatch(r"sub_[0-9A-F]{8}", fn) or action[0] not in ("override", "prehook", "quarantine"):
+        if not re.fullmatch(r"sub_[0-9A-F]{8}", fn) or action[0] not in ("override", "prehook", "quarantine", "gate"):
             raise ValueError("invalid replacement")
+        if len(action) > 2 and (action[0] not in ("prehook", "gate") or not re.fullmatch(r"[0-9A-F]{8}", action[2])):
+            raise ValueError("invalid replacement hook")
     lines = [f"#define {k} 0x{v:08X}u" for k, v in values.items()]
     lines += [
         f'#define FCI_IMAGE_FILENAME "{name}"',
         f"#define fci_override_004B03B4 fci_override_{handler:08X}",
         f"#define FCI_HAS_SUPPLEMENT {int(bool(profile.get('supplemental_entries')))}",
-        "",
     ]
+    # the title's names (tools/titles.py, added by build.py; src/fci_image.h has Instincts')
+    for key, define in (
+        ("title_name", "FCI_TITLE_NAME"),
+        ("game_exe", "FCI_GAME_EXE_NAME"),
+        ("editor_exe", "FCI_EDITOR_EXE_NAME"),
+        ("appdata", "FCI_APPDATA"),
+    ):
+        if key in profile:
+            if not re.fullmatch(r"[A-Za-z0-9 ._\\-]+", profile[key]):
+                raise ValueError(f"invalid {key}")
+            lines.append(f'#define {define} "{profile[key].replace(chr(92), chr(92) * 2)}"')
+    lines.append("")
     return "\n".join(lines)
 
 
-def stage_profile(profile_path, image_path, inputs):
+def stage_profile(profile_path, image_path, inputs, title=None):
     profile = json.loads(Path(profile_path).read_text())
+    if title:
+        profile.update(
+            title_name=title.name, game_exe=title.game_exe, editor_exe=title.editor_exe, appdata=title.appdata
+        )
     image = Path(image_path).read_bytes()
     if len(image) != profile["image_bytes"] or hashlib.sha256(image).hexdigest() != profile["image_sha256"]:
         raise ValueError("XBE does not match compile profile")

@@ -8,6 +8,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 import disc  # noqa: E402
+import titles  # noqa: E402
 
 SECTOR = disc.SECTOR
 
@@ -64,6 +65,23 @@ def build_image(path, files):
 FILES = {"default.xbe": b"x" * 5000, "Videos/intro.bik": b"v" * 3000, "skip.xbe": b"s" * 10}
 
 
+def fake_title(tmp_path, monkeypatch, files):
+    """a title whose data folder holds the manifest of files and whose default.xbe is files' one"""
+    manifest(tmp_path, files)
+    t = titles.Title(
+        key="fake",
+        name="Fake",
+        title_id="55530008",
+        data=tmp_path,
+        game_exe="Fake.exe",
+        editor_exe="FakeEditor.exe",
+        appdata="fake",
+        images={"default.xbe": hashlib.sha256(files["default.xbe"]).hexdigest()},
+    )
+    monkeypatch.setitem(titles.TITLES, "fake", t)
+    return t
+
+
 def manifest(tmp_path, files):
     m = {
         "title_id": "55530008",
@@ -86,8 +104,9 @@ def test_image_files_and_contents(tmp_path):
 
 def test_verify_and_extract(tmp_path, monkeypatch):
     build_image(tmp_path / "game.iso", FILES)
-    monkeypatch.setattr(disc, "MANIFEST", manifest(tmp_path, FILES))
+    title = fake_title(tmp_path, monkeypatch, FILES)
     image = disc.Image(tmp_path / "game.iso")
+    assert disc.identify(image) == title
     assert disc.verify(image, quiet=True) == []
     disc.extract(image, tmp_path / "out")
     assert (tmp_path / "out" / "Videos" / "intro.bik").read_bytes() == FILES["Videos/intro.bik"]
@@ -97,8 +116,16 @@ def test_verify_and_extract(tmp_path, monkeypatch):
 def test_verify_reports_a_changed_file(tmp_path, monkeypatch):
     changed = dict(FILES, **{"Videos/intro.bik": b"w" * 3000})
     build_image(tmp_path / "game.iso", changed)
-    monkeypatch.setattr(disc, "MANIFEST", manifest(tmp_path, FILES))
-    assert disc.verify(disc.Image(tmp_path / "game.iso"), quiet=True) == ["different: Videos/intro.bik"]
+    title = fake_title(tmp_path, monkeypatch, FILES)
+    image = disc.Image(tmp_path / "game.iso")
+    assert disc.verify(image, quiet=True, title=title) == ["different: Videos/intro.bik"]
+
+
+def test_an_unknown_default_xbe_is_no_supported_title(tmp_path):
+    build_image(tmp_path / "game.iso", FILES)
+    image = disc.Image(tmp_path / "game.iso")
+    assert disc.identify(image) is None
+    assert disc.verify(image, quiet=True) == ["default.xbe: not the supported release of any game this project builds"]
 
 
 def test_not_a_disc(tmp_path):

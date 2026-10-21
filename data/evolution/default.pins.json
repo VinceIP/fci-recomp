@@ -1,0 +1,26 @@
+{
+ "image_sha256": "ced4d535bbfcc66567d0f95772d14f965f970fdeaf39cfbd556142c7c2ada68d",
+ "comment": "Exploratory Evolution pins: Instincts' found by masked bytes, the allocator through D3D's calls.",
+ "symbols": {
+  "XMemAlloc": {
+   "va": "0x00012CDF",
+   "evidence": "called by D3D surface creation 003C3E10 (Instincts' 00510910 by bytes) at +0x33 and +0x44, as Instincts' XMemAlloc"
+  },
+  "XMemFree": {
+   "va": "0x00012DA2",
+   "evidence": "called by D3D surface creation at +0x53 and resource destroy 003BF800 (Instincts' 0050C300 by bytes) twice, as XMemFree"
+  },
+  "D3DDevice_RunPushBuffer": {
+   "va": "0x003C3FC0",
+   "evidence": "Instincts' 00510AC0, first 64 bytes, addresses masked: unique match"
+  },
+  "D3DDevice_BeginVisibilityTest": {
+   "va": "0x003BA730",
+   "evidence": "Instincts' 00507230, first 64 bytes, addresses masked: unique match"
+  },
+  "D3DDevice_EndVisibilityTest": {
+   "va": "0x003BA7D0",
+   "evidence": "Instincts' 005072D0, first 64 bytes, addresses masked: unique match"
+  }
+ }
+}

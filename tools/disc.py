@@ -1,13 +1,14 @@
-"""Check a Far Cry Instincts disc and copy the game files from it.
+"""Check a game disc (Far Cry Instincts or Evolution) and copy the game files from it.
 
   python -B tools/disc.py verify <disc>              check every file against the known release
   python -B tools/disc.py extract <disc> <folder>    check, then copy the game files into <folder>
 
 <disc> is an extracted copy of the disc (a folder with default.xbe in it) or a disc image: an XISO, or a
 full dump of the disc (redump style), which has the game partition further in. Every file is compared by
-size and SHA-256 with data/disc.json, the one release this project supports (title
-55530008, version 1). Nothing is written unless all of it matches. Three executables on the disc are not
-copied: dashupdate.xbe (a Microsoft dashboard update) and two content updaters the game never runs here.
+size and SHA-256 with the title's disc.json (tools/titles.py; the title is found from default.xbe), the one
+release of each game this project supports. Nothing is written unless all of it matches. Three executables
+on the disc are not copied: dashupdate.xbe (a Microsoft dashboard update) and two content updaters the game
+never runs here.
 """
 
 import argparse
@@ -17,7 +18,9 @@ from pathlib import Path
 import struct
 import sys
 
-MANIFEST = Path(__file__).resolve().parents[1] / "data" / "disc.json"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import titles  # noqa: E402
+
 SECTOR = 2048
 MAGIC = b"MICROSOFT*XBOX*MEDIA"
 # where the game partition starts in a disc image: an XISO, then the full dumps of the three disc layouts
@@ -100,7 +103,7 @@ class Folder:
     def __init__(self, path):
         self.root = Path(path)
         if not (self.root / "default.xbe").is_file():
-            raise DiscError(f"{path} has no default.xbe: not an extracted Far Cry Instincts disc")
+            raise DiscError(f"{path} has no default.xbe: not an extracted game disc")
         self.files = {p.relative_to(self.root).as_posix(): None for p in self.root.rglob("*") if p.is_file()}
 
     def open(self, path):
@@ -126,9 +129,27 @@ def hash_file(f, progress):
     return h.hexdigest(), n
 
 
-def verify(disc, quiet=False):
-    """the problems with this disc; an empty list means it is the supported release"""
-    manifest = json.loads(MANIFEST.read_text())
+def identify(disc):
+    """the title whose supported default.xbe this disc has, or None"""
+    name = next((k for k in disc.files if k.lower() == "default.xbe"), None)
+    if name is None:
+        return None
+    with disc.open(name) as f:
+        digest, _ = hash_file(f, lambda n: None)
+    return titles.of_digest("default.xbe", digest)
+
+
+def manifest_of(title):
+    return json.loads((title.data / "disc.json").read_text())
+
+
+def verify(disc, quiet=False, title=None):
+    """the problems with this disc; an empty list means it is the supported release of title (by default,
+    the one its default.xbe belongs to)"""
+    title = title or identify(disc)
+    if title is None:
+        return ["default.xbe: not the supported release of any game this project builds"]
+    manifest = manifest_of(title)
     expected = manifest["files"]
     have = {k.lower(): k for k in disc.files}
     problems = []
@@ -158,8 +179,8 @@ def verify(disc, quiet=False):
     return problems
 
 
-def extract(disc, dst):
-    manifest = json.loads(MANIFEST.read_text())
+def extract(disc, dst, title=None):
+    manifest = manifest_of(title or identify(disc))
     skip = {s.lower() for s in manifest["not_copied"]}
     have = {k.lower(): k for k in disc.files}
     dst = Path(dst)
@@ -187,18 +208,19 @@ def main():
     except DiscError as err:
         print(f"error: {err}", file=sys.stderr)
         return 1
-    problems = verify(disc)
+    title = identify(disc)
+    problems = verify(disc, title=title)
     if problems:
-        print("This is not the supported Far Cry Instincts release (title 55530008, version 1):", file=sys.stderr)
+        print("This is not a supported release:", file=sys.stderr)
         for p in problems[:20]:
             print("  " + p, file=sys.stderr)
         return 1
-    print("The disc matches the supported release.")
+    print(f"The disc matches the supported release of {title.name}.")
     if a.action == "extract":
         if Path(a.folder).exists() and any(Path(a.folder).iterdir()):
             print(f"error: {a.folder} is not empty", file=sys.stderr)
             return 1
-        extract(disc, a.folder)
+        extract(disc, a.folder, title)
         print(f"Game files copied to {a.folder}.")
     return 0
 

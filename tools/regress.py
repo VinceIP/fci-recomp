@@ -346,8 +346,8 @@ def grab(h, path):
 
 
 def run_flow(sc, folder):
-    shutil.copy2(GAME_EXE, folder / "FarCryInstincts.exe")
-    shutil.copy2(EDITOR_EXE, folder / "FarCryInstinctsEditor.exe")
+    shutil.copy2(GAME_EXE, folder / GAME_EXE.name)
+    shutil.copy2(EDITOR_EXE, folder / EDITOR_EXE.name)
     shutil.copy2(KINIT, folder / "fci-kinit.dll")
     shutil.copytree(FIXTURES / "save-tunnel", folder / "save")
     (folder / "fci.ini").write_text(
@@ -369,7 +369,7 @@ def run_flow(sc, folder):
     env = dict(os.environ)
     env.pop("RECOMP_FCI_FRAME", None)
     start = time.time()
-    child = game_driver.launch([str(folder / "FarCryInstincts.exe")], cwd=folder, env=env)
+    child = game_driver.launch([str(folder / GAME_EXE.name)], cwd=folder, env=env)
     frames, windows = [], []
     try:
         early = flow_timeline(sc, folder, start, child, frames, windows)

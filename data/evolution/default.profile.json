@@ -1,0 +1,17 @@
+{
+  "id": "fcie-original-xbox-game",
+  "image_name": "default.xbe",
+  "image_sha256": "ced4d535bbfcc66567d0f95772d14f965f970fdeaf39cfbd556142c7c2ada68d",
+  "image_bytes": 5337088,
+  "entry_va": "0x0035D9BF",
+  "code_end": "0x005C47C4",
+  "descriptor_helper": "0x00362594",
+  "descriptor_jump": "0x003625B4",
+  "replacements": {
+    "sub_00362594": [
+      "override",
+      "The same 37-byte descriptor helper as Instincts' 004B03B4 (addresses masked), sgdt/cli/xchg GDT/sti/ljmp 8"
+    ]
+  },
+  "evidence": "Exploratory Evolution profile: descriptor helper by masked bytes (unique match); code end = BINKDATA end (as Instincts' 0070C6E4)."
+}
