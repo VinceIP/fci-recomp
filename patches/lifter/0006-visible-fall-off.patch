@@ -1,0 +1,25 @@
+Subject: Stop visibly when control runs off the end of a lifted function
+
+A function whose last instruction neither returns, jumps nor traps continues into the next code. The
+translator bridges that with a tail call when a translated function starts at the end, and otherwise
+emitted nothing, so the C body returned with the guest stack as the cut body left it. A bogus seed
+inside an instruction (Evolution 000C5308, inside the mov at 000C5305) split the title page's release
+handler that way: three pushes and no pops, then a garbage indirect call. Now it stops (exit 89).
+
+---
+diff --git a/tools/recomp/translator.py b/tools/recomp/translator.py
+--- a/tools/recomp/translator.py
++++ b/tools/recomp/translator.py
+@@ -2585,6 +2585,12 @@ class FunctionTranslator:
+             lines.append(f"    g_seh_ebp = ebp; {ft_name}(); return;"
+                          f" /* fallthrough 0x{fallthrough_target:08X} */")
+             lines.append(f"")
++        elif continues_past_end:
++            # Control runs on past the end, but no translated function starts there: a seed split
++            # an instruction or a flow. Returning would leave the guest stack as the cut body left it.
++            lines.append(f"    {{ extern void fci_fell_off_end(uint32_t va);"
++                         f" fci_fell_off_end(0x{end:08X}u); return; }}"
++                         f" /* control runs off the end */")
+ 
+         # Insert _icall_esp save points before RECOMP_ICALL_SAFE arg pushes.
+         # The pattern is: optional PUSH32 args, then
