@@ -288,6 +288,11 @@
 "evidence": "data pointer into code not covered by any base-lift function"
 },
 {
+"start": "0x0022C9F3",
+"observed": true,
+"evidence": "tail jmp from 001D7B2B; push ebp/mov ebp,esp right after 0022C94B's jump table, which the sweep read as code; the game reached it (exit 84 in Story Mode, 2026-10-21)"
+},
+{
 "start": "0x0023005D",
 "evidence": "data pointer into code not covered by any base-lift function"
 },
@@ -463,6 +468,10 @@
 {
 "start": "0x0031855E",
 "evidence": "data pointer into code not covered by any base-lift function"
+},
+{
+"start": "0x0031CB0F",
+"evidence": "tail jmp from 002C4172 (a vtable method); starts right after a jmp: call 0031C4B4, store vtable 004DDE28, ret"
 },
 {
 "start": "0x00326471",
@@ -1655,6 +1664,10 @@
 {
 "start": "0x004143AD",
 "evidence": "data pointer into code not covered by any base-lift function"
+},
+{
+"start": "0x0041A18E",
+"evidence": "tail jmp from 003B6498; starts right after a jmp: store vtable 004A1540, jmp 00419B66 (a destructor tail)"
 },
 {
 "start": "0x00427840",
