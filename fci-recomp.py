@@ -8,8 +8,8 @@
 
   <disc>       an Xbox disc image (XISO or full dump) or a folder with the disc's files; which game it is
                decides the rest (tools/titles.py)
-  --install    where the game goes: its executable, fci.ini and the game files (default: the game's name,
-               "Far Cry Instincts" or "Far Cry Instincts Evolution", in this folder)
+  --install    where the game goes: its executable, fci.ini and the game files (default:
+               FarCryInstincts or FarCryEvolution, in this folder)
   --title      for editor: which game, when both are set up here
   --editor     build the map editor too
   --work       where the toolkit, the compiler, the generated C and the build go (default: build/ in

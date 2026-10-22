@@ -14,7 +14,8 @@ REPO = Path(__file__).resolve().parents[1]
 @dataclass(frozen=True)
 class Title:
     key: str
-    name: str  # in windows, messages and the install folder
+    name: str  # in windows and messages
+    folder: str  # the install folder
     title_id: str  # the XBE certificate's, hex
     data: Path  # disc.json and <image>.seeds/pins/profile.json
     game_exe: str
@@ -25,7 +26,7 @@ class Title:
     @property
     def install(self):
         """the install folder's name"""
-        return self.name
+        return self.folder
 
     def exe(self, image):
         return self.editor_exe if image == "ige.xbe" else self.game_exe
@@ -35,6 +36,7 @@ TITLES = {
     "instincts": Title(
         key="instincts",
         name="Far Cry Instincts",
+        folder="FarCryInstincts",
         title_id="55530008",
         data=REPO / "data",
         game_exe="FarCryInstincts.exe",
@@ -48,6 +50,7 @@ TITLES = {
     "evolution": Title(
         key="evolution",
         name="Far Cry Instincts Evolution",
+        folder="FarCryEvolution",
         title_id="55530060",
         data=REPO / "data" / "evolution",
         game_exe="FarCryEvolution.exe",

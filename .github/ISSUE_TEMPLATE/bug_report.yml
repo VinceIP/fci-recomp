@@ -27,7 +27,7 @@ body:
     id: version
     attributes:
       label: Version
-      description: The release or commit, from `Far Cry Instincts\build.json`.
+      description: The release or commit, from `FarCryInstincts\build.json` or `FarCryEvolution\build.json`.
   - type: input
     id: system
     attributes:

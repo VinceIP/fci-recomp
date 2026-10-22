@@ -12,7 +12,11 @@
 
 # What the build makes: the toolkit, the compiler, the generated C, the build and the install
 /build/
+/FarCryInstincts/
+/FarCryEvolution/
+# the install folders' names before 0.2.0
 /Far Cry Instincts/
+/Far Cry Instincts Evolution/
 *.obj
 *.pdb
 *.exe

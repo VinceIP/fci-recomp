@@ -10,7 +10,7 @@ if /i "%PROCESSOR_ARCHITECTURE%"=="x86" if not defined PROCESSOR_ARCHITEW6432 go
 rem both games set up here: ask which one the editor is for
 set "TITLE="
 set "PICK="
-if exist "%~dp0Far Cry Instincts\game\default.xbe" if exist "%~dp0Far Cry Instincts Evolution\game\default.xbe" (
+if exist "%~dp0FarCryInstincts\game\default.xbe" if exist "%~dp0FarCryEvolution\game\default.xbe" (
     echo Build the map editor for which game?
     echo   1 - Far Cry Instincts
     echo   2 - Far Cry Instincts Evolution

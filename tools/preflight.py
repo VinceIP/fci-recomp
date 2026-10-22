@@ -176,7 +176,7 @@ def main():
     repo = Path(__file__).resolve().parents[1]
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--work", default=str(repo / "build"))
-    ap.add_argument("--install", default=str(repo / "Far Cry Instincts"))
+    ap.add_argument("--install", default=str(repo / "FarCryInstincts"))
     a = ap.parse_args()
     found = checks(a.work, a.install)
     if not found:

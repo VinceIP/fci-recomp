@@ -1,7 +1,7 @@
 @echo off
 rem Drag your Far Cry Instincts or Far Cry Instincts Evolution disc image (or the folder with the disc's
 rem files) onto this file. The game is checked, recompiled and built on this PC, then installed in a folder
-rem named after it here ("Far Cry Instincts" or "Far Cry Instincts Evolution").
+rem named after it here (FarCryInstincts or FarCryEvolution).
 setlocal
 rem started from PowerShell 7, its module path would hide Windows PowerShell's own commands
 set "PSModulePath="

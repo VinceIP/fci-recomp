@@ -71,6 +71,7 @@ def fake_title(tmp_path, monkeypatch, files):
     t = titles.Title(
         key="fake",
         name="Fake",
+        folder="Fake",
         title_id="55530008",
         data=tmp_path,
         game_exe="Fake.exe",
