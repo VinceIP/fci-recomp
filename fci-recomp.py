@@ -1,16 +1,18 @@
 """Build Far Cry Instincts or Evolution for Windows from your own copy of the original Xbox disc.
 
   python fci-recomp.py setup <disc> [--install <folder>] [--editor] [--work <folder>] [--jobs N]
-  python fci-recomp.py editor [--title instincts|evolution] [--install <folder>] [--work <folder>] [--jobs N]
+  python fci-recomp.py editor [<disc>] [--title instincts|evolution] [--install <folder>] [--work <folder>]
+                              [--jobs N]
 
   setup        check the disc, copy its files, recompile and build the game, install it
-  editor       build the map editor for a game set up earlier (the game's Map Editor menu starts it)
+  editor       build the map editor for a game set up earlier (the game's Map Editor menu starts it); with
+               the disc, it is that disc's game
 
   <disc>       an Xbox disc image (XISO or full dump) or a folder with the disc's files; which game it is
                decides the rest (tools/titles.py)
   --install    where the game goes: its executable, fci.ini and the game files (default:
                FarCryInstincts or FarCryEvolution, in this folder)
-  --title      for editor: which game, when both are set up here
+  --title      for editor without a disc: which game, when both are set up here
   --editor     build the map editor too
   --work       where the toolkit, the compiler, the generated C and the build go (default: build/ in
                this folder); about 10 GB per game, and it can be deleted afterwards. Both games share the
@@ -271,7 +273,11 @@ def installed_title(a):
 def editor(a):
     started = time.time()
     check_python()
-    title, install = installed_title(a)
+    if a.disc:
+        _, title = open_disc(a.disc)
+        install = Path(a.install or REPO / title.install).resolve()
+    else:
+        title, install = installed_title(a)
     work = Path(a.work).resolve()
     if not (install / title.game_exe).exists() or not (install / "game" / "ige.xbe").exists():
         raise SystemExit(f"error: set up the game in {install} first (BuildGame.cmd or: fci-recomp.py setup)")
@@ -293,6 +299,7 @@ def main():
     s.add_argument("disc")
     s.add_argument("--editor", action="store_true")
     e = sub.add_parser("editor", help="build the map editor for a game set up earlier")
+    e.add_argument("disc", nargs="?")
     e.add_argument("--title", choices=sorted(titles.TITLES))
     for p in (s, e):
         p.add_argument("--install")

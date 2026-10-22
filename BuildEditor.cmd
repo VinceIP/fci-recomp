@@ -1,5 +1,6 @@
 @echo off
-rem Build the map editor for a game BuildGame.cmd set up. The game's Map Editor menu then starts it.
+rem Drag the same disc image (or the folder with the disc's files) you gave BuildGame.cmd onto this file. It
+rem builds that game's map editor beside the game; the game's Map Editor menu then starts it.
 setlocal
 rem started from PowerShell 7, its module path would hide Windows PowerShell's own commands
 set "PSModulePath="
@@ -7,18 +8,15 @@ rem what must be here before anything runs: the files beside this one, PowerShel
 if not exist "%~dp0tools\bootstrap.ps1" goto not_extracted
 where powershell >nul 2>nul || goto no_powershell
 if /i "%PROCESSOR_ARCHITECTURE%"=="x86" if not defined PROCESSOR_ARCHITEW6432 goto not_64bit
-rem both games set up here: ask which one the editor is for
-set "TITLE="
-set "PICK="
-if exist "%~dp0FarCryInstincts\game\default.xbe" if exist "%~dp0FarCryEvolution\game\default.xbe" (
-    echo Build the map editor for which game?
-    echo   1 - Far Cry Instincts
-    echo   2 - Far Cry Instincts Evolution
-    set /p "PICK=1 or 2: "
+set "DISC=%~1"
+if "%DISC%"=="" (
+    echo Drag your Far Cry Instincts or Evolution disc image, or the folder with the disc's files, onto BuildEditor.cmd.
+    echo Or drag it into this window now and press Enter:
+    set /p "DISC="
 )
-if "%PICK%"=="1" set "TITLE=--title instincts"
-if "%PICK%"=="2" set "TITLE=--title evolution"
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\bootstrap.ps1" editor %TITLE%
+if "%DISC%"=="" exit /b 1
+set "DISC=%DISC:"=%"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\bootstrap.ps1" editor "%DISC%"
 if errorlevel 1 (
     echo.
     echo Build error. Check dependencies, and run BuildEditor.cmd again to resume.
@@ -27,10 +25,9 @@ if errorlevel 1 (
     echo Build complete. Choose Map Editor in the game's main menu.
 )
 goto end
-
 :not_extracted
 echo error: the files that come with BuildEditor.cmd are not beside it. Extract the whole download to a
-echo folder first, such as C:\fci-recomp, then run BuildGame.cmd from there.
+echo folder first, such as C:\fci-recomp, then run BuildEditor.cmd from there.
 goto end
 :no_powershell
 echo error: Windows PowerShell was not found. It may be disabled or
