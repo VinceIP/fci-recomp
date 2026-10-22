@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.2.0] - 2026-10-22
+
+### Added
+
+- Support for Far Cry Instincts Evolution (original Xbox, title 55530060, version 3) as a separate game title. Drag its original disc onto BuildGame.cmd to build it. Evolution has its own separate ini, and all the same enhancements as Instincts.
+
+### Fixed
+
+- Fixed an unseen error that handled inputs on controller port 3 rather than port 1.
+- Windows error prompts such as "map editor not built" were shown hidden behind the game window. They now show in front, and pause the active game instance.
+- Rare crashes in code the recompiler had not fully translated.
+
+Built against xboxrecomp 193e2995 and Xbox XBE Recomp 65e959d4. Supported discs: Far Cry Instincts
+title 55530008, version 1 (`data/disc.json`); Far Cry Instincts Evolution title 55530060, version 3
+(`data/evolution/disc.json`).
+
 ## [0.1.2] - 2026-10-19
 
 ### Added

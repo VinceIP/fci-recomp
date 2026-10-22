@@ -37,7 +37,7 @@ import subprocess
 import sys
 import time
 
-VERSION = "0.1.2"
+VERSION = "0.2.0"
 REPO = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO / "tools"))
 import titles  # noqa: E402

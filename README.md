@@ -1,8 +1,9 @@
 # fci-recomp
 
-A native Windows port of **Far Cry Instincts** (2005, original Xbox), built by statically recompiling
-the code from a disc image. Code is translated to C ahead of time and compiled into a Windows program, 
-which runs alongside a reimplementation of the Xbox kernel, Direct3D and audio.
+A native Windows port of **Far Cry Instincts** (2005, original Xbox) and **Far Cry Instincts: Evolution**
+(2006, original Xbox), built by statically recompiling the code from a disc image. Code is translated to C
+ahead of time and compiled into a Windows program, which runs alongside a reimplementation of the Xbox kernel,
+Direct3D and audio.
 
 Note: this repository contains no original copyrighted game code, data, assets, or executables. An original
 game disc is required for the recompilation to run.
@@ -17,29 +18,37 @@ Regardless of your stance on AI in software development, it's my hope that this 
 
 ## Status
 
-**Version 0.1.2** - story mode and the map editor are fully functioning, as well as saving/loading custom maps
-and story mode progress. Enhanced visual features powered by a DirectX 12 renderer are implemented.
-Mouse and keyboard controls have been implemented and are customizable.
+**Version 0.2.0** - Story mode map editors for Instincts and Evolution are working, but have not yet been thoroughly tested end-to-end. Please continue to report crashes and issues in the Discord or Github. Enhanced visual features powered by a DirectX 12 renderer are implemented. Mouse and keyboard controls have been implemented and are customizable. Enhanced features and options are matched for both separate titles.
 
 ## Features
 
-- Single player story mode as it was on the original Xbox.
+- 2 recomps in 1; both Far Cry Instincts and its follow up sequel Far Cry Instincts: Evolution.
+- Single player story mode for both games as they were on the original Xbox.
+- Map editors for both games as they were on the original Xbox. Building them is optional and can be skipped if you aren't interested in making maps.
+- Mouse and keyboard support. Keybinds and mouse settings can be adjusted by modifying fci.ini.
 - Modern visual enhancements via a modified version of [Xbox XBE Recomp](https://github.com/TGP482/Xbox-XBERecomp)
 tailored for Far Cry Instincts. Anisotropic filtering, anti-aliasing, screen-space ambient occlusion, scalable
 internal rendering resolution, soft shadows, scalable sun shadow resolution, borderless fullscreen, increased 
 draw distances, 16:9 widescreen, and more. Display & graphics options can be adjusted by modifying fci.ini.
-- Map editor mode included as an optional feature. It can be built alongside the main game or omitted for those who
-aren't interested in making custom maps.
-- Mouse and keyboard support. Keybinds and mouse settings can be adjusted by modifying fci.ini.
 
+## Roadmap
+
+Some features are not yet complete or working as intended, but are planned.
+- Splitscreen multiplayer
+- Online multiplayer
+- Share custom maps easily by dropping them into a folder
+- A modding framework and map editor enhancements
+- Additional rendering and shader enhancements.
+- Decouple the game simulation with from render pipeline and enable 60 FPS or higher.
 
 ## Requirements
 
 - Windows 10 or 11 64-bit, and a GPU that supports Direct3D 12
 - About 10 GB of free space
 - An internet connection, or access to Git, Python, Windows SDK, and MSVC
-- A dump of your own Far Cry Instincts disc (original Xbox, title ID `55530008`, version 1),
-as an ISO or extracted files
+- A dump of at least one of the following game discs, as an ISO or extracted files:
+  - Far Cry Instincts (original Xbox, title ID `55530008`, version 1)
+  - Far Cry Instincts: Evolution (original Xbox, title ID `55530060`, version 3)
 
 ## Setup
 
@@ -49,11 +58,11 @@ as an ISO or extracted files
 Python and SDK runtimes. You may be prompted to accept terms for Microsoft's compiler if it's not
 already on your system. Consider raising an issue if you have any errors during the recompilation/build
 process.
-4. (Optional) Run `BuildEditor.cmd` to recompile and build the game's map editor if you intend to make maps,
-which you should, because it's pretty cool.
-5. Start `Far Cry Instincts\FarCryInstincts.exe`.
+4. (Optional) Drag your disc image onto `BuildEditor.cmd` to recompile and build the game's map editor if you intend to make maps, which you should, because it's pretty cool.
+5. Start `FarCryInstincts\FarCryInstincts.exe`, or `FarCryEvolution\FarCryEvolution.exe`.
+6. Repeat the above steps for each title.
 
-Save data and log files are stored in `%APPDATA%\fci-recomp` by default. This directory can be changed by modifying `fci.ini`. The `build` folder is only needed for rebuilding and can be deleted.
+Save data and log files are stored in `%APPDATA%\fci-recomp` by default. This directory can be changed by modifying `fci.ini`. Note that there are separate .ini files for each title. The `build` folder is only needed for rebuilding and can be deleted.
 
 Developers can run the same steps via Python: `python fci-recomp.py setup <disc>`
 (`--help` lists the options).
@@ -67,6 +76,7 @@ to your desired settings. Save and relaunch the game.
 
 ## Known issues
 
+- Crashes may rarely occur during single player mode or elsewhere. Please report any crash and include your crash log to help improve the project.
 - Some dynamic lights flicker and strobe, and some are visible through game geometry.
 - Xbox Live and system link don't work yet. Trying to access these features may cause a crash.
 - May have some memory management issues, particularly when switching between the map editor mode and back again.
