@@ -397,17 +397,6 @@ def frames_and_children():
     return out
 
 
-def process_path(pid):
-    """the executable of a process, or "" when it cannot be read"""
-    h = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
-    if not h:
-        return ""
-    b, n = ctypes.create_unicode_buffer(1024), wt.DWORD(1024)
-    ok = ctypes.windll.kernel32.QueryFullProcessImageNameW(h, 0, b, ctypes.byref(n))
-    ctypes.windll.kernel32.CloseHandle(h)
-    return b.value if ok else ""
-
-
 def grab(h, path):
     from PIL import Image
 
@@ -489,7 +478,7 @@ def flow_timeline(sc, folder, start, child, frames, windows):
         mine = [
             (f, k)
             for f, k in frames_and_children()
-            if user32.IsWindowVisible(f) and Path(process_path(window_pid(f))).parent == folder
+            if user32.IsWindowVisible(f) and Path(game_driver.process_path(window_pid(f))).parent == folder
         ]
         r = wt.RECT()
         if mine:

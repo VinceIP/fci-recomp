@@ -91,9 +91,24 @@ def launch(argv, **kw):
     return child
 
 
+def process_path(pid):
+    """the executable of a process, or "" when it cannot be read"""
+    import ctypes
+    import ctypes.wintypes as wt
+
+    kernel32 = ctypes.windll.kernel32
+    h = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not h:
+        return ""
+    b, n = ctypes.create_unicode_buffer(1024), wt.DWORD(1024)
+    ok = kernel32.QueryFullProcessImageNameW(h, 0, b, ctypes.byref(n))
+    kernel32.CloseHandle(h)
+    return b.value if ok else ""
+
+
 def keep_off_screen(child):
-    """move the game's frame window off the desktop as soon as it exists, and again if it comes back
-    (the relaunched editor and game share the first instance's frame, so its process owns it)"""
+    """move the game's frame windows off the desktop as soon as they exist, and again if they come back:
+    each relaunched instance (the editor, the game again) makes its own, from an executable beside the first"""
     import ctypes
     import ctypes.wintypes as wt
 
@@ -103,10 +118,14 @@ def keep_off_screen(child):
     name = ctypes.create_unicode_buffer(64)
     pid = wt.DWORD()
     rect = wt.RECT()
+    folder = Path(process_path(child.pid)).parent  # the copies under test: every instance starts from here
+    session = {}
 
     def visit(h, _):
         user32.GetWindowThreadProcessId(h, ctypes.byref(pid))
-        if pid.value == child.pid:
+        if pid.value not in session:
+            session[pid.value] = pid.value == child.pid or Path(process_path(pid.value)).parent == folder
+        if session[pid.value]:
             user32.GetClassNameW(h, name, 64)
             user32.GetWindowRect(h, ctypes.byref(rect))
             if name.value == "FCIWholeFrame" and rect.left < x:
