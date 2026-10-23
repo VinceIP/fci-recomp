@@ -661,21 +661,26 @@ std::recursive_mutex& UiLock()
     return m;
 }
 // The game asks for every second vertical blank (30 frames/s; its Bink background advances per swap):
-// Pace waits out the period after a present, without the guest CPU. RECOMP_FCI_XBR_UNLOCK=1 disables it.
+// Pace waits out the period after a present, without the guest CPU. RECOMP_FCI_XBR_FPS=<n> paces at n
+// frames a second instead (re/notes/FRAME-RATE.md); RECOMP_FCI_XBR_UNLOCK=1 does not pace at all.
 static uint32_t g_interval = 1;
 void SetPresentInterval(uint32_t interval) { g_interval = interval; }
 void Pace()
 {
     static int unlock = -1;
+    static double fps;
     static LARGE_INTEGER freq, next;
     if (unlock < 0) {
         unlock = OptionFlag("RECOMP_FCI_XBR_UNLOCK", false);
+        const char* f = std::getenv("RECOMP_FCI_XBR_FPS");
+        fps = f ? std::atof(f) : 0.0;
         QueryPerformanceFrequency(&freq);
     }
     uint32_t blanks = g_interval & 0xF;
-    if (unlock || blanks < 2)
-        return;                                                // 0 and 1: the display's own refresh paces it
-    LONGLONG period = freq.QuadPart * blanks * 1001 / 60000;   // NTSC blanks
+    if (unlock || (fps <= 0 && blanks < 2))
+        return;   // 0 and 1 blanks: the display's own refresh paces it
+    LONGLONG period = fps > 0 ? LONGLONG(double(freq.QuadPart) / fps)
+                              : freq.QuadPart * blanks * 1001 / 60000;   // NTSC blanks
     LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
     if (!next.QuadPart || now.QuadPart > next.QuadPart + period) {

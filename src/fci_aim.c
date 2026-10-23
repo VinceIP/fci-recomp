@@ -13,6 +13,7 @@
 
 uint32_t fci_game_view(void);                /* fci_threads.c: Camera_BuildViews' view */
 int fci_input_aim(float *yaw, float *pitch); /* fci_input.c: degrees since last frame */
+void fci_trace_actor(uint32_t actor);        /* fci_trace.c */
 
 void fci_prehook_00098AE0(void)
 {
@@ -20,6 +21,7 @@ void fci_prehook_00098AE0(void)
     float yaw, pitch, now, turn;
     if (!view || block != view + FCI_GAMEVIEW_INPUT)
         return;
+    fci_trace_actor(g_ecx); /* RECOMP_FCI_TRACE: the player's actor */
     if (fci_input_aim(&yaw, &pitch)) {
         MEMF(block + RE_GAME_VIEWINPUT_TURNYAW) += yaw;
         /* the game wraps the new pitch to +-180 before clamping it (85 degrees on foot): keep a fast

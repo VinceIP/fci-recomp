@@ -114,7 +114,11 @@ REPLACE = {
         "acknowledgement (fci_manual.c)",
     ),
     "sub_001F6C00": ("prehook", "Input_PollPads (re/symbols): counts polls for RECOMP_FCI_STATUS"),
-    "sub_000F0500": ("prehook", "Camera_BuildViews (re/symbols): counts 3D frames for RECOMP_FCI_STATUS"),
+    "sub_000F0500": (
+        "prehook",
+        "Camera_BuildViews (re/symbols): counts 3D frames for RECOMP_FCI_STATUS, a line per frame for "
+        "RECOMP_FCI_TRACE (fci_trace.c)",
+    ),
     "sub_00098AE0": (
         "prehook",
         "Player_ProcessInput (re/symbols): adds direct mouse aim, in degrees, to the "

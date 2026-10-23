@@ -57,6 +57,10 @@
     "FCI_GAMEVIEW_INPUT": [
       "0x000008C8",
       "the view's ViewInput block: Camera_BuildViews passes view+0x8C8 to Player_ProcessInput (000B9056)"
+    ],
+    "FCI_GAME_TIMER": [
+      "0x0056CCC8",
+      "the engine timer, as Instincts' 00644488: the game update (0017E185) updates it (001801EB), takes its frame time (00180281, the double at +0x68) and hands it and the clock (+0x28) to the scripts as _frametime and _time (0018FA11)"
     ]
   }
 }

@@ -612,8 +612,10 @@ static volatile uint32_t
         status_view; /* Camera_BuildViews' argument: the game view (re/notes/INPUT-CAMERA.md) */
 void fci_prehook_000F0500(void)
 {
+    extern void fci_trace_frame(uint32_t view); /* RECOMP_FCI_TRACE (fci_trace.c) */
     status_view = MEM32(g_esp + 4);
     InterlockedIncrement(&status_frames3d);
+    fci_trace_frame(status_view);
 }
 uint32_t fci_game_view(void) { return status_view; }
 void fci_status_movie(const char *path)
