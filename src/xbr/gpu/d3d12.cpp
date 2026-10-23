@@ -999,6 +999,7 @@ void D3D12Backend::BeginQuery() {
     q_open_ = true;
     q_parts_.clear();
     if (qheap_) QueryStartPart();
+    if (cap_) fprintf(cap_, "%04u visibility test begin\n", cap_i_++);
 }
 
 void D3D12Backend::QueryStartPart() {
@@ -1023,6 +1024,7 @@ void D3D12Backend::QueryEndPart() {
 void D3D12Backend::EndQuery(uint32_t table, uint32_t offset) {
     if (q_open_) QueryEndPart();
     q_open_ = false;
+    if (cap_) fprintf(cap_, "%04u visibility test end, slot %08X+%03X\n", cap_i_++, table, offset);
     q_pending_.push_back({std::move(q_parts_), table, offset, 0, q_scale_});
     q_parts_.clear();
 }
@@ -1044,8 +1046,14 @@ void D3D12Backend::DeliverQueries(bool all) {
         }
         uint32_t count = q_failed_ ? 0xFFFFu : uint32_t(std::lround(double(sum) / std::max(it->scale, 1.0f)));
         uint32_t page = kernel::R32(it->table);
-        LOG_FIRST(48, "d3d12: visibility test slot %08X+%03X: %u parts, %llu samples / %.2f = %u", page, it->offset,
-                  unsigned(it->parts.size()), (unsigned long long)sum, it->scale, count);
+        // FCI: RECOMP_FCI_XBR_QUERY_LOG=1: every result, not the first 48
+        static const bool every = std::getenv("RECOMP_FCI_XBR_QUERY_LOG") != nullptr;
+        if (every)
+            std::fprintf(stderr, "[XBR] visibility test %08X+%03X = %u (%llu samples)\n", page, it->offset, count,
+                         (unsigned long long)sum);
+        else
+            LOG_FIRST(48, "d3d12: visibility test slot %08X+%03X: %u parts, %llu samples / %.2f = %u", page,
+                      it->offset, unsigned(it->parts.size()), (unsigned long long)sum, it->scale, count);
         if (!page) continue;
         uint32_t slot = page + it->offset;
         std::memcpy(kernel::HostPtr(slot + 8), &count, 4);
@@ -1443,7 +1451,12 @@ void D3D12Backend::DrawFullScreen(ID3D12PipelineState* pso, D3D12_GPU_VIRTUAL_AD
     uint32_t si = sampler_slot ? *sampler_slot : EnsureBlitSamplers();
     cl_->SetGraphicsRootDescriptorTable(3, Gpu(smp_heap_.Get(), si, smp_inc_));
     cl_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    // FCI: the renderer's own passes (ambient occlusion, resolves) are not the title's: a visibility test open
+    // around them must not count their pixels, or a hidden light reads as a full screen visible
+    bool counting = q_open_ && qheap_;
+    if (counting) QueryEndPart();
     cl_->DrawInstanced(3, 1, 0, 0);
+    if (counting) QueryStartPart();
 }
 
 void D3D12Backend::Blit(ID3D12Resource* src, DXGI_FORMAT fmt, const float uvrect[4], const BlitOptions& o) {
@@ -2676,8 +2689,9 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     if (!BindStageTexturesAndTargets(s, stages)) return;
     PixelKey pk = MakePixelKey(s, stages.info);
     pk.quad = sh.quad;
-    // FCI: ZEnable 2 is NV2A W-buffering (FCI draws its world so): depth from w, see PixelHlsl
-    pk.wbuf = s.rs[kRsZEnable] == 2 && bound_ds_ && !a.pretransformed && !sh.quad;
+    // FCI: ZEnable 2 is NV2A W-buffering (FCI draws its world so): depth from w, see PixelHlsl. Pretransformed
+    // draws too: the XDK scales their 1 / rhw by zscale / WFar (005086C0), as fixed function's view w
+    pk.wbuf = s.rs[kRsZEnable] == 2 && bound_ds_ && !sh.quad;
     sh.pkey = Hash(&pk, sizeof(pk));
     EnsurePixelShader(pk, sh);
     if (!sh.vs_code || !sh.ps_code) return;
