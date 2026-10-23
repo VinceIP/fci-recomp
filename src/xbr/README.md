@@ -47,11 +47,14 @@ Every change is marked `FCI` in the source.
   blends the registers the vertex programs' positions depend on, from the frame before to the kept frame:
   registers one value holds for every draw (the camera) for all draws, the others for exact matches and
   loose keys drawn once, when they moved by at most half; `RECOMP_FCI_XBR_REPLAY_DUMP` saves what is shown).
+  A presenter thread shows one picture each refresh: a kept frame as the render thread executed it, then
+  replays, each only once the GPU has finished the last (the title's frames come first); the render thread
+  hands kept frames over and presents the others itself. Submissions and the kept frame share one lock,
+  the swap chain another.
 - `gpu/shaders.cpp`, `gpu/shaders.h`: W-buffered depth written from w in the pixel shader, with polygon
   offset applied there; bump map du dv converted to signed values before filtering; `_umul128` instead
   of `__int128`; the `XBE_PS_SHOW` diagnostic.
-- `gpu/backend.h`, `gpu/render_thread.cpp`: `Backend::Idle`, called by the render thread every millisecond it
-  has nothing to draw when frame replay is on; visibility tests in order with the draws; the ring of
+- `gpu/backend.h`, `gpu/render_thread.cpp`: visibility tests in order with the draws; the ring of
   command data reused safely after a lap; the game thread's wait for the render thread gives up the
   guest CPU.
 - `gpu/ext.h`: render scale per axis for new targets; the present hook.

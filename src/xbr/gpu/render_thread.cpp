@@ -426,22 +426,11 @@ private:
         if (auto set = reinterpret_cast<SetDescription>(
                 reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "SetThreadDescription"))))
             set(GetCurrentThread(), L"render");
-        // FCI: frame replay (RECOMP_FCI_XBR_REPLAY): idle, the backend may show a display refresh
-        const char* replay = std::getenv("RECOMP_FCI_XBR_REPLAY");
-        const bool idle_refresh = replay && std::atof(replay) > 0;
         for (;;) {
             Batch* b;
             {
                 std::unique_lock lock(m_);
-                if (idle_refresh) {
-                    if (!cv_.wait_for(lock, std::chrono::milliseconds(1), [&] { return stop_ || !queue_.empty(); })) {
-                        lock.unlock();
-                        inner_->Idle();
-                        continue;
-                    }
-                } else {
-                    cv_.wait(lock, [&] { return stop_ || !queue_.empty(); });
-                }
+                cv_.wait(lock, [&] { return stop_ || !queue_.empty(); });
                 if (queue_.empty()) break;
                 b = queue_.front();
                 queue_.pop_front();
