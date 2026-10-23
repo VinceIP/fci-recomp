@@ -18,7 +18,7 @@ Regardless of your stance on AI in software development, it's my hope that this 
 
 ## Status
 
-**Version 0.2.0** - Story mode map editors for Instincts and Evolution are working, but have not yet been thoroughly tested end-to-end. Please continue to report crashes and issues in the Discord or Github. Enhanced visual features powered by a DirectX 12 renderer are implemented. Mouse and keyboard controls have been implemented and are customizable. Enhanced features and options are matched for both separate titles.
+**Version 0.2.1** - Story mode map editors for Instincts and Evolution are working, but have not yet been thoroughly tested end-to-end. Please continue to report crashes and issues in the Discord or Github. Enhanced visual features powered by a DirectX 12 renderer are implemented. Mouse and keyboard controls have been implemented and are customizable. Enhanced features and options are matched for both separate titles.
 
 ## Features
 
@@ -39,7 +39,7 @@ Some features are not yet complete or working as intended, but are planned.
 - Share custom maps easily by dropping them into a folder
 - A modding framework and map editor enhancements
 - Additional rendering and shader enhancements.
-- Decouple the game simulation with from render pipeline and enable 60 FPS or higher.
+- Finish frame rates above 30: vehicles and AI at the game's full rate.
 
 ## Requirements
 
@@ -77,10 +77,9 @@ to your desired settings. Save and relaunch the game.
 ## Known issues
 
 - Crashes may rarely occur during single player mode or elsewhere. Please report any crash and include your crash log to help improve the project.
-- Some dynamic lights flicker and strobe, and some are visible through game geometry.
 - Xbox Live and system link don't work yet. Trying to access these features may cause a crash.
 - May have some memory management issues, particularly when switching between the map editor mode and back again.
-- Locked to 30 fps for now.
+- Frame rates above 30 are experimental (see `display-frame-rate` in fci.ini).
 - The window is blurry when Windows display scaling is above 100%.
 - Not yet tested: the whole single player mode end to end, multiplayer or splitscreen.
 

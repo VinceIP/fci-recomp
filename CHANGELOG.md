@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.2.1] - 2026-10-23
+
+### Added
+
+- Experimental, unlocked frame rates above 30, for both Instincts and Evolution. Not enabled by default.
+- Experimental, toggleable cap to engine updates. Limits game simulation ticks to 30hz. Meant to fix issues caused by higher frame rates.
+
+### Fixed
+
+- Fixed a crash in Evolution loading the third story level.
+- Fixed an issue for both titles causing dynamic lights to flicker and be visible through distant geometry.
+- Fixed a small renderer issue causing the NVIDIA overlay and others to sometimes be invisible/blocked on switching game executables - this issue still needs work.
+
+Built against xboxrecomp 193e2995 and Xbox XBE Recomp 65e959d4. Supported discs: Far Cry Instincts
+title 55530008, version 1 (`data/disc.json`); Far Cry Instincts Evolution title 55530060, version 3
+(`data/evolution/disc.json`).
+
 ## [0.2.0] - 2026-10-22
 
 ### Added
