@@ -124,6 +124,10 @@ REPLACE = {
         "Player_ProcessInput (re/symbols): adds direct mouse aim, in degrees, to the "
         "frame's turn (fci_aim.c, re/notes/INPUT-CAMERA.md)",
     ),
+    "sub_001FD9E0": (
+        "prehook",
+        "Console_CreateVariable (re/symbols): replaces the default string with RECOMP_CVAR_<name> (fci_cvars.c)",
+    ),
     "sub_001FDCD0": (
         "prehook",
         "Console_RegisterFloat (re/symbols): records the variable and replaces its "

@@ -41,6 +41,11 @@
       "Console_RegisterInt (as Console_RegisterFloat; e_detail_objects at 003432FC)",
       "001FDED0"
     ],
+    "sub_0017ED53": [
+      "prehook",
+      "Console_CreateVariable (thiscall, ecx = console [0056B4E4]; name, default string, flags, help; as Instincts' 001FD9E0; g_maxfps \"500\" at 0004408F): applies RECOMP_CVAR_<name> to the default string (fci_cvars.c)",
+      "001FD9E0"
+    ],
     "sub_000B8CF5": [
       "prehook",
       "Camera_BuildViews(view), as Instincts' 000F0500: calls the actor's Player_ProcessInput (vtable +0xD4) with view+0x8C8 at 000B905D; counts 3D frames and records the view for RECOMP_FCI_STATUS and direct mouse aim",

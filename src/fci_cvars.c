@@ -78,6 +78,35 @@ static void registered(int is_float)
     }
 }
 
+/* Console_CreateVariable (thiscall; [esp+4] name, [esp+8] default string, flags, help): the variable keeps
+ * its own value, so RECOMP_CVAR_<name> replaces the default string with a copy in guest memory */
+void fci_prehook_001FD9E0(void)
+{
+    extern uint32_t xbox_HeapAlloc(uint32_t size, uint32_t alignment);
+    char name[CVAR_NAME], def[64], key[CVAR_NAME + 16];
+    const char *value;
+    guest_string(MEM32(g_esp + 4), name, sizeof name);
+    if (!name[0])
+        return;
+    guest_string(MEM32(g_esp + 8), def, sizeof def);
+    snprintf(key, sizeof key, "RECOMP_CVAR_%s", name);
+    value = getenv(key);
+    if (value && *value) {
+        size_t len = strlen(value), i;
+        uint32_t copy = xbox_HeapAlloc((uint32_t)len + 1, 4);
+        if (!copy)
+            return;
+        for (i = 0; i <= len; i++)
+            MEM8(copy + i) = (uint8_t)value[i];
+        MEM32(g_esp + 8) = copy;
+        fprintf(stderr, "[FCI] cvar %s = %s (default \"%s\")\n", name, value, def);
+    } else {
+        const char *list = getenv("RECOMP_CVAR_LIST");
+        if (list && *list == '1')
+            fprintf(stderr, "[FCI] cvar %s string default \"%s\"\n", name, def);
+    }
+}
+
 void fci_prehook_001FDCD0(void) { registered(1); } /* Console_RegisterFloat */
 void fci_prehook_001FDED0(void) { registered(0); } /* Console_RegisterInt */
 /* the map editor (ige.xbe, its image profile): the same functions built as thiscall (ecx = console, the
