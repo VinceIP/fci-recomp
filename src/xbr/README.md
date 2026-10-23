@@ -42,7 +42,8 @@ Every change is marked `FCI` in the source.
   diagnostics (`XBE_PROBE`, `XBE_CAPTURE_VS`, the debug layer's messages to the log with `XBE_D3D12_DEBUG`);
   presenting without waiting in test runs; frame replay (`RECOMP_FCI_XBR_REPLAY`: a frame drawn in one
   command list is kept and executed again for display refreshes between the title's presents, each
-  resource it changes first returned to the state it began in).
+  resource it changes first returned to the state it began in; its draws are matched with the frame
+  before's, by an exact key and a loose one, the nearest constants among draws sharing a key).
 - `gpu/shaders.cpp`, `gpu/shaders.h`: W-buffered depth written from w in the pixel shader, with polygon
   offset applied there; bump map du dv converted to signed values before filtering; `_umul128` instead
   of `__int128`; the `XBE_PS_SHOW` diagnostic.

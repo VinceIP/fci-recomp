@@ -770,6 +770,24 @@ private:
         uint64_t fence = 0;  // its last execution: a list runs again only once that is done
     };
     void KeepFrame(Target* t);
+    // FCI: frame replay, milestone 2: each draw of the frame by what identifies it from one frame to the next, the
+    // draws matched with the frame before's, in order: the exact key first, then a loose one (research
+    // docs/interpolation.md)
+    struct DrawRec {
+        uint64_t key = 0, loose = 0;
+        uint8_t* vc = nullptr;       // the draw's vertex shader constants in the frame's upload ring
+        int32_t prev = -1;           // the matching draw of the frame before
+        const uint8_t* prev_vc = nullptr;  // its constants, still in that frame's ring while this frame is shown
+    };
+    void RecordDraw(const State& s, uint32_t prim, uint32_t count, const Assembled& a, uint64_t vh, uint64_t ph);
+    void MatchDraws();
+    std::vector<DrawRec> draws_, prev_draws_;
+    std::vector<DrawRec> kept_draws_;  // the kept frame's, matched with the frame before
+    uint8_t* last_vc_ = nullptr;
+    struct MatchStats {
+        uint64_t frames = 0, draws = 0, exact = 0, loose = 0, duplicate = 0, changed = 0;
+        uint64_t moved[4] = {};  // matched draws by the first 32 registers' change: < 1, < 10, < 100, more
+    } match_;
     double replay_period_ = 0;  // seconds between refreshes, 0 off
     bool frame_clean_ = true;   // nothing submitted since the frame began
     bool in_keep_ = false;
@@ -2443,6 +2461,7 @@ void D3D12Backend::UploadConstants(const State& s, const DrawShaders& sh, const 
     Alloc vc = Upload(sizeof(s.vsc), 256);
     std::memcpy(vc.cpu, s.vsc.data(), sizeof(s.vsc));
     Alloc dc = Upload(sizeof(DrawConstants), 256);
+    last_vc_ = vc.cpu;  // FCI: frame replay
     FillSurfaceConstants(s, size, c);
     FillFogConstants(s, sh.prog, c);
     std::memcpy(c.wbuf, wbuf_, sizeof(c.wbuf));
@@ -2772,6 +2791,7 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
 
     // geometry
     DrawGeometry(a);
+    if (replay_period_ > 0) RecordDraw(s, prim, count, a, sh.vh, sh.ph);  // FCI: frame replay
     if (cap_ && probe_x_ >= 0 && bound_rt_) Probe(*bound_rt_, cap_i_ - 1);  // FCI: XBE_PROBE
 }
 
@@ -3236,7 +3256,109 @@ void D3D12Backend::ResetFrame() {
     Begin();
     frame_clean_ = true;  // FCI: frame replay
     touched_.clear();
+    draws_.clear();
     track_ = replay_period_ > 0 ? &touched_ : nullptr;
+}
+
+// FCI: frame replay, milestone 2. A draw's identity: its target by kind (size, format, depth: the title flips
+// between back buffers), primitive, shaders and the data of its textures (header +4: the render thread hands over
+// header copies, the data stays put); for the exact key also its vertex streams' data (a fifth to a third of the
+// draws' move from frame to frame: geometry built each frame), counts and a sample of its indices (they arrive
+// copied).
+void D3D12Backend::RecordDraw(const State& s, uint32_t prim, uint32_t count, const Assembled& a, uint64_t vh,
+                              uint64_t ph) {
+    struct {
+        uint64_t vh, ph;
+        uint32_t rt_w, rt_h, rt_fmt, rt_depth, prim, tex[4];
+    } loose{};
+    if (bound_rt_) {
+        loose.rt_w = bound_rt_->gw;
+        loose.rt_h = bound_rt_->gh;
+        loose.rt_fmt = uint32_t(bound_rt_->fmt);
+    }
+    loose.rt_depth = bound_ds_ ? 1 : 0;
+    loose.vh = vh;
+    loose.ph = ph;
+    loose.prim = prim;
+    for (int i = 0; i < 4; i++) loose.tex[i] = s.textures[size_t(i)] ? kernel::R32(s.textures[size_t(i)] + 4) : 0;
+    DrawRec r;
+    r.loose = Hash(&loose, sizeof(loose));
+    uint32_t exact[14] = {count, a.index_count, a.draw_count, uint32_t(a.base_vertex), 0, 0};
+    for (int i = 0; i < 4; i++) {
+        exact[6 + i] = s.streams[size_t(i)].vb ? kernel::R32(s.streams[size_t(i)].vb + 4) : 0;
+        exact[10 + i] = s.streams[size_t(i)].stride;
+    }
+    if (a.index_src && a.index_count) {  // the first and last eight indices
+        uint32_t n = std::min<uint32_t>(a.index_count, 8), size = a.index16 ? 2 : 4;
+        const uint8_t* p = static_cast<const uint8_t*>(a.index_src);
+        exact[4] = uint32_t(Hash(p, size_t(n) * size));
+        exact[5] = uint32_t(Hash(p + size_t(a.index_count - n) * size, size_t(n) * size));
+    }
+    r.key = Hash(exact, sizeof(exact), r.loose);
+    r.vc = last_vc_;
+    draws_.push_back(r);
+}
+
+void D3D12Backend::MatchDraws() {
+    // the first 32 registers' difference: among draws with one key (the same mesh drawn again: trees, props), the
+    // nearest is the same instance a frame on, where the order of the draws may have changed
+    auto distance = [](const DrawRec& x, const DrawRec& y) {
+        if (!x.vc || !y.vc) return 0.0f;
+        const float* a = reinterpret_cast<const float*>(x.vc) + 96 * 4;
+        const float* b = reinterpret_cast<const float*>(y.vc) + 96 * 4;
+        float d = 0;
+        for (int k = 0; k < 32 * 4; k++) d += std::fabs(a[k] - b[k]);
+        return d;
+    };
+    std::vector<uint8_t> taken(prev_draws_.size(), 0);
+    auto match = [&](bool exact) {
+        std::unordered_map<uint64_t, std::vector<int32_t>> by;  // the frame before's untaken draws, in order
+        for (int32_t i = 0; i < int32_t(prev_draws_.size()); i++)
+            if (!taken[size_t(i)]) by[exact ? prev_draws_[size_t(i)].key : prev_draws_[size_t(i)].loose].push_back(i);
+        for (DrawRec& d : draws_) {
+            if (d.prev >= 0) continue;
+            auto it = by.find(exact ? d.key : d.loose);
+            if (it == by.end()) continue;
+            int32_t best = -1;
+            float best_d = 0;
+            for (int32_t i : it->second) {
+                if (taken[size_t(i)]) continue;
+                float di = it->second.size() > 1 ? distance(d, prev_draws_[size_t(i)]) : 0;
+                if (best < 0 || di < best_d) best = i, best_d = di;
+            }
+            if (best < 0) continue;
+            d.prev = best;
+            taken[size_t(best)] = 1;
+            (exact ? match_.exact : match_.loose)++;
+            if (it->second.size() > 1) match_.duplicate++;
+        }
+    };
+    match(true);
+    match(false);
+    // plausibility: how far matched draws' constants moved (a wrong match differs everywhere)
+    for (DrawRec& d : draws_) {
+        if (d.prev < 0) continue;
+        const DrawRec& p = prev_draws_[size_t(d.prev)];
+        d.prev_vc = p.vc;
+        if (!d.vc || !p.vc) continue;
+        if (std::memcmp(d.vc, p.vc, sizeof(State::vsc))) match_.changed++;
+        float di = distance(d, p);
+        match_.moved[di < 1 ? 0 : di < 10 ? 1 : di < 100 ? 2 : 3]++;
+    }
+    match_.frames++;
+    match_.draws += draws_.size();
+    prev_draws_ = std::move(draws_);
+    draws_.clear();
+    if (match_.frames % 150 == 0) {
+        double n = double(match_.draws ? match_.draws : 1);
+        LOGI("d3d12: draw matching over %llu frames: %.0f draws a frame; exact %.1f%%, loose %.1f%%, none %.1f%%; "
+             "chosen among several %.1f%%; constants changed %.1f%%, moved < 1: %.1f%%, < 10: %.1f%%, < 100: %.1f%%, "
+             "more: %.1f%%",
+             (unsigned long long)match_.frames, n / match_.frames, 100 * match_.exact / n, 100 * match_.loose / n,
+             100 * (n - match_.exact - match_.loose) / n, 100 * match_.duplicate / n, 100 * match_.changed / n,
+             100 * match_.moved[0] / n, 100 * match_.moved[1] / n, 100 * match_.moved[2] / n, 100 * match_.moved[3] / n);
+        match_ = {};
+    }
 }
 
 // FCI: frame replay. The frame's list, recorded since ResetFrame in one piece, is executed and kept; the present
@@ -3244,6 +3366,7 @@ void D3D12Backend::ResetFrame() {
 void D3D12Backend::KeepFrame(Target* t) {
     if (kept_.list) spare_lists_.push_back(std::move(kept_.list));
     kept_ = {};
+    kept_draws_.clear();
     if (!t || !frame_clean_ || q_open_ || cap_) {  // drawn in pieces, a visibility test open, or a capture
         unkept_frames_++;
         return;
@@ -3260,6 +3383,7 @@ void D3D12Backend::KeepFrame(Target* t) {
     kept_.src = present_src_;
     kept_.fmt = present_fmt_;
     kept_.frame = frame_;
+    kept_draws_ = prev_draws_;  // MatchDraws ran just before: this frame's draws
     ComPtr<ID3D12GraphicsCommandList> next;
     if (!spare_lists_.empty()) {
         next = std::move(spare_lists_.back());
@@ -3434,7 +3558,10 @@ void D3D12Backend::Present(const Surface& front) {
     Transition(lut_.Get(), lut_state_, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 
     // FCI: frame replay: the frame's list ends here and is kept; the present's own goes on in a new one
-    if (replay_period_ > 0) KeepFrame(t);
+    if (replay_period_ > 0) {
+        MatchDraws();
+        KeepFrame(t);
+    }
     uint32_t bi = swap_->GetCurrentBackBufferIndex();
     DrawFrame(t, bi);
     track_ = nullptr;
