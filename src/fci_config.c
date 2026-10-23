@@ -27,7 +27,7 @@ static const struct {
         {"display-borderless", "RECOMP_FCI_FULLSCREEN"},
         {"display-dimensions", "RECOMP_FCI_WINDOW"},
         {"display-aspect", "RECOMP_FCI_ASPECT"},
-        {"display-frame-rate", "RECOMP_FCI_XBR_FPS"},
+        {"display-frame-rate", "RECOMP_FCI_XBR_REPLAY"},
         {"skip-intro-movies", "RECOMP_FCI_SKIP_INTROS"},
         {"gfx-res-scale", "RECOMP_FCI_XBR_SCALE"},
         {"gfx-anisotropic-filtering", "RECOMP_FCI_XBR_ANISO"},
@@ -107,14 +107,15 @@ static int translate(const char *key, const char *value, char *out, size_t size)
             continue;
         if (!_stricmp(value, "auto")
             && (!strcmp(keys[i].key, "display-dimensions") || !strcmp(keys[i].key, "gfx-shadow-scale")))
-            return 0;                                     /* the runtime's own default */
-        if (!strcmp(keys[i].key, "display-frame-rate")) { /* re/notes/FRAME-RATE.md */
-            if (!strcmp(value, "30") || !_stricmp(value, "original"))
-                return 0; /* the game's own request: every second vertical blank */
-            if (!strcmp(value, "0") || !_stricmp(value, "unlimited")) {
-                snprintf(out, size, "RECOMP_FCI_XBR_UNLOCK=1");
-                return 1;
-            }
+            return 0; /* the runtime's own default */
+        if (!strcmp(keys[i].key, "display-frame-rate")) {
+            /* the frames shown; the game keeps its own 30 and frames in between are drawn from its last two
+               (frame replay, research docs/interpolation.md); 0 as many as the display takes */
+            double hz = !strcmp(value, "0") || !_stricmp(value, "unlimited") ? 1000 : atof(value);
+            if (hz <= 30)
+                return 0;
+            snprintf(out, size, "RECOMP_FCI_XBR_REPLAY=%g", hz);
+            return 1;
         }
         if (!strcmp(keys[i].key, "display-aspect"))
             value = !strcmp(value, "1") || !strcmp(value, "16:9") ? "16:9" : "4:3";
