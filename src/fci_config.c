@@ -27,7 +27,6 @@ static const struct {
         {"display-borderless", "RECOMP_FCI_FULLSCREEN"},
         {"display-dimensions", "RECOMP_FCI_WINDOW"},
         {"display-aspect", "RECOMP_FCI_ASPECT"},
-        {"display-frame-rate", "RECOMP_FCI_XBR_REPLAY"},
         {"skip-intro-movies", "RECOMP_FCI_SKIP_INTROS"},
         {"gfx-res-scale", "RECOMP_FCI_XBR_SCALE"},
         {"gfx-anisotropic-filtering", "RECOMP_FCI_XBR_ANISO"},
@@ -108,15 +107,6 @@ static int translate(const char *key, const char *value, char *out, size_t size)
         if (!_stricmp(value, "auto")
             && (!strcmp(keys[i].key, "display-dimensions") || !strcmp(keys[i].key, "gfx-shadow-scale")))
             return 0; /* the runtime's own default */
-        if (!strcmp(keys[i].key, "display-frame-rate")) {
-            /* the frames shown; the game keeps its own 30 and frames in between are drawn from its last two
-               (frame replay, research docs/interpolation.md); 0 as many as the display takes */
-            double hz = !strcmp(value, "0") || !_stricmp(value, "unlimited") ? 1000 : atof(value);
-            if (hz <= 30)
-                return 0;
-            snprintf(out, size, "RECOMP_FCI_XBR_REPLAY=%g", hz);
-            return 1;
-        }
         if (!strcmp(keys[i].key, "display-aspect"))
             value = !strcmp(value, "1") || !strcmp(value, "16:9") ? "16:9" : "4:3";
         if (!strcmp(keys[i].key, "gfx-ssao"))
@@ -263,9 +253,10 @@ void fci_config_load(int *argc, char ***argv)
 {
     static char exe_dir[MAX_PATH], xbe[MAX_PATH], game[MAX_PATH], save[MAX_PATH], log_dir[MAX_PATH];
     static char fixed_log[MAX_PATH], shader_cache[MAX_PATH], shader_cache_arg[MAX_PATH + 32];
-    static char lines[96][512];
+    static char lines[96][512], rate_arg[64];
     static char *args[120];
-    int n = 0, opts = 0, i, have_ini = 0, verbosity = 1, limit = 20;
+    int n = 0, opts = 0, i, have_ini = 0, verbosity = 1, limit = 20, cap = 1;
+    double rate = 30;
     char ini[MAX_PATH], *slash;
     FILE *f;
 
@@ -317,6 +308,10 @@ void fci_config_load(int *argc, char ***argv)
                 expand(v, game, sizeof game);
             else if (!_stricmp(key, "xbe"))
                 expand(v, xbe, sizeof xbe);
+            else if (!_stricmp(key, "display-frame-rate"))
+                rate = !strcmp(v, "0") || !_stricmp(v, "unlimited") ? 0 : atof(v) > 0 ? atof(v) : 30;
+            else if (!_stricmp(key, "engine-update-cap"))
+                cap = atoi(v) != 0;
             else if (opts < 96 && translate(key, v, lines[opts], sizeof lines[0]))
                 opts++;
         }
@@ -349,6 +344,17 @@ void fci_config_load(int *argc, char ***argv)
     if (shader_cache[0]) {
         snprintf(shader_cache_arg, sizeof shader_cache_arg, "RECOMP_FCI_XBR_SHADER_CACHE=%s", shader_cache);
         args[n++] = shader_cache_arg;
+    }
+    /* experimental frame rates (research docs/interpolation.md): capped, the game keeps its 30 updates and the
+       frames in between are blended from its last two; uncapped, the game itself runs at the rate */
+    if (rate == 0 || rate > 30) {
+        if (cap)
+            snprintf(rate_arg, sizeof rate_arg, "RECOMP_FCI_XBR_REPLAY=%g", rate ? rate : 1000);
+        else if (rate)
+            snprintf(rate_arg, sizeof rate_arg, "RECOMP_FCI_XBR_FPS=%g", rate);
+        else
+            snprintf(rate_arg, sizeof rate_arg, "RECOMP_FCI_XBR_UNLOCK=1");
+        args[n++] = rate_arg;
     }
     for (i = 0; i < opts; i++)
         args[n++] = lines[i];

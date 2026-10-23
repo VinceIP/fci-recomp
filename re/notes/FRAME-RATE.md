@@ -85,9 +85,10 @@ How the AI drives (Evolution addresses, Instincts' in brackets):
   It is frame-rate correct.
 - With no movement target the AI driver adds only the handbrake. Between waypoints that happens for exactly
   two frames at any frame rate (7 pulses in the ride, 2 frames each at 30, 45, 60): 67 ms of handbrake on
-  the Xbox, 33 ms at 60. The jeep loses less speed in each and runs ahead. src/fci_vehicle.c holds such a
-  pulse, with nothing else in the command, for two 30 fps frames' time (RECOMP_FCI_VEH_HANDBRAKE=0 turns it
-  off). The ride from 17 s to 26 s: 96.7 m at 30 (unchanged), 102.4 m at 60 (106.2 m without).
+  the Xbox, 33 ms at 60. The jeep loses less speed in each and runs ahead. Holding such a pulse for two
+  30 fps frames' time brought the ride from 17 s to 26 s to 102.4 m at 60 (106.2 m without; 96.7 m at 30);
+  the hold was a band-aid and is removed. The engine update cap (fci.ini engine-update-cap) keeps the game
+  at 30 instead; uncapped, the difference stays.
 
 What remains is the physics. RECOMP_FCI_VEHTRACE (src/fci_vehdiag.c) logs the car's bits each frame and
 RECOMP_FCI_VEH_REPLAY drives the car by a trace's bits instead, by game time. The same bits from a 30 fps
