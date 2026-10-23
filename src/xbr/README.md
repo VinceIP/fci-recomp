@@ -39,11 +39,15 @@ Every change is marked `FCI` in the source.
 - `gpu/d3d12.cpp`: Dear ImGui compiled out; render scale per axis; a 32 bit float depth buffer;
   visibility tests as occlusion queries; `Extension::Present`, a post-processed picture shown in place of
   the presented target; box filtering of a picture larger than the window; a lost device stops (99);
-  diagnostics (`XBE_PROBE`, `XBE_CAPTURE_VS`); presenting without waiting in test runs.
+  diagnostics (`XBE_PROBE`, `XBE_CAPTURE_VS`, the debug layer's messages to the log with `XBE_D3D12_DEBUG`);
+  presenting without waiting in test runs; frame replay (`RECOMP_FCI_XBR_REPLAY`: a frame drawn in one
+  command list is kept and executed again for display refreshes between the title's presents, each
+  resource it changes first returned to the state it began in).
 - `gpu/shaders.cpp`, `gpu/shaders.h`: W-buffered depth written from w in the pixel shader, with polygon
   offset applied there; bump map du dv converted to signed values before filtering; `_umul128` instead
   of `__int128`; the `XBE_PS_SHOW` diagnostic.
-- `gpu/backend.h`, `gpu/render_thread.cpp`: visibility tests in order with the draws; the ring of
+- `gpu/backend.h`, `gpu/render_thread.cpp`: `Backend::Idle`, called by the render thread every millisecond it
+  has nothing to draw when frame replay is on; visibility tests in order with the draws; the ring of
   command data reused safely after a lap; the game thread's wait for the render thread gives up the
   guest CPU.
 - `gpu/ext.h`: render scale per axis for new targets; the present hook.

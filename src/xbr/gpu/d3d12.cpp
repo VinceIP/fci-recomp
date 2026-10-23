@@ -434,6 +434,7 @@ public:
     void BeginQuery() override;
     void EndQuery(uint32_t table, uint32_t offset) override;
     void SetGamma(const uint8_t* ramp) override;
+    void Idle() override;  // FCI: frame replay
 
     ID3D12Device* Device() override { return dev_.Get(); }
     ID3D12GraphicsCommandList* List() override { return cl_.Get(); }
@@ -750,6 +751,38 @@ private:
     Assembled asm_;  // kept between draws for its buffers
     bool tearing_ = false;
     uint64_t presents_ = 0;
+    // FCI: frame replay (RECOMP_FCI_XBR_REPLAY=<refreshes a second>, research docs/interpolation.md). A frame drawn
+    // in one command list is kept at its present; while the title records the next, display refreshes execute it
+    // again. Each resource the list changes goes back to the state it began in first, and ends where the present
+    // left it, which is what the next frame's recording assumes.
+    struct Touched {
+        D3D12_RESOURCE_STATES first, last;
+    };
+    using TouchedMap = std::unordered_map<ID3D12Resource*, Touched>;
+    struct Kept {
+        ComPtr<ID3D12GraphicsCommandList> list;
+        TouchedMap touched;  // by the frame's list
+        TouchedMap shown;    // by the present's own list (the presented target)
+        Target* t = nullptr;
+        ID3D12Resource* src = nullptr;
+        DXGI_FORMAT fmt = kBgra;
+        uint64_t frame = 0;
+        uint64_t fence = 0;  // its last execution: a list runs again only once that is done
+    };
+    void KeepFrame(Target* t);
+    double replay_period_ = 0;  // seconds between refreshes, 0 off
+    bool frame_clean_ = true;   // nothing submitted since the frame began
+    bool in_keep_ = false;
+    TouchedMap touched_;
+    TouchedMap* track_ = nullptr;  // where Transition records, null when not tracking
+    Kept kept_;
+    std::vector<ComPtr<ID3D12GraphicsCommandList>> spare_lists_;
+    ComPtr<ID3D12CommandAllocator> replay_alloc_[kFrames];
+    ComPtr<ID3D12GraphicsCommandList> replay_list_[kFrames][2];
+    uint64_t replay_fence_[kFrames] = {};
+    uint32_t replay_i_ = 0;
+    uint64_t replays_ = 0, kept_frames_ = 0, unkept_frames_ = 0;
+    std::chrono::steady_clock::time_point last_shown_ = std::chrono::steady_clock::now();
     // FCI: XBE_PERF latency: when each recent present was made (by DXGI's present count), to compare with when
     // DXGI says it was shown
     int64_t presented_ns_[16] = {};
@@ -778,6 +811,11 @@ bool D3D12Backend::Init(uint32_t width, uint32_t height) {
 #endif
     LoadSettings();
     Begin();
+    if (const char* e = std::getenv("RECOMP_FCI_XBR_REPLAY"); e && std::atof(e) > 0) {  // FCI: frame replay
+        replay_period_ = 1.0 / std::atof(e);
+        track_ = &touched_;
+        LOGI("d3d12: frame replay at up to %.0f refreshes a second", std::atof(e));
+    }
     LOGI("d3d12: %ux%u guest, %ux%u window, render scale %.3f x %.3f", width, height, bb_w_, bb_h_, scale_x_,
          scale_y_);
     return true;
@@ -803,6 +841,19 @@ bool D3D12Backend::CreateDevice() {
     DXGI_ADAPTER_DESC1 ad{};
     if (adapter) adapter->GetDesc1(&ad);
     LOGR("D3D12 adapter: %ls", adapter ? ad.Description : L"default");
+    // FCI: XBE_D3D12_DEBUG: the debug layer's warnings and errors to the log, the first 200
+    ComPtr<ID3D12InfoQueue1> iq;
+    if (GetEnvironmentVariableW(L"XBE_D3D12_DEBUG", nullptr, 0) && SUCCEEDED(dev_.As(&iq))) {
+        DWORD cookie = 0;
+        iq->RegisterMessageCallback(
+                [](D3D12_MESSAGE_CATEGORY, D3D12_MESSAGE_SEVERITY sev, D3D12_MESSAGE_ID id, LPCSTR text, void*) {
+                    static std::atomic<int> n{0};
+                    if (sev <= D3D12_MESSAGE_SEVERITY_WARNING && n++ < 200)
+                        std::fprintf(stderr, "[D3D12] %d %d %s\n", int(sev), int(id), text);
+                },
+                D3D12_MESSAGE_CALLBACK_FLAG_NONE, nullptr, &cookie);
+        LOGI("d3d12: debug layer messages to the log");
+    }
     D3D12_COMMAND_QUEUE_DESC qd{};
     qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
     dev_->CreateCommandQueue(&qd, IID_PPV_ARGS(&queue_));
@@ -952,6 +1003,7 @@ bool Lost(HRESULT hr) {
 }
 
 void D3D12Backend::Submit(bool wait) {
+    if (!in_keep_) frame_clean_ = false;  // FCI: frame replay: a frame in more than one list is not kept
     if (q_open_) QueryEndPart();
     cl_->Close();
     ID3D12CommandList* lists[] = {cl_.Get()};
@@ -1121,6 +1173,10 @@ void D3D12Backend::Transition(ID3D12Resource* r, D3D12_RESOURCE_STATES& cur, D3D
     b.Transition.StateBefore = cur;
     b.Transition.StateAfter = want;
     cl_->ResourceBarrier(1, &b);
+    if (track_) {  // FCI: frame replay
+        auto [it, fresh] = track_->try_emplace(r, Touched{cur, want});
+        if (!fresh) it->second.last = want;
+    }
     cur = want;
 }
 
@@ -3178,6 +3234,131 @@ void D3D12Backend::ResetFrame() {
     f.srv = 0;
     cl_->Reset(f.alloc.Get(), nullptr);
     Begin();
+    frame_clean_ = true;  // FCI: frame replay
+    touched_.clear();
+    track_ = replay_period_ > 0 ? &touched_ : nullptr;
+}
+
+// FCI: frame replay. The frame's list, recorded since ResetFrame in one piece, is executed and kept; the present
+// goes on in another list from the same allocator, which lives until this frame's slot comes round again.
+void D3D12Backend::KeepFrame(Target* t) {
+    if (kept_.list) spare_lists_.push_back(std::move(kept_.list));
+    kept_ = {};
+    if (!t || !frame_clean_ || q_open_ || cap_) {  // drawn in pieces, a visibility test open, or a capture
+        unkept_frames_++;
+        return;
+    }
+    in_keep_ = true;
+    cl_->Close();
+    ID3D12CommandList* lists[] = {cl_.Get()};
+    queue_->ExecuteCommandLists(1, lists);
+    in_keep_ = false;
+    kept_.list = cl_;
+    kept_.touched = std::move(touched_);
+    touched_.clear();
+    kept_.t = t;
+    kept_.src = present_src_;
+    kept_.fmt = present_fmt_;
+    kept_.frame = frame_;
+    ComPtr<ID3D12GraphicsCommandList> next;
+    if (!spare_lists_.empty()) {
+        next = std::move(spare_lists_.back());
+        spare_lists_.pop_back();
+        next->Reset(CurrentFrame().alloc.Get(), nullptr);
+    } else if (FAILED(dev_->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, CurrentFrame().alloc.Get(), nullptr,
+                                              IID_PPV_ARGS(&next)))) {
+        DeviceLost(dev_.Get(), "a command list for frame replay", E_OUTOFMEMORY);
+    }
+    cl_ = next;
+    Begin();
+    track_ = &kept_.shown;
+    kept_frames_++;
+}
+
+// FCI: frame replay: a display refresh while the title records its next frame shows the kept one again
+void D3D12Backend::Idle() {
+    if (replay_period_ <= 0 || !kept_.list || kept_.frame + 1 != frame_) return;
+    auto now = std::chrono::steady_clock::now();
+    if (std::chrono::duration<double>(now - last_shown_).count() < replay_period_ * 0.9) return;
+    std::lock_guard leaving_lock(app::UiLock());
+    if (app::Leaving()) return;
+    if (CurrentFrame().srv + kSrvReserve > kSrvCount / kFrames) return;  // the present's blit needs descriptors
+    uint32_t i = replay_i_++ % kFrames;
+    if (!replay_alloc_[i]) {
+        dev_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&replay_alloc_[i]));
+        for (auto& l : replay_list_[i]) {
+            dev_->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, replay_alloc_[i].Get(), nullptr,
+                                    IID_PPV_ARGS(&l));
+            l->Close();
+        }
+    } else if (replay_fence_[i] > fence_->GetCompletedValue()) {
+        WaitFence(replay_fence_[i]);
+    }
+    replay_alloc_[i]->Reset();
+    if (kept_.fence > fence_->GetCompletedValue()) WaitFence(kept_.fence);
+    // where the last present left each resource the frame changes, back to where the frame began
+    auto shown = [&](ID3D12Resource* r, D3D12_RESOURCE_STATES s) {
+        auto it = kept_.shown.find(r);
+        return it == kept_.shown.end() ? s : it->second.last;
+    };
+    std::vector<D3D12_RESOURCE_BARRIER> back;
+    for (auto& [r, st] : kept_.touched) {
+        D3D12_RESOURCE_STATES at = shown(r, st.last);
+        if (at == st.first) continue;
+        D3D12_RESOURCE_BARRIER b{};
+        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b.Transition.pResource = r;
+        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        b.Transition.StateBefore = at;
+        b.Transition.StateAfter = st.first;
+        back.push_back(b);
+    }
+    ID3D12GraphicsCommandList* a = replay_list_[i][0].Get();
+    a->Reset(replay_alloc_[i].Get(), nullptr);
+    if (!back.empty()) a->ResourceBarrier(UINT(back.size()), back.data());
+    a->Close();
+    ID3D12CommandList* lists[] = {a, kept_.list.Get()};
+    queue_->ExecuteCommandLists(2, lists);
+    // the present's own list as Present makes it, on the replay's list, with the state the frame left behind
+    ComPtr<ID3D12GraphicsCommandList> recording = cl_;
+    Target *rt = bound_rt_, *ds = bound_ds_;
+    TouchedMap* track = track_;
+    ID3D12Resource* src = present_src_;
+    DXGI_FORMAT fmt = present_fmt_;
+    Target* t = kept_.t;
+    D3D12_RESOURCE_STATES t_state = t->state;
+    auto kt = kept_.touched.find(t->res.Get());
+    t->state = kt != kept_.touched.end() ? kt->second.last : shown(t->res.Get(), t->state);
+    cl_ = replay_list_[i][1];
+    cl_->Reset(replay_alloc_[i].Get(), nullptr);
+    ID3D12DescriptorHeap* heaps[] = {srv_heap_.Get(), smp_heap_.Get()};
+    cl_->SetDescriptorHeaps(2, heaps);
+    cl_->SetGraphicsRootSignature(root_.Get());
+    track_ = nullptr;
+    present_src_ = kept_.src;
+    present_fmt_ = kept_.fmt;
+    DrawFrame(t, swap_->GetCurrentBackBufferIndex());
+    cl_->Close();
+    ID3D12CommandList* shown_list[] = {cl_.Get()};
+    queue_->ExecuteCommandLists(1, shown_list);
+    t->state = t_state;
+    cl_ = recording;
+    bound_rt_ = rt;
+    bound_ds_ = ds;
+    track_ = track;
+    present_src_ = src;
+    present_fmt_ = fmt;
+    bool never_wait = app::Get().present_never_waits;
+    bool vsync = app::Get().vsync && !never_wait;
+    UINT flags = (!vsync && tearing_ ? DXGI_PRESENT_ALLOW_TEARING : 0) | (never_wait ? DXGI_PRESENT_DO_NOT_WAIT : 0);
+    HRESULT hr = swap_->Present(vsync ? 1 : 0, flags);
+    if (Lost(hr)) DeviceLost(dev_.Get(), "Present (replay)", hr);
+    queue_->Signal(fence_.Get(), ++fence_value_);
+    replay_fence_[i] = kept_.fence = fence_value_;
+    last_shown_ = std::chrono::steady_clock::now();
+    if (++replays_ % 600 == 1)
+        LOGI("d3d12: frame replay: %llu refreshes replayed; %llu frames kept, %llu not", (unsigned long long)replays_,
+             (unsigned long long)kept_frames_, (unsigned long long)unkept_frames_);
 }
 
 void D3D12Backend::CountFps() {
@@ -3252,9 +3433,16 @@ void D3D12Backend::Present(const Surface& front) {
     if (ramp_dirty_) UploadGammaRamp();
     Transition(lut_.Get(), lut_state_, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 
+    // FCI: frame replay: the frame's list ends here and is kept; the present's own goes on in a new one
+    if (replay_period_ > 0) KeepFrame(t);
     uint32_t bi = swap_->GetCurrentBackBufferIndex();
     DrawFrame(t, bi);
+    track_ = nullptr;
+    in_keep_ = true;
     Submit(false);
+    in_keep_ = false;
+    if (kept_.list) kept_.fence = fence_value_;
+    last_shown_ = std::chrono::steady_clock::now();
     // FCI: test runs never wait for the compositor; a frame it cannot take now is dropped
     bool never_wait = app::Get().present_never_waits;
     bool vsync = app::Get().vsync && !never_wait;

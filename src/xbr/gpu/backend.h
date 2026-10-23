@@ -41,6 +41,9 @@ public:
     virtual void BeginQuery() {}
     virtual void EndQuery(uint32_t /*table*/, uint32_t /*offset*/) {}
     virtual void SetGamma(const uint8_t* ramp /*3 x 256*/) = 0;
+    // FCI: the render thread has nothing to draw: a display refresh may show the last frame again
+    // (RECOMP_FCI_XBR_REPLAY, research docs/interpolation.md)
+    virtual void Idle() {}
 
     // the XDK's fences and busy checks against the render thread; a backend that draws at once is never behind
     virtual uint32_t Fence() { return ++fence_; }
