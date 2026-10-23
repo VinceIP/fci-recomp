@@ -625,8 +625,8 @@ void* Window()
                 ch = uint32_t(work.bottom - work.top);
                 cw = fci_aspect_wide() ? ch * 16 / 9 : ch * 4 / 3;
             }
-            float fit = std::min({1.0f, float(work.right - work.left - 32) / cw,
-                                  float(work.bottom - work.top - 64) / ch});
+            float fit = std::min(
+                    {1.0f, float(work.right - work.left - 32) / cw, float(work.bottom - work.top - 64) / ch});
             RECT r{0, 0, LONG(cw * fit), LONG(ch * fit)};
             AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
             HWND frame = CreateWindowExW(background ? WS_EX_NOACTIVATE : 0, fc.lpszClassName, title,
@@ -751,7 +751,8 @@ extern "C" void fci_window_pass_on(void)
     }
     const RECT& n = app::g_full.place.rcNormalPosition;
     char v[96];
-    std::snprintf(v, sizeof(v), "%ld,%ld,%ld,%ld,%u", n.left, n.top, n.right, n.bottom, app::g_full.place.showCmd);
+    std::snprintf(v, sizeof(v), "%ld,%ld,%ld,%ld,%u", n.left, n.top, n.right, n.bottom,
+                  app::g_full.place.showCmd);
     SetEnvironmentVariableA("RECOMP_FCI_FRAME_WINDOWED", v);
 }
 
