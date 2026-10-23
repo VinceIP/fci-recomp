@@ -13,6 +13,7 @@
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <bitset>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -775,18 +776,35 @@ private:
     // docs/interpolation.md)
     struct DrawRec {
         uint64_t key = 0, loose = 0;
-        uint8_t* vc = nullptr;       // the draw's vertex shader constants in the frame's upload ring
-        int32_t prev = -1;           // the matching draw of the frame before
-        const uint8_t* prev_vc = nullptr;  // its constants, still in that frame's ring while this frame is shown
+        uint8_t* vc = nullptr;    // the draw's vertex shader constants in the frame's upload ring
+        int32_t prev = -1;        // the matching draw of the frame before
+        std::vector<float> orig;  // the constants as drawn (replays write blends into the ring)
+        std::vector<float> from;  // milestone 3: the match's, when the draw is blended
+        std::bitset<192> pos;     // the registers its position depends on
     };
+    void ApplyBlend(double alpha);
+    std::unordered_map<uint64_t, std::bitset<192>> pos_regs_;  // by vertex program hash
+    // registers holding one value for every draw that reads them for its position (the camera: Evolution's
+    // view-projection c71-c74), this frame's and the frame before's, with that value
+    std::bitset<192> shared_, prev_shared_;
+    std::vector<float> shared_val_ = std::vector<float>(192 * 4), prev_shared_val_ = std::vector<float>(192 * 4);
     void RecordDraw(const State& s, uint32_t prim, uint32_t count, const Assembled& a, uint64_t vh, uint64_t ph);
     void MatchDraws();
     std::vector<DrawRec> draws_, prev_draws_;
     std::vector<DrawRec> kept_draws_;  // the kept frame's, matched with the frame before
+    // when the kept frame and the one before were shown
+    std::chrono::steady_clock::time_point kept_at_{}, kept_before_{};
+    bool blend_ = true;  // milestone 3; RECOMP_FCI_XBR_REPLAY_BLEND=0 replays unblended
+    // RECOMP_FCI_XBR_REPLAY_DUMP=<present>,<count> (diagnostic): every picture shown from the title's present
+    // <present> on, real or replayed, saved as replay/NNNN_<present>_<alpha>.bmp under the capture folder
+    void DumpShown(uint32_t bi, double alpha);
+    uint64_t dump_from_ = 0, dump_left_ = 0, dump_n_ = 0;
+    double shown_alpha_ = 0;
     uint8_t* last_vc_ = nullptr;
     struct MatchStats {
         uint64_t frames = 0, draws = 0, exact = 0, loose = 0, duplicate = 0, changed = 0;
         uint64_t moved[4] = {};  // matched draws by the first 32 registers' change: < 1, < 10, < 100, more
+        uint64_t blended = 0, implausible = 0, camera = 0;
     } match_;
     double replay_period_ = 0;  // seconds between refreshes, 0 off
     bool frame_clean_ = true;   // nothing submitted since the frame began
@@ -832,7 +850,13 @@ bool D3D12Backend::Init(uint32_t width, uint32_t height) {
     if (const char* e = std::getenv("RECOMP_FCI_XBR_REPLAY"); e && std::atof(e) > 0) {  // FCI: frame replay
         replay_period_ = 1.0 / std::atof(e);
         track_ = &touched_;
-        LOGI("d3d12: frame replay at up to %.0f refreshes a second", std::atof(e));
+        const char* b = std::getenv("RECOMP_FCI_XBR_REPLAY_BLEND");
+        blend_ = !(b && *b == '0');
+        LOGI("d3d12: frame replay at up to %.0f refreshes a second%s", std::atof(e), blend_ ? ", blended" : "");
+        if (const char* d = std::getenv("RECOMP_FCI_XBR_REPLAY_DUMP")) {
+            unsigned long long from = 0, n = 0;
+            if (std::sscanf(d, "%llu,%llu", &from, &n) == 2) dump_from_ = from, dump_left_ = n;
+        }
     }
     LOGI("d3d12: %ux%u guest, %ux%u window, render scale %.3f x %.3f", width, height, bb_w_, bb_h_, scale_x_,
          scale_y_);
@@ -3260,6 +3284,76 @@ void D3D12Backend::ResetFrame() {
     track_ = replay_period_ > 0 ? &touched_ : nullptr;
 }
 
+// FCI: frame replay, milestone 3: the constant registers (hardware order) a vertex program's position depends
+// on, through its temporaries and a0. A read relative to a0 (a bone palette) takes every register from its base.
+std::bitset<192> PositionRegisters(const std::vector<uint32_t>& prog) {
+    std::bitset<192> dep[13], a0, pos;  // R0-R11, R12 (oPos)
+    auto f = [](const uint32_t* t, int sub, int bit, int len) { return (t[sub] >> bit) & ((1u << len) - 1); };
+    auto src = [&](const uint32_t* t, int which, std::bitset<192>& out) {
+        uint32_t reg, mux;
+        if (which == 0) {
+            reg = f(t, 2, 28, 4), mux = f(t, 2, 26, 2);
+        } else if (which == 1) {
+            reg = f(t, 2, 13, 4), mux = f(t, 2, 11, 2);
+        } else {
+            reg = f(t, 2, 0, 2) << 2 | f(t, 3, 30, 2), mux = f(t, 3, 28, 2);
+        }
+        if (mux == 1 && reg <= 12) {
+            out |= dep[reg];
+        } else if (mux == 3) {
+            uint32_t cr = f(t, 1, 13, 8);
+            if (f(t, 3, 1, 1)) {
+                out |= a0;
+                for (uint32_t i = cr; i < 192; i++) out.set(i);
+            } else if (cr < 192) {
+                out.set(cr);
+            }
+        }
+    };
+    // MAC opcodes from 1: mov mul add mad dp3 dph dp4 dst min max slt sge arl, and the operands each reads (A B C)
+    static const uint8_t kMacReads[14] = {0, 1, 3, 5, 7, 3, 3, 3, 3, 3, 3, 3, 3, 1};
+    for (size_t n = 0; n + 4 <= prog.size(); n += 4) {
+        const uint32_t* t = &prog[n];
+        uint32_t mac = f(t, 1, 21, 4), ilu = f(t, 1, 25, 3);
+        std::bitset<192> m, il;
+        if (mac && mac < 14)
+            for (int w = 0; w < 3; w++)
+                if (kMacReads[mac] >> w & 1) src(t, w, m);
+        if (ilu) src(t, 2, il);
+        uint32_t r = f(t, 3, 20, 4), omask = f(t, 3, 12, 4);
+        if (mac == 13) {
+            a0 = m;
+        } else if (mac) {
+            uint32_t mm = f(t, 3, 24, 4);
+            if (ilu && r == 1) mm = 0;
+            if (mm && r <= 12) dep[r] = mm == 0xF ? m : dep[r] | m;
+        }
+        if (ilu) {
+            uint32_t im = f(t, 3, 16, 4), ir = mac ? 1 : r;
+            if (im && ir <= 12) dep[ir] = im == 0xF ? il : dep[ir] | il;
+        }
+        bool use_ilu = f(t, 3, 2, 1) == 1;
+        if (omask && f(t, 3, 11, 1) && (f(t, 3, 3, 8) & 0xF) == 0) pos |= use_ilu ? il : m;
+        if (f(t, 3, 0, 1)) break;
+    }
+    return pos | dep[12];
+}
+
+// FCI: frame replay, milestone 3: the kept frame's blended draws, their position registers from the matching
+// draw's (alpha 0) to their own (1), written into the frame's upload ring where its list reads them
+void D3D12Backend::ApplyBlend(double alpha) {
+    if (!blend_) return;
+    float a = float(alpha);
+    for (const DrawRec& d : kept_draws_) {
+        if (d.from.empty() || !d.vc) continue;
+        float* dst = reinterpret_cast<float*>(d.vc);
+        for (size_t r = 0; r < 192; r++) {
+            if (!d.pos[r]) continue;
+            for (size_t c = r * 4; c < r * 4 + 4; c++) dst[c] = d.from[c] + (d.orig[c] - d.from[c]) * a;
+        }
+    }
+}
+
 // FCI: frame replay, milestone 2. A draw's identity: its target by kind (size, format, depth: the title flips
 // between back buffers), primitive, shaders and the data of its textures (header +4: the render thread hands over
 // header copies, the data stays put); for the exact key also its vertex streams' data (a fifth to a third of the
@@ -3296,16 +3390,22 @@ void D3D12Backend::RecordDraw(const State& s, uint32_t prim, uint32_t count, con
     }
     r.key = Hash(exact, sizeof(exact), r.loose);
     r.vc = last_vc_;
-    draws_.push_back(r);
+    if (r.vc) r.orig.assign(reinterpret_cast<const float*>(r.vc), reinterpret_cast<const float*>(r.vc) + 192 * 4);
+    if ((s.vs_handle & 1) && s.vs && !s.vs->program.empty()) {
+        auto it = pos_regs_.find(s.vs->hash);
+        if (it == pos_regs_.end()) it = pos_regs_.emplace(s.vs->hash, PositionRegisters(s.vs->program)).first;
+        r.pos = it->second;
+    }
+    draws_.push_back(std::move(r));
 }
 
 void D3D12Backend::MatchDraws() {
     // the first 32 registers' difference: among draws with one key (the same mesh drawn again: trees, props), the
     // nearest is the same instance a frame on, where the order of the draws may have changed
     auto distance = [](const DrawRec& x, const DrawRec& y) {
-        if (!x.vc || !y.vc) return 0.0f;
-        const float* a = reinterpret_cast<const float*>(x.vc) + 96 * 4;
-        const float* b = reinterpret_cast<const float*>(y.vc) + 96 * 4;
+        if (x.orig.empty() || y.orig.empty()) return 0.0f;
+        const float* a = x.orig.data() + 96 * 4;
+        const float* b = y.orig.data() + 96 * 4;
         float d = 0;
         for (int k = 0; k < 32 * 4; k++) d += std::fabs(a[k] - b[k]);
         return d;
@@ -3335,16 +3435,67 @@ void D3D12Backend::MatchDraws() {
     };
     match(true);
     match(false);
+    // milestone 3: the shared registers (one value across the frame's draws that read them for position)
+    std::bitset<192> seen;
+    shared_.reset();
+    for (const DrawRec& d : draws_) {
+        if (d.orig.empty()) continue;
+        for (size_t r = 0; r < 192; r++) {
+            if (!d.pos[r]) continue;
+            const float* v = d.orig.data() + r * 4;
+            if (!seen[r]) {
+                seen.set(r);
+                shared_.set(r);
+                std::memcpy(&shared_val_[r * 4], v, 16);
+            } else if (shared_[r] && std::memcmp(&shared_val_[r * 4], v, 16)) {
+                shared_.reset(r);
+            }
+        }
+    }
+    std::bitset<192> camera = shared_ & prev_shared_;
+    // a loose key drawn once in both frames: the same mesh whatever its vertices (a weapon, a vehicle's body)
+    std::unordered_map<uint64_t, int> loose_now, loose_before;
+    for (const DrawRec& d : draws_) loose_now[d.loose]++;
+    for (const DrawRec& d : prev_draws_) loose_before[d.loose]++;
     // plausibility: how far matched draws' constants moved (a wrong match differs everywhere)
     for (DrawRec& d : draws_) {
-        if (d.prev < 0) continue;
-        const DrawRec& p = prev_draws_[size_t(d.prev)];
-        d.prev_vc = p.vc;
-        if (!d.vc || !p.vc) continue;
-        if (std::memcmp(d.vc, p.vc, sizeof(State::vsc))) match_.changed++;
-        float di = distance(d, p);
-        match_.moved[di < 1 ? 0 : di < 10 ? 1 : di < 100 ? 2 : 3]++;
+        const DrawRec* p = d.prev >= 0 ? &prev_draws_[size_t(d.prev)] : nullptr;
+        if (p && !d.orig.empty() && !p->orig.empty()) {
+            if (d.orig != p->orig) match_.changed++;
+            float di = distance(d, *p);
+            match_.moved[di < 1 ? 0 : di < 10 ? 1 : di < 100 ? 2 : 3]++;
+        }
+        if (d.pos.none() || d.orig.empty()) continue;
+        // the camera's registers blend for every draw; the object's only for an exact match or a loose key drawn
+        // once in both frames (another loose match may be another mesh: a vehicle's parts share one), whose
+        // position registers moved by at most half their size (a sprite mesh shared by many sprites, or registers
+        // that hold other things, jump)
+        std::bitset<192> object = d.pos & ~camera;
+        bool same = p && (d.key == p->key || (loose_now[d.loose] == 1 && loose_before[d.loose] == 1));
+        bool own = same && !p->orig.empty();
+        for (size_t r = 0; r < 192 && own; r++) {
+            if (!object[r]) continue;
+            for (size_t c = r * 4; c < r * 4 + 4; c++) {
+                float a = d.orig[c], b = p->orig[c];
+                if (std::fabs(a - b) > 0.5f * std::max({std::fabs(a), std::fabs(b), 1.0f})) own = false;
+            }
+        }
+        if (same && !own) match_.implausible++;
+        if (own) match_.blended++;
+        bool cam = (d.pos & camera).any();
+        if (cam) match_.camera++;
+        if (!own && !cam) continue;
+        d.from = d.orig;
+        for (size_t r = 0; r < 192; r++) {
+            if (!d.pos[r]) continue;
+            if (camera[r])
+                std::memcpy(&d.from[r * 4], &prev_shared_val_[r * 4], 16);
+            else if (own)
+                std::memcpy(&d.from[r * 4], &p->orig[r * 4], 16);
+        }
     }
+    prev_shared_ = shared_;
+    prev_shared_val_ = shared_val_;
     match_.frames++;
     match_.draws += draws_.size();
     prev_draws_ = std::move(draws_);
@@ -3353,12 +3504,84 @@ void D3D12Backend::MatchDraws() {
         double n = double(match_.draws ? match_.draws : 1);
         LOGI("d3d12: draw matching over %llu frames: %.0f draws a frame; exact %.1f%%, loose %.1f%%, none %.1f%%; "
              "chosen among several %.1f%%; constants changed %.1f%%, moved < 1: %.1f%%, < 10: %.1f%%, < 100: %.1f%%, "
-             "more: %.1f%%",
+             "more: %.1f%%; camera blended %.1f%%, object blended %.1f%%, implausible %.1f%%",
              (unsigned long long)match_.frames, n / match_.frames, 100 * match_.exact / n, 100 * match_.loose / n,
              100 * (n - match_.exact - match_.loose) / n, 100 * match_.duplicate / n, 100 * match_.changed / n,
-             100 * match_.moved[0] / n, 100 * match_.moved[1] / n, 100 * match_.moved[2] / n, 100 * match_.moved[3] / n);
+             100 * match_.moved[0] / n, 100 * match_.moved[1] / n, 100 * match_.moved[2] / n, 100 * match_.moved[3] / n,
+             100 * match_.camera / n, 100 * match_.blended / n, 100 * match_.implausible / n);
         match_ = {};
     }
+}
+
+// FCI: RECOMP_FCI_XBR_REPLAY_DUMP: the back buffer about to be shown, copied on the presenting list; the copy is
+// waited for and written at once (a diagnostic: it stalls)
+void D3D12Backend::DumpShown(uint32_t bi, double alpha) {
+    if (!dump_left_ || presents_ < dump_from_) return;
+    dump_left_--;
+    ID3D12Resource* bb = bb_[bi].Get();
+    D3D12_RESOURCE_DESC rd = bb->GetDesc();
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp;
+    UINT rows;
+    UINT64 row_size, bytes;
+    dev_->GetCopyableFootprints(&rd, 0, 1, 0, &fp, &rows, &row_size, &bytes);
+    ComPtr<ID3D12Resource> rb;
+    D3D12_HEAP_PROPERTIES hp{D3D12_HEAP_TYPE_READBACK};
+    D3D12_RESOURCE_DESC bd = BufferDesc(bytes);
+    if (FAILED(dev_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                             IID_PPV_ARGS(&rb))))
+        return;
+    D3D12_RESOURCE_STATES st = D3D12_RESOURCE_STATE_PRESENT;
+    TouchedMap* track = track_;
+    track_ = nullptr;
+    Transition(bb, st, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    D3D12_TEXTURE_COPY_LOCATION dl{rb.Get(), D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT};
+    dl.PlacedFootprint = fp;
+    D3D12_TEXTURE_COPY_LOCATION sl{bb, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
+    cl_->CopyTextureRegion(&dl, 0, 0, 0, &sl, nullptr);
+    Transition(bb, st, D3D12_RESOURCE_STATE_PRESENT);
+    track_ = track;
+    // written once the list that shows it has run: kept here until the next call, which waits for the GPU
+    static ComPtr<ID3D12Resource> pending;
+    static D3D12_PLACED_SUBRESOURCE_FOOTPRINT pending_fp;
+    static std::string pending_name;
+    auto write = [&]() {
+        if (!pending) return;
+        WaitFence(fence_value_);
+        uint8_t* p = nullptr;
+        if (SUCCEEDED(pending->Map(0, nullptr, reinterpret_cast<void**>(&p)))) {
+            uint32_t w = pending_fp.Footprint.Width, h = pending_fp.Footprint.Height;
+            std::vector<uint8_t> px(size_t(w) * h * 4);
+            for (uint32_t y = 0; y < h; y++)
+                std::memcpy(&px[size_t(y) * w * 4], p + size_t(y) * pending_fp.Footprint.RowPitch, size_t(w) * 4);
+            pending->Unmap(0, nullptr);
+            std::error_code ec;
+            std::filesystem::path dir = app::ExeDir() / diag::CaptureDir() / "replay";
+            std::filesystem::create_directories(dir, ec);
+            if (FILE* f = _wfopen((dir / (pending_name + ".bmp")).c_str(), L"wb")) {
+                uint8_t hd[54] = {'B', 'M'};
+                auto put = [&](int o, uint32_t v) { std::memcpy(hd + o, &v, 4); };
+                put(2, 54 + uint32_t(px.size()));
+                put(10, 54);
+                put(14, 40);
+                put(18, w);
+                put(22, uint32_t(-int32_t(h)));
+                hd[26] = 1;
+                hd[28] = 32;
+                put(34, uint32_t(px.size()));
+                fwrite(hd, 1, 54, f);
+                fwrite(px.data(), 1, px.size(), f);
+                fclose(f);
+            }
+        }
+        pending.Reset();
+    };
+    write();
+    char name[64];
+    std::snprintf(name, sizeof(name), "%04llu_%06llu_%03d", (unsigned long long)dump_n_++,
+                  (unsigned long long)presents_, int(alpha * 100 + 0.5));
+    pending = rb;
+    pending_fp = fp;
+    pending_name = name;
 }
 
 // FCI: frame replay. The frame's list, recorded since ResetFrame in one piece, is executed and kept; the present
@@ -3371,6 +3594,8 @@ void D3D12Backend::KeepFrame(Target* t) {
         unkept_frames_++;
         return;
     }
+    kept_draws_ = prev_draws_;  // MatchDraws ran just before: this frame's draws
+    ApplyBlend(0);              // shown first where the frame before had it; replays move it on
     in_keep_ = true;
     cl_->Close();
     ID3D12CommandList* lists[] = {cl_.Get()};
@@ -3383,7 +3608,6 @@ void D3D12Backend::KeepFrame(Target* t) {
     kept_.src = present_src_;
     kept_.fmt = present_fmt_;
     kept_.frame = frame_;
-    kept_draws_ = prev_draws_;  // MatchDraws ran just before: this frame's draws
     ComPtr<ID3D12GraphicsCommandList> next;
     if (!spare_lists_.empty()) {
         next = std::move(spare_lists_.back());
@@ -3420,6 +3644,12 @@ void D3D12Backend::Idle() {
     }
     replay_alloc_[i]->Reset();
     if (kept_.fence > fence_->GetCompletedValue()) WaitFence(kept_.fence);
+    {  // milestone 3: the share of the title's last frame interval since the kept frame was shown
+        double interval = std::chrono::duration<double>(kept_at_ - kept_before_).count();
+        interval = std::clamp(interval, 1.0 / 60, 0.1);
+        shown_alpha_ = std::clamp(std::chrono::duration<double>(now - kept_at_).count() / interval, 0.0, 1.0);
+        ApplyBlend(shown_alpha_);
+    }
     // where the last present left each resource the frame changes, back to where the frame began
     auto shown = [&](ID3D12Resource* r, D3D12_RESOURCE_STATES s) {
         auto it = kept_.shown.find(r);
@@ -3462,6 +3692,7 @@ void D3D12Backend::Idle() {
     present_src_ = kept_.src;
     present_fmt_ = kept_.fmt;
     DrawFrame(t, swap_->GetCurrentBackBufferIndex());
+    DumpShown(swap_->GetCurrentBackBufferIndex(), shown_alpha_);
     cl_->Close();
     ID3D12CommandList* shown_list[] = {cl_.Get()};
     queue_->ExecuteCommandLists(1, shown_list);
@@ -3564,12 +3795,15 @@ void D3D12Backend::Present(const Surface& front) {
     }
     uint32_t bi = swap_->GetCurrentBackBufferIndex();
     DrawFrame(t, bi);
+    DumpShown(bi, 0);
     track_ = nullptr;
     in_keep_ = true;
     Submit(false);
     in_keep_ = false;
     if (kept_.list) kept_.fence = fence_value_;
     last_shown_ = std::chrono::steady_clock::now();
+    kept_before_ = kept_at_;
+    kept_at_ = last_shown_;
     // FCI: test runs never wait for the compositor; a frame it cannot take now is dropped
     bool never_wait = app::Get().present_never_waits;
     bool vsync = app::Get().vsync && !never_wait;
