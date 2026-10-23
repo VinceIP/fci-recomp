@@ -61,6 +61,13 @@ the same game time (2026-10-22, paced at 30 and 120):
 At 120 the jeep is faster from the start (25.1 m against 20.6 m after 2 s), then near 34 s it nearly stops
 while the 30 run drives on: the vehicle's motion depends on the frame rate.
 
+The distance it covers from 17 s to 26 s of game time: 96.5 m at 30, 104.9 m at 45, 106.1 m at 60,
+107.6 m at 90, 109.7 m at 120. The vehicle scripts (lua.dat, compiled) set `max_time_step_vehicle` 0.02
+(the characters' `max_time_step` 0.025), so a frame of 33 ms takes two physics steps, well inside
+`p_max_substeps` 5, and 60 steps the jeep once per 17 ms frame, about the size of 30's two steps; yet 60
+goes 10% further. Not the physics step: something the driving does once per frame (the AI's throttle or
+speed target are the suspects).
+
 Physics variables (RECOMP_CVAR_LIST, Instincts): `p_fixed_timestep` 0 (no fixed step), `p_max_substeps`
 5, `p_gravity_z` -9.8. The game's own variables (`max_time_step`, `max_time_step_vehicle`, `g_maxfps`,
 `game_Glider*`) are registered through 001FD9E0 (a string default), which RECOMP_CVAR does not hook yet.
