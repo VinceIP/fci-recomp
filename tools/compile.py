@@ -124,6 +124,16 @@ REPLACE = {
         "Player_ProcessInput (re/symbols): adds direct mouse aim, in degrees, to the "
         "frame's turn (fci_aim.c, re/notes/INPUT-CAMERA.md)",
     ),
+    "sub_000A38F0": (
+        "prehook",
+        "the AI's vehicle driver (esi = its vehicle controller, +0x9C the vehicle): records the vehicle it "
+        "commands (fci_vehicle.c)",
+    ),
+    "sub_0019E5A0": (
+        "prehook",
+        "the vehicle movement handler (ecx = vehicle, eax = command): the AI's handbrake pulses held for "
+        "their 30 fps time (fci_vehicle.c, re/notes/FRAME-RATE.md)",
+    ),
     "sub_001FD9E0": (
         "prehook",
         "Console_CreateVariable (re/symbols): replaces the default string with RECOMP_CVAR_<name> (fci_cvars.c)",

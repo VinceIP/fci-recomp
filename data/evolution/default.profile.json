@@ -55,6 +55,30 @@
       "prehook",
       "Player_ProcessInput(block), as Instincts' 00098AE0 (the same reads: angles +0x18, turnYaw +0xBC, turnPitch +0xC0; vtable 004B04E8 slot +0xD4): direct mouse aim (fci_aim.c)",
       "00098AE0"
+    ],
+    "sub_0007F99B": [
+      "prehook",
+      "the AI's vehicle driver (eax = its vehicle controller, +0x9C the vehicle), as Instincts' 000A38F0: builds the command, with the handbrake (action 0x22) when it has no movement target, and calls the movement handler 0012C298 (fci_vehicle.c)"
+    ],
+    "sub_0012C298": [
+      "prehook",
+      "the vehicle movement handler (eax = vehicle, esi = command), as Instincts' 0019E5A0: the actions to the vehicle's bits (+0x54), then the type's drive; the AI's handbrake pulses held for their 30 fps time (fci_vehicle.c)"
+    ],
+    "sub_0012C35F": [
+      "prehook",
+      "a vehicle drive (eax = vehicle), from the movement handler 0012C298: RECOMP_FCI_VEHTRACE (fci_vehdiag.c)"
+    ],
+    "sub_0012CA9A": [
+      "prehook",
+      "a vehicle drive (ebx = vehicle), from 0012C298: RECOMP_FCI_VEHTRACE (fci_vehdiag.c)"
+    ],
+    "sub_0012D22B": [
+      "prehook",
+      "a vehicle drive (eax = vehicle), from 0012C298: RECOMP_FCI_VEHTRACE (fci_vehdiag.c)"
+    ],
+    "sub_0012D981": [
+      "prehook",
+      "called by the movement handler 0012C298 (ebx = vehicle): RECOMP_FCI_VEHTRACE (fci_vehdiag.c)"
     ]
   },
   "evidence": "Exploratory Evolution profile: descriptor helper by masked bytes (unique match); code end = BINKDATA end (as Instincts' 0070C6E4).",

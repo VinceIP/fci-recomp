@@ -68,6 +68,42 @@ The distance it covers from 17 s to 26 s of game time: 96.5 m at 30, 104.9 m at 
 goes 10% further. Not the physics step: something the driving does once per frame (the AI's throttle or
 speed target are the suspects).
 
+### The jeep, 2026-10-22 (later)
+
+How the AI drives (Evolution addresses, Instincts' in brackets):
+
+- The AI's vehicle driver 0007F99B (000A38F0; its vehicle controller's +0x9C is the vehicle) builds a
+  command of digital actions each frame (AddAction 0005AEB2 [00077200]; CheckAction 0005AF2C [000772A0];
+  a bit array from the command's +4): 3 forward, 0xD brake, 1/2 full steering lock, 0x22 handbrake. It
+  compares the speed with the one it wants and presses forward or brake, so speed is held by on/off control.
+- The movement handler 0012C298 (0019E5A0) turns the actions into the vehicle's bits at +0x54 (3: 0x01,
+  4: 0x02, 1: 0x04, 2: 0x08, 0xD: 0x10, 0x22: 0x20, 0xA: 0x40) and calls the type's drive; the jeep's is
+  0012D981. It sets the pedal straight from the bits (1, 0, -1; braking pushes against the motion), the
+  steering to the full lock for the speed (`max_steer_v0 + max_steer_kv * speed`), and relaxes it by
+  `(steer_relaxation_v0 + kv * speed) * frame time` without a bit; the parameters come from the
+  vehicle script's SetDrivingParameters (000A38CB, the vehicle's +0x58...). Frame time is capped at 0.1 s.
+  It is frame-rate correct.
+- With no movement target the AI driver adds only the handbrake. Between waypoints that happens for exactly
+  two frames at any frame rate (7 pulses in the ride, 2 frames each at 30, 45, 60): 67 ms of handbrake on
+  the Xbox, 33 ms at 60. The jeep loses less speed in each and runs ahead. src/fci_vehicle.c holds such a
+  pulse, with nothing else in the command, for two 30 fps frames' time (RECOMP_FCI_VEH_HANDBRAKE=0 turns it
+  off). The ride from 17 s to 26 s: 96.7 m at 30 (unchanged), 102.4 m at 60 (106.2 m without).
+
+What remains is the physics. RECOMP_FCI_VEHTRACE (src/fci_vehdiag.c) logs the car's bits each frame and
+RECOMP_FCI_VEH_REPLAY drives the car by a trace's bits instead, by game time. The same bits from a 30 fps
+run, replayed: at 30 the same 98.0 m (to the metre for 8 s); at 60 103.0 m; at 40, 45 and 50: 99.1, 102.8,
+98.6 m. Straight acceleration is identical at every rate (21.3 m in the first 2 s); turning and braking
+differ. The vehicle does substep: with `p_max_substeps` 1 the 30 fps replay covers 53 m (each 33 ms frame
+cut to a 20 ms step), so 30 steps it 2 x 16.7 ms and 60 1 x 16.7 ms. Something in the physics happens once
+per world step rather than per substep (wheel contacts, presumably). Matching it exactly needs the physics
+world stepped at 30 a second, with the drawn positions interpolated in between; not attempted.
+
+The drive also starts earlier at higher rates (game 17.89 s at 60, 18.01 s at 30): about seven frames of
+something before the AI first presses forward, presumably the AI's goal pipeline advancing a step a frame.
+
+Experiments that changed nothing: holding the vehicle's bits to 30 changes a second (the AI's on/off
+decisions at the Xbox's rate): 105.2 m at 60 either way.
+
 Physics variables (RECOMP_CVAR_LIST, Instincts): `p_fixed_timestep` 0 (no fixed step), `p_max_substeps`
 5, `p_gravity_z` -9.8. The game's own variables (`max_time_step`, `max_time_step_vehicle`, `g_maxfps`,
 `game_Glider*`) are registered through 001FD9E0 (a string default), which RECOMP_CVAR does not hook yet.
