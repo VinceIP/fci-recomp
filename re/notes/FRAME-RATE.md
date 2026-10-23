@@ -112,8 +112,10 @@ Physics variables (RECOMP_CVAR_LIST, Instincts): `p_fixed_timestep` 0 (no fixed 
 
 - The player's acceleration (above).
 
-- Bink videos: the game advances a video a frame per present. The files give their own rates (header
-  frames per second: 15, 25, 29.97, 30.07), so at another rate they play at the wrong speed.
+- Bink videos (header rates 15, 25, 29.97, 30.07): the menus' background videos of 25 and over advanced a
+  frame per game frame; paced by their header's rate since 2026-10-22 (re/notes/MOVIES.md). Full-screen
+  movies already waited on BinkWait.
+- Vehicles: the AI's handbrake pulses (fixed, above) and the physics stepped once a frame (open).
 - Physics sub-steps: `max_time_step`, `max_time_step_vehicle` and `p_fixed_timestep` (console variables)
   are not yet looked at, nor the paraglider's `game_Glider*` values.
 

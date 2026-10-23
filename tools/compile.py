@@ -144,6 +144,11 @@ REPLACE = {
         "default with RECOMP_CVAR_<name> (fci_cvars.c)",
     ),
     "sub_001FDED0": ("prehook", "Console_RegisterInt (re/symbols): as Console_RegisterFloat"),
+    "sub_0021FFA0": (
+        "gate",
+        "a menu background video's update (eax = video, ret 4): skipped until its next frame is due by the "
+        "Bink header's rate, as the game does only under 25 fps (fci_bink.c, re/notes/MOVIES.md)",
+    ),
     "sub_00220200": (
         "gate",
         "the title's movie player (path, ...), cdecl; RECOMP_FCI_SKIP_INTROS / "

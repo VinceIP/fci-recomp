@@ -31,6 +31,11 @@
       "prehook",
       "the other video player (PREY.bik, data-named videos), cdecl, the path first: logged (fci_disk.c)"
     ],
+    "sub_00196AD6": [
+      "gate",
+      "a menu background video's update (eax = video, ret 4), as Instincts' 0021FFA0: BinkWait only under 25 fps, otherwise a frame per call; skipped until the next frame is due (fci_bink.c)",
+      "0021FFA0"
+    ],
     "sub_0017EED6": [
       "prehook",
       "Console_RegisterFloat (eax = console [0056B4E4]; name, storage, default, flags, help; stdcall, as Instincts' 001FDCD0; Engine3D's e_obj_* at 00343B3C): records the variable and applies RECOMP_CVAR_<name> (fci_cvars.c)",
