@@ -678,6 +678,10 @@ static DWORD WINAPI status_thread(LPVOID param)
                     "\"movie\": \"%s\", \"view\": \"%08X\"",
                     (unsigned long long)(GetTickCount64() - start), status_presents, status_polls,
                     status_frames3d, status_movies, movie, status_view);
+            {
+                extern double fci_game_clock(void), fci_replay_left(void); /* fci_trace.c, fci_record.c */
+                fprintf(f, ", \"game_s\": %.3f, \"replay_left\": %.3f", fci_game_clock(), fci_replay_left());
+            }
             for (const char *w = watch; w && *w;) { /* name=expr pairs */
                 const char *eq = strchr(w, '='), *end = strchr(w, ',');
                 if (!eq || (end && eq > end))

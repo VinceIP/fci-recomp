@@ -90,3 +90,31 @@ entity's: Player_ProcessInput's `this` for the game view's block is the player's
 entity, the entity's +0x34C its position (Instincts, found 2026-10-22 by diffing memory dumps around a
 walk: (744.92, 217.89, 19.48) to (739.97, 219.15, 19.31) in 1.5 s; the actor's +0x224 is about 1.4 m
 higher, the eyes). The view's camera copies (view+0x1468) are rebuilt each frame and are no position source.
+
+## Recorded input
+
+A test drives the game from a recording of someone playing it (src/fci_record.c, runtime patch 0021,
+tools/record2script.py):
+
+- `RECOMP_FCI_RECORD=<file>` logs each controller report the title reads when it changes, the direct
+  mouse aim of each game frame, the moment the player's actor first appears (the sync) and, ten times a
+  second, the state: frames, polls, videos, the game clock, the player, its entity's id, the id of what
+  the view controls and the position.
+- tools/record2script.py turns the recording into game_driver arguments (`@<stem>.steps`): the presses
+  before the sync as live pad steps (gaps capped at 1.5 s), then `wait:ingame` and `wait:replay`; and a
+  replay file of the rest, in game seconds from the sync.
+- `RECOMP_FCI_PLAYBACK=<file>` replaces the input with the replay's from the sync on, by the game's clock,
+  so the same input reaches the game at the same game time at any frame rate. Reports recorded while the
+  clock stood still (a loading screen's "press A"; its clock value depends on the frame rate) wait for the
+  clock to stand still for 250 ms and then for their recorded host time after the report before. With
+  both options, the recording logs what the replay did. (`RECOMP_FCI_REPLAY` is fci_probe.c's.)
+- The status file gains `game_s` and `replay_left` (game seconds of the replay still to come).
+
+Checked 2026-10-22 on Instincts' tunnel save: a 10 s recording (walk, turn with the stick, jump, a mouse
+flick) replayed at 30 and 120 fps ends within 0.2 m and 0.7 degrees of the recorded run.
+
+What the view controls: `view+0x30` holds an entity id, not a pointer (1000000, 0x000F4240, for the
+player in both games); the player's entity holds its own id at +0xA4 (found in memory dumps: Instincts on
+foot, Evolution riding the jeep's gun, where the view still controls the player). A different id there
+presumably means a vehicle being driven; not yet seen. The actor's +0x400 (re/notes/INPUT-CAMERA.md's
+mounted flags) is no vehicle signal: 1 on foot in Instincts, 0 on the jeep in Evolution.

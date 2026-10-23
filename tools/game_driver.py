@@ -7,6 +7,7 @@ as long as the game does and no longer.
   wait:ingame           3D frames are being built steadily (gameplay, a cutscene, Jump In Map)
   wait:frames:<n>       n more frames presented
   wait:polls            the controllers are polled (the editor's menus, the title)
+  wait:replay           a RECOMP_FCI_PLAYBACK recording has played to its end (game time, src/fci_record.c)
   sleep:<seconds>
   pad:<button>[+<button>][:<ms>]   live pad (RECOMP_PAD_LIVE syntax: a b x y start back lup rright ...)
   mouse:<dx>:<dy>       mouse motion in counts, as if captured (on foot: dx * 0.05 degrees of turn)
@@ -15,6 +16,9 @@ as long as the game does and no longer.
   dump:<name>           guest RAM now, memdump-<name>.bin
 
   python -B tools/game_driver.py <name> [--editor] [--save <fixture>] [--opt RECOMP_X=v ...] <step> ...
+
+An argument @<file> reads more arguments from a file, one a line (# starts a comment; "--opt X" and
+"--save X" on one line): tools/record2script.py writes such files from a recording.
 
 Runs in <regress>/drive/<name>-<time> and prints each step's time. The builds under test are copied to
 <regress>/bin first, so the installed game stays free to play or rebuild; the game is ended at the end,
@@ -216,6 +220,9 @@ class Game:
                     return len(hist) > 5 and hist[-1][1] - hist[0][1] >= 10
 
                 self.wait(steady, spec, timeout)
+            elif arg == "replay":  # game seconds left, so allow for a slow frame rate
+                left = self.status().get("replay_left", 0)
+                self.wait(lambda s: s.get("replay_left", -1) == 0, spec, max(timeout, 30 + 4 * left))
             elif arg.startswith("frames:"):
                 base = self.status().get("presents", 0)
                 n = int(arg.split(":")[1])
@@ -292,6 +299,10 @@ def main(argv):
     kw, opts, steps = {}, [], []
     while rest:
         a = rest.pop(0)
+        if a.startswith("@"):
+            lines = [ln.strip() for ln in Path(a[1:]).read_text().splitlines()]
+            rest[:0] = [w for ln in lines if ln and not ln.startswith("#") for w in ln.split(None, 1)]
+            continue
         if a == "--editor":
             kw["editor"] = True
         elif a == "--save":
