@@ -224,6 +224,11 @@
 "evidence": "instruction immediate into code not covered by any base-lift function"
 },
 {
+"start": "0x00207485",
+"observed": true,
+"evidence": "expat's ignoreSectionTok, scanners[3] of the 8 single-byte encodings (004A8410, 0x170 apart); push ebp/mov ebp,esp right after its byte-type table, which the sweep read as code, so the pointer landed mid-instruction; the game reached it (stop 81 loading 24_shantyday, a user's log, 2026-10-23)"
+},
+{
 "start": "0x0020767D",
 "evidence": "data pointer into code not covered by any base-lift function"
 },
@@ -234,6 +239,11 @@
 {
 "start": "0x0020966F",
 "evidence": "data pointer into code not covered by any base-lift function"
+},
+{
+"start": "0x00209CC4",
+"observed": true,
+"evidence": "expat's ignoreSectionTok, scanners[3] of the 4 UTF-16LE encodings (004A8F90, 0x170 apart); push ebp/mov ebp,esp right after its byte-type table, which the sweep read as code, so the pointer landed mid-instruction; the same slot as 00207485"
 },
 {
 "start": "0x00209F54",
@@ -262,6 +272,11 @@
 {
 "start": "0x0020B928",
 "evidence": "data pointer into code not covered by any base-lift function"
+},
+{
+"start": "0x0020C1F0",
+"observed": true,
+"evidence": "expat's ignoreSectionTok, scanners[3] of the 2 UTF-16BE encodings (004A9550, 0x170 apart); push ebp/mov ebp,esp right after its byte-type table, which the sweep read as code, so the pointer landed mid-instruction; the same slot as 00207485"
 },
 {
 "start": "0x0020C475",
