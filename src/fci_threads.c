@@ -607,6 +607,13 @@ static volatile LONG status_presents, status_polls, status_frames3d, status_movi
 static char status_movie[160];
 
 void fci_status_present(void) { InterlockedIncrement(&status_presents); }
+void fci_status_counts(long *presents, long *polls, long *frames3d, long *movies)
+{
+    *presents = status_presents;
+    *polls = status_polls;
+    *frames3d = status_frames3d;
+    *movies = status_movies;
+}
 void fci_prehook_001F6C00(void) { InterlockedIncrement(&status_polls); }
 static volatile uint32_t
         status_view; /* Camera_BuildViews' argument: the game view (re/notes/INPUT-CAMERA.md) */

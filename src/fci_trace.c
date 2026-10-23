@@ -29,7 +29,26 @@ static LARGE_INTEGER freq, start;
 static unsigned long frames;
 static volatile uint32_t actor; /* Player_ProcessInput's this for the game view (fci_aim.c) */
 
-void fci_trace_actor(uint32_t a) { actor = a; }
+void fci_trace_actor(uint32_t a)
+{
+    extern void fci_record_player(uint32_t player); /* fci_record.c */
+    if (a != actor) {
+        actor = a;
+        fci_record_player(a);
+    }
+}
+uint32_t fci_trace_player(void) { return actor; }
+double fci_game_clock(void) { return FCI_GAME_TIMER ? MEMD(FCI_GAME_TIMER + 0x28u) : 0.0; }
+int fci_player_position(float xyz[3])
+{
+    uint32_t entity = actor ? MEM32(actor + FCI_ACTOR_ENTITY) : 0;
+    if (!entity)
+        return 0;
+    xyz[0] = MEMF(entity + FCI_ENTITY_POSITION);
+    xyz[1] = MEMF(entity + FCI_ENTITY_POSITION + 4);
+    xyz[2] = MEMF(entity + FCI_ENTITY_POSITION + 8);
+    return 1;
+}
 
 /* from Camera_BuildViews' prehook, once per 3D frame */
 void fci_trace_frame(uint32_t view)
