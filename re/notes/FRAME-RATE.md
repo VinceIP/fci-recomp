@@ -50,6 +50,21 @@ Instincts, the Training tunnel save, the stick held forward 2 s (tools/frametrac
 The walking speed is the same; the speed-up is slower the higher the frame rate (a step per frame not
 scaled fully by the frame time). This host reaches about 80 frames a second in the tunnel.
 
+Evolution, the first level from a new game: the player rides the jeep's mounted gun along a scripted
+drive starting about 18 s of game time in. The player entity follows the jeep, so its position compared at
+the same game time (2026-10-22, paced at 30 and 120):
+
+| Game time | 18 s | 20 s | 24 s | 28 s | 32 s | 36 s | 40 s |
+|---|---|---|---|---|---|---|---|
+| Apart | 0.7 m | 5.0 m | 11.4 m | 15.0 m | 31.3 m | 51.7 m | 65.1 m |
+
+At 120 the jeep is faster from the start (25.1 m against 20.6 m after 2 s), then near 34 s it nearly stops
+while the 30 run drives on: the vehicle's motion depends on the frame rate.
+
+Physics variables (RECOMP_CVAR_LIST, Instincts): `p_fixed_timestep` 0 (no fixed step), `p_max_substeps`
+5, `p_gravity_z` -9.8. The game's own variables (`max_time_step`, `max_time_step_vehicle`, `g_maxfps`,
+`game_Glider*`) are registered through 001FD9E0 (a string default), which RECOMP_CVAR does not hook yet.
+
 ## Known exceptions
 
 - The player's acceleration (above).
