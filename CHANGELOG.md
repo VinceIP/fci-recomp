@@ -11,7 +11,7 @@
 
 - Fixed a crash in Evolution loading the third story level.
 - Fixed an issue for both titles causing dynamic lights to flicker and be visible through distant geometry.
-- Fixed a small renderer issue causing the NVIDIA overlay and others to sometimes be invisible/blocked on switching game executables - this issue still needs work.
+- Fixed an issue causing the NVIDIA overlay and others to sometimes be invisible/blocked on switching game executables.
 
 Built against xboxrecomp 193e2995 and Xbox XBE Recomp 65e959d4. Supported discs: Far Cry Instincts
 title 55530008, version 1 (`data/disc.json`); Far Cry Instincts Evolution title 55530060, version 3
