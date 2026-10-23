@@ -7,7 +7,8 @@ variables) in a folder of its own with copied fixtures, drives the pad, captures
   - each captured frame is not black,
   - each frame against its reference: a 160x120 greyscale copy, by the mean absolute difference and
     by the worst 8x8 block (a missing piece of a model is local),
-  - scenario extras (one window across relaunches; the Z: cache copies carry the disc files' times).
+  - scenario extras (one window in front across relaunches, each instance's own; the Z: cache copies
+    carry the disc files' times).
 References and fixtures come from the game, so they live in the test folder (FCI_REGRESS, default
 build/regress), never in Git. Fixtures, each copied in once:
   save-tunnel        a save folder whose checkpoint is Story Mode's Training tunnel
@@ -122,7 +123,7 @@ SCENARIOS = {
         "block": 30,
     },
     "relaunch-window": {
-        "what": "game -> Map Editor -> Exit Editor -> main menu, one window throughout",
+        "what": "game -> Map Editor -> Exit Editor -> main menu, one window in front, each instance's own",
         "kind": "flow",
         "seconds": 225,
         "pad_script": "70000:start,85000:down,87000:down,89000:a",
@@ -396,6 +397,17 @@ def frames_and_children():
     return out
 
 
+def process_path(pid):
+    """the executable of a process, or "" when it cannot be read"""
+    h = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not h:
+        return ""
+    b, n = ctypes.create_unicode_buffer(1024), wt.DWORD(1024)
+    ok = ctypes.windll.kernel32.QueryFullProcessImageNameW(h, 0, b, ctypes.byref(n))
+    ctypes.windll.kernel32.CloseHandle(h)
+    return b.value if ok else ""
+
+
 def grab(h, path):
     from PIL import Image
 
@@ -473,8 +485,24 @@ def flow_timeline(sc, folder, start, child, frames, windows):
     for t in sc["grabs"]:
         while time.time() - start < t and child.poll() is None:
             time.sleep(0.2)
-        mine = [(f, k) for f, k in frames_and_children() if window_pid(f) == child.pid]
-        windows.append({"t": t, "frames": len(mine), "render_pids": [window_pid(k) for _, kids in mine for k in kids]})
+        # the session's visible frames: each instance runs an executable copied into the folder
+        mine = [
+            (f, k)
+            for f, k in frames_and_children()
+            if user32.IsWindowVisible(f) and Path(process_path(window_pid(f))).parent == folder
+        ]
+        r = wt.RECT()
+        if mine:
+            user32.GetWindowRect(mine[0][0], ctypes.byref(r))
+        windows.append(
+            {
+                "t": t,
+                "frames": len(mine),
+                "frame_pids": [window_pid(f) for f, _ in mine],
+                "render_pids": [window_pid(k) for _, kids in mine for k in kids],
+                "rect": [r.left, r.top, r.right, r.bottom],
+            }
+        )
         if mine:
             path = folder / f"grab-{t}.png"
             if grab(mine[0][0], path):
@@ -520,10 +548,15 @@ def check(name, sc, result, folder, bless):
     if "windows" in result:
         w = result["windows"]
         if any(x["frames"] != 1 for x in w):
-            problems.append("expected one frame window throughout: " + json.dumps(w))
+            problems.append("expected one visible frame window at a time: " + json.dumps(w))
         pids = [x["render_pids"][0] if x["render_pids"] else None for x in w]
         if len(set(pids)) != len(pids) or None in pids:
             problems.append("expected a new render window per instance: " + json.dumps(w))
+        # the process that draws owns the window in front (overlays follow it), in the first one's place
+        if any(x["frame_pids"] != x["render_pids"][:1] for x in w):
+            problems.append("expected each instance's frame to be its own: " + json.dumps(w))
+        if len({tuple(x["rect"]) for x in w}) > 1:
+            problems.append("expected every frame in the same place: " + json.dumps(w))
         notes.append("windows " + json.dumps(w))
     expected = (
         sum(1 for p in sc.get("plan", []) if p.endswith(":capture"))

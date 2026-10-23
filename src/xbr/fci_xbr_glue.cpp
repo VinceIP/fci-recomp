@@ -281,11 +281,11 @@ uint32_t VirtualFromPhysical(uint32_t pa)
 // ---- app: window, settings ------------------------------------------------------------------
 namespace app {
 namespace {
-// The window survives the game's reboots, which start a new process: the first instance makes the frame
-// window, and each instance draws into a child render window of its own (RECOMP_FCI_FRAME, inherited).
+// The game's reboots start a new process. Each instance makes its frame window in the previous one's place
+// (RECOMP_FCI_FRAME, inherited) and hides that one: the window in front belongs to the process that draws,
+// which overlays such as NVIDIA's follow. A render window inside the frame takes the device.
 HWND g_window = nullptr;   // this instance's render window
-HWND g_frame = nullptr;    // the frame: this process's own or the first instance's
-bool g_own_frame = false;
+HWND g_frame = nullptr;    // this instance's frame
 DWORD g_window_thread = 0;
 bool g_alt_enter = true;                  // RECOMP_FCI_ALT_ENTER=0: no fullscreen toggle
 constexpr UINT kMsgToggle = WM_APP + 1;   // render window to frame: Alt+Enter
@@ -324,6 +324,21 @@ void ToggleFullscreen(HWND f)
     }
 }
 
+// where the previous instance's frame was: its placement, or in fullscreen the windowed one it keeps
+// (RECOMP_FCI_FRAME_WINDOWED, fci_window_pass_on), and whether it was fullscreen
+bool PlaceOf(HWND prev, WINDOWPLACEMENT& place, bool& full)
+{
+    const char* e = std::getenv("RECOMP_FCI_FRAME_WINDOWED");
+    RECT& n = place.rcNormalPosition;
+    int show = 0;
+    full = e && std::sscanf(e, "%ld,%ld,%ld,%ld,%d", &n.left, &n.top, &n.right, &n.bottom, &show) == 5;
+    if (full) {
+        place.showCmd = UINT(show);
+        return true;
+    }
+    return GetWindowPlacement(prev, &place) != 0;
+}
+
 BOOL CALLBACK FitChild(HWND c, LPARAM lp)
 {
     const RECT* r = reinterpret_cast<const RECT*>(lp);
@@ -354,7 +369,7 @@ LRESULT CALLBACK FrameProc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
     case kMsgToggle:
         ToggleFullscreen(w);
         return 0;
-    case WM_CLOSE:   // later instances are in jobs that die with this process
+    case WM_CLOSE:   // the session ends: the first instance waits for this one's job to empty
         fci_log_session_end();
         TerminateProcess(GetCurrentProcess(), 0);
         return 0;
@@ -596,34 +611,45 @@ void* Window()
             bool editor = fci_xbe_path && std::strstr(fci_xbe_path, "ige.xbe");
             const wchar_t* title = editor ? L"" FCI_TITLE_NAME " Map Editor (recompiled)"
                                           : L"" FCI_TITLE_NAME " (recompiled)";
+            // the previous instance's frame (a relaunch): this one takes its place, then hides it
             const char* fe = std::getenv("RECOMP_FCI_FRAME");
-            HWND frame = fe ? reinterpret_cast<HWND>(uintptr_t(std::strtoull(fe, nullptr, 16))) : nullptr;
-            if (frame && IsWindow(frame)) {
-                SetWindowTextW(frame, title);
+            HWND prev = fe ? reinterpret_cast<HWND>(uintptr_t(std::strtoull(fe, nullptr, 16))) : nullptr;
+            if (prev && !IsWindow(prev))
+                prev = nullptr;
+            // RECOMP_FCI_WINDOW (fci.ini display-dimensions), else the largest window of the aspect
+            // that fits the screen's work area; never larger than the work area
+            RECT work{0, 0, 1920, 1080};
+            SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+            uint32_t cw = 0, ch = 0;
+            if (!fci_window_size(&cw, &ch)) {
+                ch = uint32_t(work.bottom - work.top);
+                cw = fci_aspect_wide() ? ch * 16 / 9 : ch * 4 / 3;
+            }
+            float fit = std::min({1.0f, float(work.right - work.left - 32) / cw,
+                                  float(work.bottom - work.top - 64) / ch});
+            RECT r{0, 0, LONG(cw * fit), LONG(ch * fit)};
+            AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
+            HWND frame = CreateWindowExW(background ? WS_EX_NOACTIVATE : 0, fc.lpszClassName, title,
+                                         WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT,
+                                         r.right - r.left, r.bottom - r.top, nullptr, nullptr, inst, nullptr);
+            char hex[32];
+            std::snprintf(hex, sizeof(hex), "%llX", static_cast<unsigned long long>(uintptr_t(frame)));
+            SetEnvironmentVariableA("RECOMP_FCI_FRAME", hex);   // the next instance takes its place
+            bool full = Option("RECOMP_FCI_FULLSCREEN", false);
+            WINDOWPLACEMENT place{sizeof(place)};
+            if (prev && PlaceOf(prev, place, full)) {
+                if (background && place.showCmd == SW_SHOWNORMAL)
+                    place.showCmd = SW_SHOWNOACTIVATE;
+                SetWindowPlacement(frame, &place);
             } else {
-                // RECOMP_FCI_WINDOW (fci.ini display-dimensions), else the largest window of the aspect
-                // that fits the screen's work area; never larger than the work area
-                RECT work{0, 0, 1920, 1080};
-                SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
-                uint32_t cw = 0, ch = 0;
-                if (!fci_window_size(&cw, &ch)) {
-                    ch = uint32_t(work.bottom - work.top);
-                    cw = fci_aspect_wide() ? ch * 16 / 9 : ch * 4 / 3;
-                }
-                float fit = std::min({1.0f, float(work.right - work.left - 32) / cw,
-                                      float(work.bottom - work.top - 64) / ch});
-                RECT r{0, 0, LONG(cw * fit), LONG(ch * fit)};
-                AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
-                frame = CreateWindowExW(background ? WS_EX_NOACTIVATE : 0, fc.lpszClassName, title,
-                                        WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT,
-                                        r.right - r.left, r.bottom - r.top, nullptr, nullptr, inst, nullptr);
-                g_own_frame = true;
-                char hex[32];
-                std::snprintf(hex, sizeof(hex), "%llX", static_cast<unsigned long long>(uintptr_t(frame)));
-                SetEnvironmentVariableA("RECOMP_FCI_FRAME", hex);   // later instances draw in it
                 ShowWindow(frame, background ? SW_SHOWNOACTIVATE : SW_SHOW);
-                if (Option("RECOMP_FCI_FULLSCREEN", false))
-                    ToggleFullscreen(frame);
+            }
+            if (full)
+                ToggleFullscreen(frame);
+            if (prev) {
+                if (!background)
+                    SetForegroundWindow(frame);   // fci_relaunch allowed it
+                ShowWindowAsync(prev, SW_HIDE);   // its instance waits for this to end (fci_manual.c)
             }
             g_frame = frame;
             RECT c;
@@ -702,7 +728,7 @@ void Pace()
 
 // Before this instance freezes for a relaunch: its render window goes, so the frame shows black until the
 // next instance draws. Returns the thread to keep running, the frame and whether this instance made it.
-extern "C" unsigned long fci_window_handoff(void** frame, int* own)
+extern "C" unsigned long fci_window_handoff(void** frame)
 {
     {   // the presenter holds this lock for a whole present (d3d12.cpp): none is half done after it
         std::lock_guard lock(app::UiLock());
@@ -712,9 +738,21 @@ extern "C" unsigned long fci_window_handoff(void** frame, int* own)
         SendMessageW(app::g_window, app::kMsgLeave, 0, 0);
     if (frame)
         *frame = app::g_frame;
-    if (own)
-        *own = app::g_own_frame;
     return app::g_window_thread;
+}
+
+// Before a relaunch starts the next instance: the windowed placement this frame returns to from fullscreen,
+// which the next one's frame keeps (PlaceOf); none when windowed
+extern "C" void fci_window_pass_on(void)
+{
+    if (!app::g_full.on) {
+        SetEnvironmentVariableA("RECOMP_FCI_FRAME_WINDOWED", nullptr);
+        return;
+    }
+    const RECT& n = app::g_full.place.rcNormalPosition;
+    char v[96];
+    std::snprintf(v, sizeof(v), "%ld,%ld,%ld,%ld,%u", n.left, n.top, n.right, n.bottom, app::g_full.place.showCmd);
+    SetEnvironmentVariableA("RECOMP_FCI_FRAME_WINDOWED", v);
 }
 
 // The frame window and the thread that runs it, for a notice shown over the game (fci_manual.c)

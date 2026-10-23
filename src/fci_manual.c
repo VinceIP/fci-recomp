@@ -27,7 +27,8 @@ extern int fci_default_launch; /* fci_main.c */
 extern const char *fci_xbe_path, *fci_game_dir, *fci_save_dir;
 extern int fci_launch_argc;
 extern char **fci_launch_argv;
-unsigned long fci_window_handoff(void **frame, int *own); /* fci_xbr_glue.cpp */
+unsigned long fci_window_handoff(void **frame); /* fci_xbr_glue.cpp */
+void fci_window_pass_on(void);                  /* fci_xbr_glue.cpp */
 int fci_host_symbol(DWORD64 pc, char *name, size_t size, DWORD64 *disp,
                     DWORD64 *symbol_size); /* fci_threads.c */
 
@@ -40,6 +41,16 @@ uint32_t fci_launch_page_hash(uint32_t page)
 }
 
 /* The first instance after it rebooted: wait until the job is empty, keeping the last exit code. */
+/* the next instance hides this frame once its own is up (fci_xbr_glue.cpp); a minute, or its end, also do:
+ * until then the session keeps a window */
+static void wait_for_next_frame(HWND frame, HANDLE next)
+{
+    int i;
+    for (i = 0; i < 6000 && frame && IsWindowVisible(frame); i++)
+        if (WaitForSingleObject(next, 10) != WAIT_TIMEOUT)
+            break;
+}
+
 static void wait_for_chain(HANDLE job, HANDLE port, HANDLE first)
 {
     struct {
@@ -100,7 +111,7 @@ void fci_relaunch(uint32_t page)
     FILE *f;
     DWORD self = GetCurrentProcessId(), me = GetCurrentThreadId(), keep;
     void *frame = NULL;
-    int own_frame = 0, in_chain = getenv("RECOMP_FCI_CHAIN") != NULL;
+    int in_chain = getenv("RECOMP_FCI_CHAIN") != NULL;
     uint32_t i;
 
     for (i = 0; i < sizeof(path) - 1 && MEM8(page + 8 + i); i++)
@@ -187,6 +198,7 @@ void fci_relaunch(uint32_t page)
     si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
     fprintf(stderr, "[FCI] relaunch: %s -> %s with %s\n", path, exe, file);
     fflush(stderr);
+    fci_window_pass_on(); /* the next instance's frame takes this one's place */
     if (!CreateProcessA(exe, cmd, NULL, NULL, TRUE, CREATE_SUSPENDED, NULL, NULL, &si, &pi)) {
         fprintf(stderr, "[FCI] relaunch: CreateProcess failed (%lu)\n", GetLastError());
         return;
@@ -197,12 +209,8 @@ void fci_relaunch(uint32_t page)
         return;
     }
     /* the window first: under the presenter's lock, so no frame is half presented when it goes */
-    keep = fci_window_handoff(&frame, &own_frame);
-    if (in_chain) { /* the first instance waits for the job; this one has nothing left to do */
-        ResumeThread(pi.hThread);
-        fflush(stderr);
-        TerminateProcess(GetCurrentProcess(), 0);
-    }
+    keep = fci_window_handoff(&frame);
+    AllowSetForegroundWindow(pi.dwProcessId); /* its frame comes to the front in this one's place */
     {
         HWND w = NULL;
         while ((w = FindWindowExA(NULL, w, NULL, NULL)) != NULL) {
@@ -212,9 +220,7 @@ void fci_relaunch(uint32_t page)
                 ShowWindow(w, SW_HIDE);
         }
     }
-    /* no thread of this instance runs on but the frame's (when it made the frame) */
-    if (!own_frame)
-        keep = 0;
+    /* no thread of this instance runs on but the frame's */
     snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
     if (snap != INVALID_HANDLE_VALUE) {
         THREADENTRY32 te;
@@ -232,6 +238,11 @@ void fci_relaunch(uint32_t page)
         CloseHandle(snap);
     }
     ResumeThread(pi.hThread);
+    if (in_chain) { /* the first instance waits for the job; this one only keeps its frame up meanwhile */
+        wait_for_next_frame((HWND)frame, pi.hProcess);
+        fflush(stderr);
+        TerminateProcess(GetCurrentProcess(), 0);
+    }
     wait_for_chain(job, port, pi.hProcess);
 }
 
