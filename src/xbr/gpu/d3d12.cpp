@@ -753,7 +753,7 @@ private:
     Assembled asm_;  // kept between draws for its buffers
     bool tearing_ = false;
     uint64_t presents_ = 0;
-    // FCI: frame replay (RECOMP_FCI_XBR_REPLAY=<refreshes a second>, research docs/interpolation.md). A frame drawn
+    // FCI: frame replay (RECOMP_FCI_XBR_REPLAY=<refreshes a second>). A frame drawn
     // in one command list is kept at its present; while the title records the next, display refreshes execute it
     // again. Each resource the list changes goes back to the state it began in first, and ends where the present
     // left it, which is what the next frame's recording assumes.
@@ -779,8 +779,7 @@ private:
     };
     void KeepFrame(Target* t);
     // FCI: frame replay, milestone 2: each draw of the frame by what identifies it from one frame to the next, the
-    // draws matched with the frame before's, in order: the exact key first, then a loose one (research
-    // docs/interpolation.md)
+    // draws matched with the frame before's, in order: the exact key first, then a loose one
     struct DrawRec {
         uint64_t key = 0, loose = 0;
         uint8_t* vc = nullptr;    // the draw's vertex shader constants in the frame's upload ring

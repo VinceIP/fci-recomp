@@ -345,7 +345,7 @@ void fci_config_load(int *argc, char ***argv)
         snprintf(shader_cache_arg, sizeof shader_cache_arg, "RECOMP_FCI_XBR_SHADER_CACHE=%s", shader_cache);
         args[n++] = shader_cache_arg;
     }
-    /* experimental frame rates (research docs/interpolation.md): capped, the game keeps its 30 updates and the
+    /* experimental frame rates: capped, the game keeps its 30 updates and the
        frames in between are blended from its last two; uncapped, the game itself runs at the rate */
     if (rate == 0 || rate > 30) {
         if (cap)
