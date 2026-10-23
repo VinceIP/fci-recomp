@@ -114,11 +114,19 @@ REPLACE = {
         "acknowledgement (fci_manual.c)",
     ),
     "sub_001F6C00": ("prehook", "Input_PollPads (re/symbols): counts polls for RECOMP_FCI_STATUS"),
-    "sub_000F0500": ("prehook", "Camera_BuildViews (re/symbols): counts 3D frames for RECOMP_FCI_STATUS"),
+    "sub_000F0500": (
+        "prehook",
+        "Camera_BuildViews (re/symbols): counts 3D frames for RECOMP_FCI_STATUS, a line per frame for "
+        "RECOMP_FCI_TRACE (fci_trace.c)",
+    ),
     "sub_00098AE0": (
         "prehook",
         "Player_ProcessInput (re/symbols): adds direct mouse aim, in degrees, to the "
         "frame's turn (fci_aim.c, re/notes/INPUT-CAMERA.md)",
+    ),
+    "sub_001FD9E0": (
+        "prehook",
+        "Console_CreateVariable (re/symbols): replaces the default string with RECOMP_CVAR_<name> (fci_cvars.c)",
     ),
     "sub_001FDCD0": (
         "prehook",
@@ -126,6 +134,16 @@ REPLACE = {
         "default with RECOMP_CVAR_<name> (fci_cvars.c)",
     ),
     "sub_001FDED0": ("prehook", "Console_RegisterInt (re/symbols): as Console_RegisterFloat"),
+    "sub_0021FFA0": (
+        "gate",
+        "a menu background video's update (eax = video, ret 4): skipped until its next frame is due by the "
+        "Bink header's rate, as the game does only under 25 fps (fci_bink.c, re/notes/MOVIES.md)",
+    ),
+    "sub_003741E0": (
+        "gate",
+        "the physics world's step (world, frame time; ret 8), Far Cry's CPhysicalWorld::TimeStep: stepped at "
+        "30 a second whatever the frame rate (fci_physics.c, re/notes/FRAME-RATE.md)",
+    ),
     "sub_00220200": (
         "gate",
         "the title's movie player (path, ...), cdecl; RECOMP_FCI_SKIP_INTROS / "

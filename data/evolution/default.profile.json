@@ -31,6 +31,15 @@
       "prehook",
       "the other video player (PREY.bik, data-named videos), cdecl, the path first: logged (fci_disk.c)"
     ],
+    "sub_00282B1C": [
+      "gate",
+      "the physics world's step (edi = world, frame time; ret 4), as Instincts' 003741E0, called once a frame by 0017E353 with the frame time times the game's time scale: stepped at 30 a second whatever the frame rate (fci_physics.c)"
+    ],
+    "sub_00196AD6": [
+      "gate",
+      "a menu background video's update (eax = video, ret 4), as Instincts' 0021FFA0: BinkWait only under 25 fps, otherwise a frame per call; skipped until the next frame is due (fci_bink.c)",
+      "0021FFA0"
+    ],
     "sub_0017EED6": [
       "prehook",
       "Console_RegisterFloat (eax = console [0056B4E4]; name, storage, default, flags, help; stdcall, as Instincts' 001FDCD0; Engine3D's e_obj_* at 00343B3C): records the variable and applies RECOMP_CVAR_<name> (fci_cvars.c)",
@@ -41,6 +50,11 @@
       "Console_RegisterInt (as Console_RegisterFloat; e_detail_objects at 003432FC)",
       "001FDED0"
     ],
+    "sub_0017ED53": [
+      "prehook",
+      "Console_CreateVariable (thiscall, ecx = console [0056B4E4]; name, default string, flags, help; as Instincts' 001FD9E0; g_maxfps \"500\" at 0004408F): applies RECOMP_CVAR_<name> to the default string (fci_cvars.c)",
+      "001FD9E0"
+    ],
     "sub_000B8CF5": [
       "prehook",
       "Camera_BuildViews(view), as Instincts' 000F0500: calls the actor's Player_ProcessInput (vtable +0xD4) with view+0x8C8 at 000B905D; counts 3D frames and records the view for RECOMP_FCI_STATUS and direct mouse aim",
@@ -50,6 +64,22 @@
       "prehook",
       "Player_ProcessInput(block), as Instincts' 00098AE0 (the same reads: angles +0x18, turnYaw +0xBC, turnPitch +0xC0; vtable 004B04E8 slot +0xD4): direct mouse aim (fci_aim.c)",
       "00098AE0"
+    ],
+    "sub_0012C35F": [
+      "prehook",
+      "a vehicle drive (eax = vehicle), from the movement handler 0012C298: RECOMP_FCI_VEHTRACE (fci_vehdiag.c)"
+    ],
+    "sub_0012CA9A": [
+      "prehook",
+      "a vehicle drive (ebx = vehicle), from 0012C298: RECOMP_FCI_VEHTRACE (fci_vehdiag.c)"
+    ],
+    "sub_0012D22B": [
+      "prehook",
+      "a vehicle drive (eax = vehicle), from 0012C298: RECOMP_FCI_VEHTRACE (fci_vehdiag.c)"
+    ],
+    "sub_0012D981": [
+      "prehook",
+      "called by the movement handler 0012C298 (ebx = vehicle): RECOMP_FCI_VEHTRACE (fci_vehdiag.c)"
     ]
   },
   "evidence": "Exploratory Evolution profile: descriptor helper by masked bytes (unique match); code end = BINKDATA end (as Instincts' 0070C6E4).",
@@ -57,6 +87,10 @@
     "FCI_GAMEVIEW_INPUT": [
       "0x000008C8",
       "the view's ViewInput block: Camera_BuildViews passes view+0x8C8 to Player_ProcessInput (000B9056)"
+    ],
+    "FCI_GAME_TIMER": [
+      "0x0056CCC8",
+      "the engine timer, as Instincts' 00644488: the game update (0017E185) updates it (001801EB), takes its frame time (00180281, the double at +0x68) and hands it and the clock (+0x28) to the scripts as _frametime and _time (0018FA11)"
     ]
   }
 }

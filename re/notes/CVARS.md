@@ -40,8 +40,10 @@ pointer functions; the 3D engine's block is at 0100F340..0100F444 in that run).
 Prehooks on both register functions record each name with its storage. When the options hold
 `RECOMP_CVAR_<name>=<value>` the prehook replaces the default argument, so the console creates
 the variable with that value and the caller stores it. While the game runs, the control command
-`set RECOMP_CVAR_<name>=<value>` writes the recorded storage. Variables made by
-`Console_CreateVariable` are not reached this way.
+`set RECOMP_CVAR_<name>=<value>` writes the recorded storage. A prehook on `Console_CreateVariable`
+(Evolution 0017ED53) replaces its default string with `RECOMP_CVAR_<name>` (a copy in guest memory,
+2026-10-22) and lists the string defaults with `RECOMP_CVAR_LIST=1`; the control `set` does not reach
+these, they keep no storage of their own outside the variable object.
 
 Checks (intro fly-over, render scale 2, 2026-10-16):
 

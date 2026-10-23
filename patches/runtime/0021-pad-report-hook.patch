@@ -1,0 +1,38 @@
+Subject: Controller reports pass through the host before the title reads them
+
+usb_gamepad_report builds the 20-byte report a pad sends (the host pad, the keyboard and mouse, the
+scripted and live test input) and returns it to the emulated USB stack. It now hands the finished
+report to fci_pad_report first, which records it for tools/record2script.py (RECOMP_FCI_RECORD) or
+replaces it from a recording replayed on the game's clock (RECOMP_FCI_PLAYBACK), so a test drives the
+game with the same input at any frame rate (fci-recomp src/fci_record.c).
+
+---
+diff --git a/src/usb/usb_gamepad.c b/src/usb/usb_gamepad.c
+--- a/src/usb/usb_gamepad.c
++++ b/src/usb/usb_gamepad.c
+@@ -572,6 +572,10 @@
+     }
+ }
+ 
++/* The finished report, before the title reads it: recorded or replaced by the
++ * host's input recorder (fci_record.c in fci-recomp). */
++extern void fci_pad_report(int pad, uint8_t *report);
++
+ int usb_gamepad_report(int pad, uint8_t *out, int max)
+ {
+     XBOX_INPUT_STATE state;
+@@ -627,6 +631,7 @@
+     if (xbox_InputGetState((DWORD)pad, &state) != 0) {
+         out[2] = synth;
+         pad_script_apply(pad, out);
++        fci_pad_report(pad, out);
+         return 20;
+     }
+ 
+@@ -644,5 +649,6 @@
+     out[18] = (uint8_t)(g->sThumbRY & 0xFF);
+     out[19] = (uint8_t)((g->sThumbRY >> 8) & 0xFF);
+     pad_script_apply(pad, out);
++    fci_pad_report(pad, out);
+     return 20;
+ }

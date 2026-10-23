@@ -55,6 +55,18 @@ Found 2026-10-20 from the `Videos\*.bik` strings and their references.
 - The Special Features menu (000FB2FF) plays `INTRO`, `FCI_02`, `PREDATOR`, `MULTI`,
   `PREDATOR_MULTI`, `MAP_EDITOR`, `Previews_GR3_ntsc` and `Previews_R6L`.
 
+Frame pacing (both games, 2026-10-22): the full-screen player (Instincts `Movie_Play`, Evolution 00196D41)
+asks BinkWait (Evolution 0045E4D0; Bink library in the BINK sections) before each frame, so it plays at
+the file's rate whatever the game's. The background videos' update (Instincts 0021FFA0, Evolution
+00196AD6; eax = the video object, its +4 the Bink handle, ret 4) asks BinkWait only when the header's rate
+(Bink +0x14 / +0x18) is under 25 a second; otherwise it shows the next frame (BinkDoFrame 0045EB80,
+BinkNextFrame 0045F140) every call, once per game frame: the video's rate at 30, faster above. The gate
+`fci_gate_0021FFA0` (src/fci_bink.c) skips an update until the next frame is due by the header's rate
+(`RECOMP_FCI_BINK_PACE=0` turns it off; `RECOMP_FCI_BINK_LOG=1` logs each video's frames a second).
+Evolution's title background (header 30.07): 30.0 a second at 30, 60 and 120 frames; 38 to 40 at 60
+without the gate (the menu drew about 40). Instincts' (header 29.98): 30.0 at 30 and 60; 60.0 at 60
+without.
+
 Skipping: 00196D41 is gated by the same `fci_gate_00220200` (data/evolution/default.profile.json).
 `RECOMP_FCI_SKIP_INTROS` skips Ubisoft, Intro_FCI and Attract_Mode, the last as if the video had ended
 at once: 000FAF1E goes on, and 0003C828's loading screen covers a load still running. (An earlier gate

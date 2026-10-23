@@ -607,13 +607,22 @@ static volatile LONG status_presents, status_polls, status_frames3d, status_movi
 static char status_movie[160];
 
 void fci_status_present(void) { InterlockedIncrement(&status_presents); }
+void fci_status_counts(long *presents, long *polls, long *frames3d, long *movies)
+{
+    *presents = status_presents;
+    *polls = status_polls;
+    *frames3d = status_frames3d;
+    *movies = status_movies;
+}
 void fci_prehook_001F6C00(void) { InterlockedIncrement(&status_polls); }
 static volatile uint32_t
         status_view; /* Camera_BuildViews' argument: the game view (re/notes/INPUT-CAMERA.md) */
 void fci_prehook_000F0500(void)
 {
+    extern void fci_trace_frame(uint32_t view); /* RECOMP_FCI_TRACE (fci_trace.c) */
     status_view = MEM32(g_esp + 4);
     InterlockedIncrement(&status_frames3d);
+    fci_trace_frame(status_view);
 }
 uint32_t fci_game_view(void) { return status_view; }
 void fci_status_movie(const char *path)
@@ -669,6 +678,10 @@ static DWORD WINAPI status_thread(LPVOID param)
                     "\"movie\": \"%s\", \"view\": \"%08X\"",
                     (unsigned long long)(GetTickCount64() - start), status_presents, status_polls,
                     status_frames3d, status_movies, movie, status_view);
+            {
+                extern double fci_game_clock(void), fci_replay_left(void); /* fci_trace.c, fci_record.c */
+                fprintf(f, ", \"game_s\": %.3f, \"replay_left\": %.3f", fci_game_clock(), fci_replay_left());
+            }
             for (const char *w = watch; w && *w;) { /* name=expr pairs */
                 const char *eq = strchr(w, '='), *end = strchr(w, ',');
                 if (!eq || (end && eq > end))

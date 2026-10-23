@@ -13,12 +13,14 @@
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <bitset>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <mutex>
+#include <thread>
 #include <optional>
 #include <unordered_map>
 #include <unordered_set>
@@ -434,6 +436,7 @@ public:
     void BeginQuery() override;
     void EndQuery(uint32_t table, uint32_t offset) override;
     void SetGamma(const uint8_t* ramp) override;
+    ~D3D12Backend() override;  // FCI: frame replay's presenter thread
 
     ID3D12Device* Device() override { return dev_.Get(); }
     ID3D12GraphicsCommandList* List() override { return cl_.Get(); }
@@ -750,6 +753,101 @@ private:
     Assembled asm_;  // kept between draws for its buffers
     bool tearing_ = false;
     uint64_t presents_ = 0;
+    // FCI: frame replay (RECOMP_FCI_XBR_REPLAY=<refreshes a second>). A frame drawn
+    // in one command list is kept at its present; while the title records the next, display refreshes execute it
+    // again. Each resource the list changes goes back to the state it began in first, and ends where the present
+    // left it, which is what the next frame's recording assumes.
+    struct Touched {
+        D3D12_RESOURCE_STATES first, last;
+    };
+    using TouchedMap = std::unordered_map<ID3D12Resource*, Touched>;
+    struct Kept {
+        ComPtr<ID3D12GraphicsCommandList> list;
+        TouchedMap touched;  // by the frame's list
+        // the presented target and the picture to show (the extension's, else the target), as the frame left them
+        ComPtr<ID3D12Resource> t, src;
+        D3D12_RESOURCE_STATES t_state = D3D12_RESOURCE_STATE_COMMON;
+        uint32_t t_w = 0, t_h = 0;
+        DXGI_FORMAT fmt = kBgra;
+        ID3D12PipelineState* blit = nullptr;  // looked up on the render thread: the caches are its own
+        uint32_t samplers = 0;
+        bool gamma = false;
+        uint64_t frame = 0;
+        uint64_t fence = 0;  // its last execution: a list runs again only once that is done
+        bool fresh = false;  // executed by the render thread, not yet shown
+        bool valid = false;  // false once the render thread submitted anything after it (states moved on)
+    };
+    void KeepFrame(Target* t);
+    // FCI: frame replay, milestone 2: each draw of the frame by what identifies it from one frame to the next, the
+    // draws matched with the frame before's, in order: the exact key first, then a loose one
+    struct DrawRec {
+        uint64_t key = 0, loose = 0;
+        uint8_t* vc = nullptr;    // the draw's vertex shader constants in the frame's upload ring
+        int32_t prev = -1;        // the matching draw of the frame before
+        std::vector<float> orig;  // the constants as drawn (replays write blends into the ring)
+        std::vector<float> from;  // milestone 3: the match's, when the draw is blended
+        std::bitset<192> pos;     // the registers its position depends on
+    };
+    void ApplyBlend(double alpha);
+    std::unordered_map<uint64_t, std::bitset<192>> pos_regs_;  // by vertex program hash
+    // registers holding one value for every draw that reads them for its position (the camera: Evolution's
+    // view-projection c71-c74), this frame's and the frame before's, with that value
+    std::bitset<192> shared_, prev_shared_;
+    std::vector<float> shared_val_ = std::vector<float>(192 * 4), prev_shared_val_ = std::vector<float>(192 * 4);
+    void RecordDraw(const State& s, uint32_t prim, uint32_t count, const Assembled& a, uint64_t vh, uint64_t ph);
+    void MatchDraws();
+    std::vector<DrawRec> draws_, prev_draws_;
+    std::vector<DrawRec> kept_draws_;  // the kept frame's, matched with the frame before
+    // when the kept frame and the one before were shown
+    std::chrono::steady_clock::time_point kept_at_{}, kept_before_{};
+    bool blend_ = true;  // milestone 3; RECOMP_FCI_XBR_REPLAY_BLEND=0 replays unblended
+    // RECOMP_FCI_XBR_REPLAY_DUMP=<present>,<count> (diagnostic): every picture shown from the title's present
+    // <present> on, real or replayed, saved as replay/NNNN_<present>_<alpha>.bmp under the capture folder
+    void DumpShown(ID3D12GraphicsCommandList* l, uint32_t bi, double alpha, HANDLE event);
+    uint64_t dump_from_ = 0, dump_left_ = 0, dump_n_ = 0;
+    // XBE_PERF: frame replay's pacing a second at a time: pictures shown, real and replayed, the gaps between
+    // them, and the replays' waits for the GPU
+    void PaceStat(bool replay, double gpu_wait_ms);
+    struct PaceStats {
+        std::chrono::steady_clock::time_point start{}, last{};
+        uint32_t real = 0, replays = 0, gaps_over = 0;
+        double gap_max = 0, gap_sum = 0, wait = 0, wait_max = 0;
+    } pace_;
+    double shown_alpha_ = 0;
+    uint8_t* last_vc_ = nullptr;
+    struct MatchStats {
+        uint64_t frames = 0, draws = 0, exact = 0, loose = 0, duplicate = 0, changed = 0;
+        uint64_t moved[4] = {};  // matched draws by the first 32 registers' change: < 1, < 10, < 100, more
+        uint64_t blended = 0, implausible = 0, camera = 0;
+    } match_;
+    double replay_period_ = 0;  // seconds between refreshes, 0 off
+    bool frame_clean_ = true;   // nothing submitted since the frame began
+    bool in_keep_ = false;
+    TouchedMap touched_;
+    TouchedMap* track_ = nullptr;  // where Transition records, null when not tracking
+    Kept kept_;
+    std::vector<ComPtr<ID3D12GraphicsCommandList>> spare_lists_;
+    // the presenter thread: one picture a display refresh, the kept frame as executed or replayed with its blend for
+    // the moment; the render thread only hands frames over. kept_lock_ holds the kept frame and every submission to
+    // the queue (a replay must not run between the title's work and the frame it belongs to), swap_lock_ the swap
+    // chain; taken in that order after app::UiLock
+    void PresenterLoop();
+    enum class Picture { Shown, Skipped, None };
+    Picture ShowPicture();
+    std::thread presenter_;
+    std::atomic<bool> presenter_stop_{false};
+    std::recursive_mutex kept_lock_, swap_lock_;
+    HANDLE presenter_event_ = nullptr;
+    ComPtr<ID3D12Resource> presenter_cb_;  // the blit's constants, a 256-byte slot per picture in flight
+    uint8_t* presenter_cb_map_ = nullptr;
+    static constexpr uint32_t kPresenterSrv = 8;  // descriptors per picture in flight, past the frames' ranges
+    std::chrono::steady_clock::time_point next_picture_{};
+    ComPtr<ID3D12CommandAllocator> replay_alloc_[kFrames];
+    ComPtr<ID3D12GraphicsCommandList> replay_list_[kFrames][2];
+    uint64_t replay_fence_[kFrames] = {};
+    uint32_t replay_i_ = 0;
+    uint64_t replays_ = 0, kept_frames_ = 0, unkept_frames_ = 0;
+    std::chrono::steady_clock::time_point last_shown_ = std::chrono::steady_clock::now();
     // FCI: XBE_PERF latency: when each recent present was made (by DXGI's present count), to compare with when
     // DXGI says it was shown
     int64_t presented_ns_[16] = {};
@@ -778,6 +876,29 @@ bool D3D12Backend::Init(uint32_t width, uint32_t height) {
 #endif
     LoadSettings();
     Begin();
+    if (const char* e = std::getenv("RECOMP_FCI_XBR_REPLAY"); e && std::atof(e) > 0) {  // FCI: frame replay
+        replay_period_ = 1.0 / std::atof(e);
+        track_ = &touched_;
+        const char* b = std::getenv("RECOMP_FCI_XBR_REPLAY_BLEND");
+        blend_ = !(b && *b == '0');
+        LOGI("d3d12: frame replay at up to %.0f refreshes a second%s", std::atof(e), blend_ ? ", blended" : "");
+        presenter_event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        D3D12_HEAP_PROPERTIES hp{D3D12_HEAP_TYPE_UPLOAD};
+        D3D12_RESOURCE_DESC bd = BufferDesc(256ull * kFrames);
+        if (FAILED(dev_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_GENERIC_READ,
+                                                 nullptr, IID_PPV_ARGS(&presenter_cb_))) ||
+            FAILED(presenter_cb_->Map(0, nullptr, reinterpret_cast<void**>(&presenter_cb_map_)))) {
+            LOGE("d3d12: no buffer for frame replay's constants; frame replay off");
+            replay_period_ = 0;
+            track_ = nullptr;
+        } else {
+            presenter_ = std::thread([this] { PresenterLoop(); });
+        }
+        if (const char* d = std::getenv("RECOMP_FCI_XBR_REPLAY_DUMP")) {
+            unsigned long long from = 0, n = 0;
+            if (std::sscanf(d, "%llu,%llu", &from, &n) == 2) dump_from_ = from, dump_left_ = n;
+        }
+    }
     LOGI("d3d12: %ux%u guest, %ux%u window, render scale %.3f x %.3f", width, height, bb_w_, bb_h_, scale_x_,
          scale_y_);
     return true;
@@ -803,6 +924,19 @@ bool D3D12Backend::CreateDevice() {
     DXGI_ADAPTER_DESC1 ad{};
     if (adapter) adapter->GetDesc1(&ad);
     LOGR("D3D12 adapter: %ls", adapter ? ad.Description : L"default");
+    // FCI: XBE_D3D12_DEBUG: the debug layer's warnings and errors to the log, the first 200
+    ComPtr<ID3D12InfoQueue1> iq;
+    if (GetEnvironmentVariableW(L"XBE_D3D12_DEBUG", nullptr, 0) && SUCCEEDED(dev_.As(&iq))) {
+        DWORD cookie = 0;
+        iq->RegisterMessageCallback(
+                [](D3D12_MESSAGE_CATEGORY, D3D12_MESSAGE_SEVERITY sev, D3D12_MESSAGE_ID id, LPCSTR text, void*) {
+                    static std::atomic<int> n{0};
+                    if (sev <= D3D12_MESSAGE_SEVERITY_WARNING && n++ < 200)
+                        std::fprintf(stderr, "[D3D12] %d %d %s\n", int(sev), int(id), text);
+                },
+                D3D12_MESSAGE_CALLBACK_FLAG_NONE, nullptr, &cookie);
+        LOGI("d3d12: debug layer messages to the log");
+    }
     D3D12_COMMAND_QUEUE_DESC qd{};
     qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
     dev_->CreateCommandQueue(&qd, IID_PPV_ARGS(&queue_));
@@ -855,7 +989,8 @@ void D3D12Backend::CreateBackBufferViews() {
 }
 
 void D3D12Backend::CreateHeaps() {
-    srv_inc_ = CreateHeap(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, kSrvCount, true, srv_heap_);
+    srv_inc_ = CreateHeap(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, kSrvCount + kPresenterSrv * kFrames, true,
+                          srv_heap_);  // FCI: frame replay's presenter past the frames' ranges
     smp_inc_ = CreateHeap(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, kSamplerCount, true, smp_heap_);
     rtv_inc_ = CreateHeap(D3D12_DESCRIPTOR_HEAP_TYPE_RTV, kRtvCount + kFrames, false, rtv_heap_);
     dsv_inc_ = CreateHeap(D3D12_DESCRIPTOR_HEAP_TYPE_DSV, kDsvCount, false, dsv_heap_);
@@ -952,6 +1087,11 @@ bool Lost(HRESULT hr) {
 }
 
 void D3D12Backend::Submit(bool wait) {
+    std::lock_guard kept_lock(kept_lock_);  // FCI: frame replay: the presenter submits too
+    if (!in_keep_) {  // FCI: a frame in more than one list is not kept, and the kept one's states have moved on
+        frame_clean_ = false;
+        kept_.valid = false;
+    }
     if (q_open_) QueryEndPart();
     cl_->Close();
     ID3D12CommandList* lists[] = {cl_.Get()};
@@ -999,6 +1139,7 @@ void D3D12Backend::BeginQuery() {
     q_open_ = true;
     q_parts_.clear();
     if (qheap_) QueryStartPart();
+    if (cap_) fprintf(cap_, "%04u visibility test begin\n", cap_i_++);
 }
 
 void D3D12Backend::QueryStartPart() {
@@ -1023,6 +1164,7 @@ void D3D12Backend::QueryEndPart() {
 void D3D12Backend::EndQuery(uint32_t table, uint32_t offset) {
     if (q_open_) QueryEndPart();
     q_open_ = false;
+    if (cap_) fprintf(cap_, "%04u visibility test end, slot %08X+%03X\n", cap_i_++, table, offset);
     q_pending_.push_back({std::move(q_parts_), table, offset, 0, q_scale_});
     q_parts_.clear();
 }
@@ -1044,8 +1186,14 @@ void D3D12Backend::DeliverQueries(bool all) {
         }
         uint32_t count = q_failed_ ? 0xFFFFu : uint32_t(std::lround(double(sum) / std::max(it->scale, 1.0f)));
         uint32_t page = kernel::R32(it->table);
-        LOG_FIRST(48, "d3d12: visibility test slot %08X+%03X: %u parts, %llu samples / %.2f = %u", page, it->offset,
-                  unsigned(it->parts.size()), (unsigned long long)sum, it->scale, count);
+        // FCI: RECOMP_FCI_XBR_QUERY_LOG=1: every result, not the first 48
+        static const bool every = std::getenv("RECOMP_FCI_XBR_QUERY_LOG") != nullptr;
+        if (every)
+            std::fprintf(stderr, "[XBR] visibility test %08X+%03X = %u (%llu samples)\n", page, it->offset, count,
+                         (unsigned long long)sum);
+        else
+            LOG_FIRST(48, "d3d12: visibility test slot %08X+%03X: %u parts, %llu samples / %.2f = %u", page,
+                      it->offset, unsigned(it->parts.size()), (unsigned long long)sum, it->scale, count);
         if (!page) continue;
         uint32_t slot = page + it->offset;
         std::memcpy(kernel::HostPtr(slot + 8), &count, 4);
@@ -1121,6 +1269,10 @@ void D3D12Backend::Transition(ID3D12Resource* r, D3D12_RESOURCE_STATES& cur, D3D
     b.Transition.StateBefore = cur;
     b.Transition.StateAfter = want;
     cl_->ResourceBarrier(1, &b);
+    if (track_) {  // FCI: frame replay
+        auto [it, fresh] = track_->try_emplace(r, Touched{cur, want});
+        if (!fresh) it->second.last = want;
+    }
     cur = want;
 }
 
@@ -1443,7 +1595,12 @@ void D3D12Backend::DrawFullScreen(ID3D12PipelineState* pso, D3D12_GPU_VIRTUAL_AD
     uint32_t si = sampler_slot ? *sampler_slot : EnsureBlitSamplers();
     cl_->SetGraphicsRootDescriptorTable(3, Gpu(smp_heap_.Get(), si, smp_inc_));
     cl_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    // FCI: the renderer's own passes (ambient occlusion, resolves) are not the title's: a visibility test open
+    // around them must not count their pixels, or a hidden light reads as a full screen visible
+    bool counting = q_open_ && qheap_;
+    if (counting) QueryEndPart();
     cl_->DrawInstanced(3, 1, 0, 0);
+    if (counting) QueryStartPart();
 }
 
 void D3D12Backend::Blit(ID3D12Resource* src, DXGI_FORMAT fmt, const float uvrect[4], const BlitOptions& o) {
@@ -2387,6 +2544,7 @@ void D3D12Backend::UploadConstants(const State& s, const DrawShaders& sh, const 
     Alloc vc = Upload(sizeof(s.vsc), 256);
     std::memcpy(vc.cpu, s.vsc.data(), sizeof(s.vsc));
     Alloc dc = Upload(sizeof(DrawConstants), 256);
+    last_vc_ = vc.cpu;  // FCI: frame replay
     FillSurfaceConstants(s, size, c);
     FillFogConstants(s, sh.prog, c);
     std::memcpy(c.wbuf, wbuf_, sizeof(c.wbuf));
@@ -2676,8 +2834,9 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     if (!BindStageTexturesAndTargets(s, stages)) return;
     PixelKey pk = MakePixelKey(s, stages.info);
     pk.quad = sh.quad;
-    // FCI: ZEnable 2 is NV2A W-buffering (FCI draws its world so): depth from w, see PixelHlsl
-    pk.wbuf = s.rs[kRsZEnable] == 2 && bound_ds_ && !a.pretransformed && !sh.quad;
+    // FCI: ZEnable 2 is NV2A W-buffering (FCI draws its world so): depth from w, see PixelHlsl. Pretransformed
+    // draws too: the XDK scales their 1 / rhw by zscale / WFar (005086C0), as fixed function's view w
+    pk.wbuf = s.rs[kRsZEnable] == 2 && bound_ds_ && !sh.quad;
     sh.pkey = Hash(&pk, sizeof(pk));
     EnsurePixelShader(pk, sh);
     if (!sh.vs_code || !sh.ps_code) return;
@@ -2716,6 +2875,7 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
 
     // geometry
     DrawGeometry(a);
+    if (replay_period_ > 0) RecordDraw(s, prim, count, a, sh.vh, sh.ph);  // FCI: frame replay
     if (cap_ && probe_x_ >= 0 && bound_rt_) Probe(*bound_rt_, cap_i_ - 1);  // FCI: XBE_PROBE
 }
 
@@ -3167,9 +3327,14 @@ void D3D12Backend::ReleaseOldTextures() {
 
 void D3D12Backend::ResetFrame() {
     Frame& f = CurrentFrame();
-    if (f.fence && fence_->GetCompletedValue() < f.fence) {
+    uint64_t slot_fence;
+    {
+        std::lock_guard kept_lock(kept_lock_);  // FCI: frame replay: replays of this slot's frame push its fence on
+        slot_fence = f.fence;
+    }
+    if (slot_fence && fence_->GetCompletedValue() < slot_fence) {
         auto perf_wait = PerfClock::now();
-        WaitFence(f.fence);
+        WaitFence(slot_fence);
         g_perf.wait += PerfMs(perf_wait);
     }
     f.alloc->Reset();
@@ -3178,6 +3343,603 @@ void D3D12Backend::ResetFrame() {
     f.srv = 0;
     cl_->Reset(f.alloc.Get(), nullptr);
     Begin();
+    frame_clean_ = true;  // FCI: frame replay
+    touched_.clear();
+    draws_.clear();
+    track_ = replay_period_ > 0 ? &touched_ : nullptr;
+}
+
+// FCI: frame replay, milestone 3: the constant registers (hardware order) a vertex program's position depends
+// on, through its temporaries and a0. A read relative to a0 (a bone palette) takes every register from its base.
+std::bitset<192> PositionRegisters(const std::vector<uint32_t>& prog) {
+    std::bitset<192> dep[13], a0, pos;  // R0-R11, R12 (oPos)
+    auto f = [](const uint32_t* t, int sub, int bit, int len) { return (t[sub] >> bit) & ((1u << len) - 1); };
+    auto src = [&](const uint32_t* t, int which, std::bitset<192>& out) {
+        uint32_t reg, mux;
+        if (which == 0) {
+            reg = f(t, 2, 28, 4), mux = f(t, 2, 26, 2);
+        } else if (which == 1) {
+            reg = f(t, 2, 13, 4), mux = f(t, 2, 11, 2);
+        } else {
+            reg = f(t, 2, 0, 2) << 2 | f(t, 3, 30, 2), mux = f(t, 3, 28, 2);
+        }
+        if (mux == 1 && reg <= 12) {
+            out |= dep[reg];
+        } else if (mux == 3) {
+            uint32_t cr = f(t, 1, 13, 8);
+            if (f(t, 3, 1, 1)) {
+                out |= a0;
+                for (uint32_t i = cr; i < 192; i++) out.set(i);
+            } else if (cr < 192) {
+                out.set(cr);
+            }
+        }
+    };
+    // MAC opcodes from 1: mov mul add mad dp3 dph dp4 dst min max slt sge arl, and the operands each reads (A B C)
+    static const uint8_t kMacReads[14] = {0, 1, 3, 5, 7, 3, 3, 3, 3, 3, 3, 3, 3, 1};
+    for (size_t n = 0; n + 4 <= prog.size(); n += 4) {
+        const uint32_t* t = &prog[n];
+        uint32_t mac = f(t, 1, 21, 4), ilu = f(t, 1, 25, 3);
+        std::bitset<192> m, il;
+        if (mac && mac < 14)
+            for (int w = 0; w < 3; w++)
+                if (kMacReads[mac] >> w & 1) src(t, w, m);
+        if (ilu) src(t, 2, il);
+        uint32_t r = f(t, 3, 20, 4), omask = f(t, 3, 12, 4);
+        if (mac == 13) {
+            a0 = m;
+        } else if (mac) {
+            uint32_t mm = f(t, 3, 24, 4);
+            if (ilu && r == 1) mm = 0;
+            if (mm && r <= 12) dep[r] = mm == 0xF ? m : dep[r] | m;
+        }
+        if (ilu) {
+            uint32_t im = f(t, 3, 16, 4), ir = mac ? 1 : r;
+            if (im && ir <= 12) dep[ir] = im == 0xF ? il : dep[ir] | il;
+        }
+        bool use_ilu = f(t, 3, 2, 1) == 1;
+        if (omask && f(t, 3, 11, 1) && (f(t, 3, 3, 8) & 0xF) == 0) pos |= use_ilu ? il : m;
+        if (f(t, 3, 0, 1)) break;
+    }
+    return pos | dep[12];
+}
+
+// FCI: frame replay, milestone 3: the kept frame's blended draws, their position registers from the matching
+// draw's (alpha 0) to their own (1), written into the frame's upload ring where its list reads them
+void D3D12Backend::ApplyBlend(double alpha) {
+    if (!blend_) return;
+    float a = float(alpha);
+    for (const DrawRec& d : kept_draws_) {
+        if (d.from.empty() || !d.vc) continue;
+        float* dst = reinterpret_cast<float*>(d.vc);
+        for (size_t r = 0; r < 192; r++) {
+            if (!d.pos[r]) continue;
+            for (size_t c = r * 4; c < r * 4 + 4; c++) dst[c] = d.from[c] + (d.orig[c] - d.from[c]) * a;
+        }
+    }
+}
+
+// FCI: frame replay, milestone 2. A draw's identity: its target by kind (size, format, depth: the title flips
+// between back buffers), primitive, shaders and the data of its textures (header +4: the render thread hands over
+// header copies, the data stays put); for the exact key also its vertex streams' data (a fifth to a third of the
+// draws' move from frame to frame: geometry built each frame), counts and a sample of its indices (they arrive
+// copied).
+void D3D12Backend::RecordDraw(const State& s, uint32_t prim, uint32_t count, const Assembled& a, uint64_t vh,
+                              uint64_t ph) {
+    struct {
+        uint64_t vh, ph;
+        uint32_t rt_w, rt_h, rt_fmt, rt_depth, prim, tex[4];
+    } loose{};
+    if (bound_rt_) {
+        loose.rt_w = bound_rt_->gw;
+        loose.rt_h = bound_rt_->gh;
+        loose.rt_fmt = uint32_t(bound_rt_->fmt);
+    }
+    loose.rt_depth = bound_ds_ ? 1 : 0;
+    loose.vh = vh;
+    loose.ph = ph;
+    loose.prim = prim;
+    for (int i = 0; i < 4; i++) loose.tex[i] = s.textures[size_t(i)] ? kernel::R32(s.textures[size_t(i)] + 4) : 0;
+    DrawRec r;
+    r.loose = Hash(&loose, sizeof(loose));
+    uint32_t exact[14] = {count, a.index_count, a.draw_count, uint32_t(a.base_vertex), 0, 0};
+    for (int i = 0; i < 4; i++) {
+        exact[6 + i] = s.streams[size_t(i)].vb ? kernel::R32(s.streams[size_t(i)].vb + 4) : 0;
+        exact[10 + i] = s.streams[size_t(i)].stride;
+    }
+    if (a.index_src && a.index_count) {  // the first and last eight indices
+        uint32_t n = std::min<uint32_t>(a.index_count, 8), size = a.index16 ? 2 : 4;
+        const uint8_t* p = static_cast<const uint8_t*>(a.index_src);
+        exact[4] = uint32_t(Hash(p, size_t(n) * size));
+        exact[5] = uint32_t(Hash(p + size_t(a.index_count - n) * size, size_t(n) * size));
+    }
+    r.key = Hash(exact, sizeof(exact), r.loose);
+    r.vc = last_vc_;
+    if (r.vc) r.orig.assign(reinterpret_cast<const float*>(r.vc), reinterpret_cast<const float*>(r.vc) + 192 * 4);
+    if ((s.vs_handle & 1) && s.vs && !s.vs->program.empty()) {
+        auto it = pos_regs_.find(s.vs->hash);
+        if (it == pos_regs_.end()) it = pos_regs_.emplace(s.vs->hash, PositionRegisters(s.vs->program)).first;
+        r.pos = it->second;
+    }
+    draws_.push_back(std::move(r));
+}
+
+// FCI: frame replay, milestone 3: each run of consecutive registers in mask (an object's matrix, a bone palette),
+// by its first register, length and values
+template <typename F>
+void ForObjectBlocks(const std::vector<float>& orig, const std::bitset<192>& mask, F&& f) {
+    for (size_t r = 0; r < 192;) {
+        if (!mask[r]) {
+            r++;
+            continue;
+        }
+        size_t first = r;
+        while (r < 192 && mask[r]) r++;
+        uint64_t key = Hash(orig.data() + first * 4, (r - first) * 16, uint64_t(first) << 32 | (r - first));
+        f(first, r - first, key);
+    }
+}
+
+void D3D12Backend::MatchDraws() {
+    // the first 32 registers' difference: among draws with one key (the same mesh drawn again: trees, props), the
+    // nearest is the same instance a frame on, where the order of the draws may have changed
+    auto distance = [](const DrawRec& x, const DrawRec& y) {
+        if (x.orig.empty() || y.orig.empty()) return 0.0f;
+        const float* a = x.orig.data() + 96 * 4;
+        const float* b = y.orig.data() + 96 * 4;
+        float d = 0;
+        for (int k = 0; k < 32 * 4; k++) d += std::fabs(a[k] - b[k]);
+        return d;
+    };
+    std::vector<uint8_t> taken(prev_draws_.size(), 0);
+    auto match = [&](bool exact) {
+        std::unordered_map<uint64_t, std::vector<int32_t>> by;  // the frame before's untaken draws, in order
+        for (int32_t i = 0; i < int32_t(prev_draws_.size()); i++)
+            if (!taken[size_t(i)]) by[exact ? prev_draws_[size_t(i)].key : prev_draws_[size_t(i)].loose].push_back(i);
+        for (DrawRec& d : draws_) {
+            if (d.prev >= 0) continue;
+            auto it = by.find(exact ? d.key : d.loose);
+            if (it == by.end()) continue;
+            int32_t best = -1;
+            float best_d = 0;
+            for (int32_t i : it->second) {
+                if (taken[size_t(i)]) continue;
+                float di = it->second.size() > 1 ? distance(d, prev_draws_[size_t(i)]) : 0;
+                if (best < 0 || di < best_d) best = i, best_d = di;
+            }
+            if (best < 0) continue;
+            d.prev = best;
+            taken[size_t(best)] = 1;
+            (exact ? match_.exact : match_.loose)++;
+            if (it->second.size() > 1) match_.duplicate++;
+        }
+    };
+    match(true);
+    match(false);
+    // milestone 3: the shared registers (one value across the frame's draws that read them for position)
+    std::bitset<192> seen;
+    shared_.reset();
+    for (const DrawRec& d : draws_) {
+        if (d.orig.empty()) continue;
+        for (size_t r = 0; r < 192; r++) {
+            if (!d.pos[r]) continue;
+            const float* v = d.orig.data() + r * 4;
+            if (!seen[r]) {
+                seen.set(r);
+                shared_.set(r);
+                std::memcpy(&shared_val_[r * 4], v, 16);
+            } else if (shared_[r] && std::memcmp(&shared_val_[r * 4], v, 16)) {
+                shared_.reset(r);
+            }
+        }
+    }
+    std::bitset<192> camera = shared_ & prev_shared_;
+    std::unordered_map<uint64_t, std::vector<float>> object_from;  // by register block and its values
+    // a loose key drawn once in both frames: the same mesh whatever its vertices (a weapon, a vehicle's body)
+    std::unordered_map<uint64_t, int> loose_now, loose_before;
+    for (const DrawRec& d : draws_) loose_now[d.loose]++;
+    for (const DrawRec& d : prev_draws_) loose_before[d.loose]++;
+    // plausibility: how far matched draws' constants moved (a wrong match differs everywhere)
+    for (DrawRec& d : draws_) {
+        const DrawRec* p = d.prev >= 0 ? &prev_draws_[size_t(d.prev)] : nullptr;
+        if (p && !d.orig.empty() && !p->orig.empty()) {
+            if (d.orig != p->orig) match_.changed++;
+            float di = distance(d, *p);
+            match_.moved[di < 1 ? 0 : di < 10 ? 1 : di < 100 ? 2 : 3]++;
+        }
+        if (d.pos.none() || d.orig.empty()) continue;
+        // the camera's registers blend for every draw; the object's only for an exact match or a loose key drawn
+        // once in both frames (another loose match may be another mesh: a vehicle's parts share one), whose
+        // position registers moved by at most half their size (a sprite mesh shared by many sprites, or registers
+        // that hold other things, jump)
+        std::bitset<192> object = d.pos & ~camera;
+        bool same = p && (d.key == p->key || (loose_now[d.loose] == 1 && loose_before[d.loose] == 1));
+        bool own = same && !p->orig.empty();
+        for (size_t r = 0; r < 192 && own; r++) {
+            if (!object[r]) continue;
+            for (size_t c = r * 4; c < r * 4 + 4; c++) {
+                float a = d.orig[c], b = p->orig[c];
+                // at most half its size, and 1.5 at most: an object's own matrix holds still unless it moves,
+                // a metre or so a frame; another copy of a mesh (trees) is metres away however large the values
+                if (std::fabs(a - b) > std::min(1.5f, 0.5f * std::max({std::fabs(a), std::fabs(b), 1.0f}))) own = false;
+            }
+        }
+        if (same && !own) match_.implausible++;
+        bool cam = (d.pos & camera).any();
+        if (cam) match_.camera++;
+        if (!own && !cam) continue;
+        d.from = d.orig;
+        for (size_t r = 0; r < 192; r++) {
+            if (!d.pos[r]) continue;
+            if (camera[r])
+                std::memcpy(&d.from[r * 4], &prev_shared_val_[r * 4], 16);
+            else if (own)
+                std::memcpy(&d.from[r * 4], &p->orig[r * 4], 16);
+        }
+        // the object's blend, by its register blocks' values: its other passes take the same
+        if (own)
+            ForObjectBlocks(d.orig, object, [&](size_t first, size_t n, uint64_t key) {
+                object_from.try_emplace(key, d.from.begin() + first * 4, d.from.begin() + (first + n) * 4);
+            });
+    }
+    // every draw of an object blends as its matched pass does: an overlay drawn over an earlier pass's depth
+    // (less-equal, no depth write) that blended differently would fall behind it and vanish between frames
+    for (DrawRec& d : draws_) {
+        if (d.pos.none() || d.orig.empty()) continue;
+        bool any = false;
+        ForObjectBlocks(d.orig, d.pos & ~camera, [&](size_t first, size_t, uint64_t key) {
+            auto it = object_from.find(key);
+            if (it == object_from.end()) return;
+            if (d.from.empty()) {
+                d.from = d.orig;
+                for (size_t r = 0; r < 192; r++)
+                    if (d.pos[r] && camera[r]) std::memcpy(&d.from[r * 4], &prev_shared_val_[r * 4], 16);
+            }
+            std::copy(it->second.begin(), it->second.end(), d.from.begin() + first * 4);
+            any = true;
+        });
+        if (any) match_.blended++;
+    }
+    prev_shared_ = shared_;
+    prev_shared_val_ = shared_val_;
+    match_.frames++;
+    match_.draws += draws_.size();
+    prev_draws_ = std::move(draws_);
+    draws_.clear();
+    if (match_.frames % 150 == 0) {
+        double n = double(match_.draws ? match_.draws : 1);
+        LOGI("d3d12: draw matching over %llu frames: %.0f draws a frame; exact %.1f%%, loose %.1f%%, none %.1f%%; "
+             "chosen among several %.1f%%; constants changed %.1f%%, moved < 1: %.1f%%, < 10: %.1f%%, < 100: %.1f%%, "
+             "more: %.1f%%; camera blended %.1f%%, object blended %.1f%%, implausible %.1f%%",
+             (unsigned long long)match_.frames, n / match_.frames, 100 * match_.exact / n, 100 * match_.loose / n,
+             100 * (n - match_.exact - match_.loose) / n, 100 * match_.duplicate / n, 100 * match_.changed / n,
+             100 * match_.moved[0] / n, 100 * match_.moved[1] / n, 100 * match_.moved[2] / n, 100 * match_.moved[3] / n,
+             100 * match_.camera / n, 100 * match_.blended / n, 100 * match_.implausible / n);
+        match_ = {};
+    }
+}
+
+// FCI: RECOMP_FCI_XBR_REPLAY_DUMP: the back buffer about to be shown, copied on the presenting list l (the back
+// buffer in PRESENT); the copy is waited for (on event) and written at the next call (a diagnostic: it stalls)
+void D3D12Backend::DumpShown(ID3D12GraphicsCommandList* l, uint32_t bi, double alpha, HANDLE event) {
+    if (!dump_left_ || presents_ < dump_from_) return;
+    std::lock_guard kept_lock(kept_lock_);
+    dump_left_--;
+    ID3D12Resource* bb = bb_[bi].Get();
+    D3D12_RESOURCE_DESC rd = bb->GetDesc();
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp;
+    UINT rows;
+    UINT64 row_size, bytes;
+    dev_->GetCopyableFootprints(&rd, 0, 1, 0, &fp, &rows, &row_size, &bytes);
+    ComPtr<ID3D12Resource> rb;
+    D3D12_HEAP_PROPERTIES hp{D3D12_HEAP_TYPE_READBACK};
+    D3D12_RESOURCE_DESC bd = BufferDesc(bytes);
+    if (FAILED(dev_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                             IID_PPV_ARGS(&rb))))
+        return;
+    D3D12_RESOURCE_BARRIER b{};
+    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    b.Transition.pResource = bb;
+    b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    b.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
+    b.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    l->ResourceBarrier(1, &b);
+    D3D12_TEXTURE_COPY_LOCATION dl{rb.Get(), D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT};
+    dl.PlacedFootprint = fp;
+    D3D12_TEXTURE_COPY_LOCATION sl{bb, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
+    l->CopyTextureRegion(&dl, 0, 0, 0, &sl, nullptr);
+    std::swap(b.Transition.StateBefore, b.Transition.StateAfter);
+    l->ResourceBarrier(1, &b);
+    // the copy before is complete once the GPU has passed everything submitted so far
+    static ComPtr<ID3D12Resource> pending;
+    static D3D12_PLACED_SUBRESOURCE_FOOTPRINT pending_fp;
+    static std::string pending_name;
+    if (pending) {
+        if (fence_->GetCompletedValue() < fence_value_) {
+            fence_->SetEventOnCompletion(fence_value_, event);
+            WaitForSingleObject(event, INFINITE);
+        }
+        uint8_t* p = nullptr;
+        if (SUCCEEDED(pending->Map(0, nullptr, reinterpret_cast<void**>(&p)))) {
+            uint32_t w = pending_fp.Footprint.Width, h = pending_fp.Footprint.Height;
+            std::vector<uint8_t> px(size_t(w) * h * 4);
+            for (uint32_t y = 0; y < h; y++)
+                std::memcpy(&px[size_t(y) * w * 4], p + size_t(y) * pending_fp.Footprint.RowPitch, size_t(w) * 4);
+            pending->Unmap(0, nullptr);
+            std::error_code ec;
+            std::filesystem::path dir = app::ExeDir() / diag::CaptureDir() / "replay";
+            std::filesystem::create_directories(dir, ec);
+            if (FILE* f = _wfopen((dir / (pending_name + ".bmp")).c_str(), L"wb")) {
+                uint8_t hd[54] = {'B', 'M'};
+                auto put = [&](int o, uint32_t v) { std::memcpy(hd + o, &v, 4); };
+                put(2, 54 + uint32_t(px.size()));
+                put(10, 54);
+                put(14, 40);
+                put(18, w);
+                put(22, uint32_t(-int32_t(h)));
+                hd[26] = 1;
+                hd[28] = 32;
+                put(34, uint32_t(px.size()));
+                fwrite(hd, 1, 54, f);
+                fwrite(px.data(), 1, px.size(), f);
+                fclose(f);
+            }
+        }
+        pending.Reset();
+    }
+    char name[64];
+    std::snprintf(name, sizeof(name), "%04llu_%06llu_%03d", (unsigned long long)dump_n_++,
+                  (unsigned long long)presents_, int(alpha * 100 + 0.5));
+    pending = rb;
+    pending_fp = fp;
+    pending_name = name;
+}
+
+// FCI: XBE_PERF: frame replay's pacing, logged every second
+void D3D12Backend::PaceStat(bool replay, double gpu_wait_ms) {
+    if (!diag::Perf() || replay_period_ <= 0) return;
+    auto now = std::chrono::steady_clock::now();
+    PaceStats& p = pace_;
+    if (p.start.time_since_epoch().count() == 0) p.start = p.last = now;
+    double gap = std::chrono::duration<double, std::milli>(now - p.last).count();
+    p.last = now;
+    (replay ? p.replays : p.real)++;
+    p.gap_sum += gap;
+    p.gap_max = std::max(p.gap_max, gap);
+    if (gap > replay_period_ * 1000 * 1.5) p.gaps_over++;
+    p.wait += gpu_wait_ms;
+    p.wait_max = std::max(p.wait_max, gpu_wait_ms);
+    double el = std::chrono::duration<double>(now - p.start).count();
+    if (el >= 1.0) {
+        uint32_t n = p.real + p.replays;
+        LOGI("replay pace: %u shown (%u real, %u replayed) in %.2f s; gap mean %.2f ms max %.2f, %u over 1.5 "
+             "periods; replay GPU waits %.2f ms total, max %.2f",
+             n, p.real, p.replays, el, n ? p.gap_sum / n : 0.0, p.gap_max, p.gaps_over, p.wait, p.wait_max);
+        p = {};
+        p.start = p.last = now;
+    }
+}
+
+// FCI: frame replay. The frame's list, recorded since ResetFrame in one piece, is executed and kept for the
+// presenter (under kept_lock_); the render thread goes on in another list from the same allocator, which lives until
+// this frame's slot comes round again (replays push the slot's fence on).
+void D3D12Backend::KeepFrame(Target* t) {
+    if (kept_.list) spare_lists_.push_back(std::move(kept_.list));
+    kept_ = {};
+    kept_draws_.clear();
+    if (!t || !frame_clean_ || q_open_ || cap_) {  // drawn in pieces, a visibility test open, or a capture
+        unkept_frames_++;
+        return;
+    }
+    kept_draws_ = prev_draws_;  // MatchDraws ran just before: this frame's draws
+    ApplyBlend(0);              // shown first where the frame before had it; replays move it on
+    in_keep_ = true;
+    cl_->Close();
+    ID3D12CommandList* lists[] = {cl_.Get()};
+    queue_->ExecuteCommandLists(1, lists);
+    in_keep_ = false;
+    kept_.list = cl_;
+    kept_.touched = std::move(touched_);
+    touched_.clear();
+    kept_.t = t->res;
+    kept_.t_state = t->state;
+    kept_.t_w = t->w;
+    kept_.t_h = t->h;
+    kept_.src = present_src_ ? present_src_ : t->res.Get();
+    kept_.fmt = present_fmt_;
+    kept_.blit = EnsureBlitPipeline(kBgra, false);
+    kept_.samplers = EnsureBlitSamplers();
+    kept_.gamma = gamma_;
+    kept_.frame = frame_;
+    ComPtr<ID3D12GraphicsCommandList> next;
+    if (!spare_lists_.empty()) {
+        next = std::move(spare_lists_.back());
+        spare_lists_.pop_back();
+        next->Reset(CurrentFrame().alloc.Get(), nullptr);
+    } else if (FAILED(dev_->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, CurrentFrame().alloc.Get(), nullptr,
+                                              IID_PPV_ARGS(&next)))) {
+        DeviceLost(dev_.Get(), "a command list for frame replay", E_OUTOFMEMORY);
+    }
+    cl_ = next;
+    Begin();
+    kept_frames_++;
+}
+
+D3D12Backend::~D3D12Backend() {
+    presenter_stop_ = true;
+    if (presenter_.joinable()) presenter_.join();
+}
+
+// FCI: frame replay: a picture each display refresh (each period of RECOMP_FCI_XBR_REPLAY; with vsync the
+// display's own refresh paces the presents in between)
+void D3D12Backend::PresenterLoop() {
+    using SetDescription = HRESULT(WINAPI*)(HANDLE, PCWSTR);
+    if (auto set = reinterpret_cast<SetDescription>(
+                reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "SetThreadDescription"))))
+        set(GetCurrentThread(), L"present");
+    // a high-resolution timer: Sleep's default granularity is a whole 15.6 ms tick
+    HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+    auto sleep_for = [&](std::chrono::steady_clock::duration d) {
+        LARGE_INTEGER due;
+        due.QuadPart = -std::max<LONGLONG>(1, std::chrono::duration_cast<std::chrono::nanoseconds>(d).count() / 100);
+        if (timer && SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE))
+            WaitForSingleObject(timer, INFINITE);
+        else
+            Sleep(1);
+    };
+    auto period = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+            std::chrono::duration<double>(replay_period_));
+    while (!presenter_stop_) {
+        auto now = std::chrono::steady_clock::now();
+        if (now < next_picture_) {
+            sleep_for(next_picture_ - now);
+            continue;
+        }
+        Picture shown = ShowPicture();
+        if (shown == Picture::None) {
+            sleep_for(std::chrono::milliseconds(1));
+            continue;
+        }
+        next_picture_ += period;
+        if (next_picture_ < now) next_picture_ = now + period;  // behind (a stall): start the cadence again
+    }
+    if (timer) CloseHandle(timer);
+}
+
+// FCI: frame replay: the kept frame as the render thread executed it (blend 0), or executed again with its blend for
+// now; then the picture to the back buffer and presented. Every resource the frame changed is back where the frame
+// left it afterwards, which is what the render thread's recording assumes.
+D3D12Backend::Picture D3D12Backend::ShowPicture() {
+    std::lock_guard ui_lock(app::UiLock());
+    if (app::Leaving()) return Picture::None;
+    std::lock_guard swap_lock(swap_lock_);
+    auto wait = [&](uint64_t v) {
+        if (fence_->GetCompletedValue() >= v) return;
+        fence_->SetEventOnCompletion(v, presenter_event_);
+        WaitForSingleObject(presenter_event_, INFINITE);
+    };
+    uint32_t i = replay_i_ % kFrames;
+    wait(replay_fence_[i]);  // the picture before last in this slot, without holding the render thread up
+    std::unique_lock kept_lock(kept_lock_);
+    if (!kept_.list || !kept_.valid) return Picture::None;
+    // the title's frames come first: an in-between picture only once the GPU has finished the last one, else the
+    // display keeps it a refresh longer
+    if (!kept_.fresh && fence_->GetCompletedValue() < kept_.fence) return Picture::Skipped;
+    auto now = std::chrono::steady_clock::now();
+    bool fresh = kept_.fresh;
+    double alpha = 0;
+    if (fresh) {
+        kept_.fresh = false;
+        kept_before_ = kept_at_;
+        kept_at_ = now;
+    } else {
+        double interval = std::chrono::duration<double>(kept_at_ - kept_before_).count();
+        interval = std::clamp(interval, 1.0 / 60, 0.1);
+        alpha = std::clamp(std::chrono::duration<double>(now - kept_at_).count() / interval, 0.0, 1.0);
+    }
+    replay_i_++;
+    if (!replay_alloc_[i]) {
+        dev_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&replay_alloc_[i]));
+        for (auto& l : replay_list_[i]) {
+            dev_->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, replay_alloc_[i].Get(), nullptr,
+                                    IID_PPV_ARGS(&l));
+            l->Close();
+        }
+    }
+    replay_alloc_[i]->Reset();
+    auto wait_t = std::chrono::steady_clock::now();
+    std::vector<ID3D12CommandList*> lists;
+    auto barrier = [](ID3D12Resource* r, D3D12_RESOURCE_STATES from, D3D12_RESOURCE_STATES to) {
+        D3D12_RESOURCE_BARRIER b{};
+        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b.Transition.pResource = r;
+        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        b.Transition.StateBefore = from;
+        b.Transition.StateAfter = to;
+        return b;
+    };
+    if (!fresh) {
+        wait(kept_.fence);  // its last execution is done: its constants can be written
+        ApplyBlend(alpha);
+        std::vector<D3D12_RESOURCE_BARRIER> back;  // each resource from where the frame left it to where it began
+        for (auto& [r, st] : kept_.touched)
+            if (st.last != st.first) back.push_back(barrier(r, st.last, st.first));
+        ID3D12GraphicsCommandList* a = replay_list_[i][0].Get();
+        a->Reset(replay_alloc_[i].Get(), nullptr);
+        if (!back.empty()) a->ResourceBarrier(UINT(back.size()), back.data());
+        a->Close();
+        lists.push_back(a);
+        lists.push_back(kept_.list.Get());
+    }
+    double gpu_wait = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - wait_t).count();
+    // the picture to the back buffer, as BlitFrame draws it
+    ID3D12GraphicsCommandList* l = replay_list_[i][1].Get();
+    l->Reset(replay_alloc_[i].Get(), nullptr);
+    ID3D12DescriptorHeap* heaps[] = {srv_heap_.Get(), smp_heap_.Get()};
+    l->SetDescriptorHeaps(2, heaps);
+    l->SetGraphicsRootSignature(root_.Get());
+    uint32_t bi = swap_->GetCurrentBackBufferIndex();
+    ID3D12Resource* bb = bb_[bi].Get();
+    auto kt = kept_.touched.find(kept_.t.Get());
+    D3D12_RESOURCE_STATES t_end = kt != kept_.touched.end() ? kt->second.last : kept_.t_state;
+    bool move_t = kept_.src == kept_.t && t_end != D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    std::vector<D3D12_RESOURCE_BARRIER> pre{barrier(bb, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET)};
+    if (move_t) pre.push_back(barrier(kept_.t.Get(), t_end, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
+    l->ResourceBarrier(UINT(pre.size()), pre.data());
+    D3D12_CPU_DESCRIPTOR_HANDLE rh = Cpu(rtv_heap_.Get(), kRtvCount + bi, rtv_inc_);
+    float black[4] = {0, 0, 0, 1};
+    l->ClearRenderTargetView(rh, black, 0, nullptr);
+    l->OMSetRenderTargets(1, &rh, FALSE, nullptr);
+    float aspect = app::Widescreen() ? 16.0f / 9.0f : 4.0f / 3.0f;
+    float w = float(bb_w_), h = float(bb_h_);
+    float vw = std::min(w, h * aspect), vh = vw / aspect;
+    D3D12_VIEWPORT vp{(w - vw) / 2, (h - vh) / 2, vw, vh, 0, 1};
+    D3D12_RECT scissor{0, 0, LONG(bb_w_), LONG(bb_h_)};
+    l->RSSetViewports(1, &vp);
+    l->RSSetScissorRects(1, &scissor);
+    uint32_t taps = uint32_t(std::ceil(std::max({float(kept_.t_w) / vw, float(kept_.t_h) / vh, 1.0f}) - kTapsSlack));
+    uint32_t slot = kSrvCount + i * kPresenterSrv;
+    D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+    sv.Format = kept_.fmt;
+    sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    sv.Texture2D.MipLevels = 1;
+    dev_->CreateShaderResourceView(kept_.src.Get(), &sv, Cpu(srv_heap_.Get(), slot, srv_inc_));
+    sv.Format = kBgra;
+    dev_->CreateShaderResourceView(lut_.Get(), &sv, Cpu(srv_heap_.Get(), slot + 1, srv_inc_));
+    float c[8] = {0, 0, 1, 1, kept_.gamma ? 1.0f : 0.0f, 0, float(taps), 1};
+    std::memcpy(presenter_cb_map_ + i * 256, c, sizeof(c));
+    D3D12_GPU_VIRTUAL_ADDRESS cb = presenter_cb_->GetGPUVirtualAddress() + i * 256;
+    l->SetPipelineState(kept_.blit);
+    l->SetGraphicsRootConstantBufferView(0, cb);
+    l->SetGraphicsRootConstantBufferView(1, cb);
+    l->SetGraphicsRootDescriptorTable(2, Gpu(srv_heap_.Get(), slot, srv_inc_));
+    l->SetGraphicsRootDescriptorTable(3, Gpu(smp_heap_.Get(), kept_.samplers, smp_inc_));
+    l->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    l->DrawInstanced(3, 1, 0, 0);
+    std::vector<D3D12_RESOURCE_BARRIER> post{barrier(bb, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT)};
+    if (move_t) post.push_back(barrier(kept_.t.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, t_end));
+    l->ResourceBarrier(UINT(post.size()), post.data());
+    DumpShown(l, bi, alpha, presenter_event_);
+    l->Close();
+    lists.push_back(l);
+    queue_->ExecuteCommandLists(UINT(lists.size()), lists.data());
+    queue_->Signal(fence_.Get(), ++fence_value_);
+    replay_fence_[i] = kept_.fence = fence_value_;
+    Frame& f = frames_[kept_.frame % kFrames];  // the frame's allocator and ring live until this is done
+    f.fence = std::max(f.fence, fence_value_);
+    if (!fresh && ++replays_ % 600 == 1)
+        LOGI("d3d12: frame replay: %llu refreshes replayed; %llu frames kept, %llu not", (unsigned long long)replays_,
+             (unsigned long long)kept_frames_, (unsigned long long)unkept_frames_);
+    kept_lock.unlock();  // the render thread submits while this one waits for the display
+    bool never_wait = app::Get().present_never_waits;
+    bool vsync = app::Get().vsync && !never_wait;
+    UINT flags = (!vsync && tearing_ ? DXGI_PRESENT_ALLOW_TEARING : 0) | (never_wait ? DXGI_PRESENT_DO_NOT_WAIT : 0);
+    HRESULT hr = swap_->Present(vsync ? 1 : 0, flags);
+    if (Lost(hr)) DeviceLost(dev_.Get(), "Present (frame replay)", hr);
+    last_shown_ = std::chrono::steady_clock::now();
+    PaceStat(!fresh, gpu_wait);
+    return Picture::Shown;
 }
 
 void D3D12Backend::CountFps() {
@@ -3236,7 +3998,10 @@ void D3D12Backend::Present(const Surface& front) {
     // FCI: the window goes to the next instance (fci_window_handoff) under this lock: no present half way
     std::lock_guard leaving_lock(app::UiLock());
     if (app::Leaving()) return;
-    ResizeSwap();
+    {
+        std::lock_guard swap_lock(swap_lock_);  // FCI: frame replay's presenter shows through the swap chain too
+        ResizeSwap();
+    }
     Target* t = EnsureTarget(front, false);
     if (t && LatchCpuWrite(*t)) UploadTarget(*t, front);
     if (t) Resolve(*t);
@@ -3252,21 +4017,46 @@ void D3D12Backend::Present(const Surface& front) {
     if (ramp_dirty_) UploadGammaRamp();
     Transition(lut_.Get(), lut_state_, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 
-    uint32_t bi = swap_->GetCurrentBackBufferIndex();
-    DrawFrame(t, bi);
-    Submit(false);
-    // FCI: test runs never wait for the compositor; a frame it cannot take now is dropped
-    bool never_wait = app::Get().present_never_waits;
-    bool vsync = app::Get().vsync && !never_wait;
-    UINT flags = (!vsync && tearing_ ? DXGI_PRESENT_ALLOW_TEARING : 0) | (never_wait ? DXGI_PRESENT_DO_NOT_WAIT : 0);
-    auto perf_swap = PerfClock::now();
-    int64_t present_ns = diag::Perf() ? diag::NowNs() : 0;
-    HRESULT hr = swap_->Present(vsync ? 1 : 0, flags);
-    if (hr == DXGI_ERROR_WAS_STILL_DRAWING) hr = S_OK;
-    if (Lost(hr)) DeviceLost(dev_.Get(), "Present", hr);
-    if (FAILED(hr)) LOG_FIRST(4, "d3d12: Present failed (%08lX)", unsigned long(hr));
-    g_perf.swap += PerfMs(perf_swap);
-    if (present_ns && SUCCEEDED(hr)) MeasureLatency(present_ns);
+    // FCI: frame replay: a frame drawn in one list goes to the presenter thread, which shows it, then replays it
+    // blended until the next; any other frame is shown here as before
+    bool handed = false;
+    if (replay_period_ > 0) {
+        MatchDraws();
+        std::lock_guard kept_lock(kept_lock_);
+        KeepFrame(t);
+        handed = kept_.list != nullptr;
+    }
+    track_ = nullptr;
+    if (handed) {
+        in_keep_ = true;
+        Submit(false);  // the frame's slot fence, past the kept list
+        in_keep_ = false;
+        std::lock_guard kept_lock(kept_lock_);
+        kept_.fence = fence_value_;
+        kept_.fresh = kept_.valid = true;
+    } else {
+        std::lock_guard swap_lock(swap_lock_);
+        uint32_t bi = swap_->GetCurrentBackBufferIndex();
+        DrawFrame(t, bi);
+        DumpShown(cl_.Get(), bi, 0, event_);
+        in_keep_ = true;
+        Submit(false);
+        in_keep_ = false;
+        PaceStat(false, 0);
+        // FCI: test runs never wait for the compositor; a frame it cannot take now is dropped
+        bool never_wait = app::Get().present_never_waits;
+        bool vsync = app::Get().vsync && !never_wait;
+        UINT flags =
+                (!vsync && tearing_ ? DXGI_PRESENT_ALLOW_TEARING : 0) | (never_wait ? DXGI_PRESENT_DO_NOT_WAIT : 0);
+        auto perf_swap = PerfClock::now();
+        int64_t present_ns = diag::Perf() ? diag::NowNs() : 0;
+        HRESULT hr = swap_->Present(vsync ? 1 : 0, flags);
+        if (hr == DXGI_ERROR_WAS_STILL_DRAWING) hr = S_OK;
+        if (Lost(hr)) DeviceLost(dev_.Get(), "Present", hr);
+        if (FAILED(hr)) LOG_FIRST(4, "d3d12: Present failed (%08lX)", unsigned long(hr));
+        g_perf.swap += PerfMs(perf_swap);
+        if (present_ns && SUCCEEDED(hr)) MeasureLatency(present_ns);
+    }
 
     presents_++;
     presents_seen_.store(presents_);
