@@ -3399,6 +3399,22 @@ void D3D12Backend::RecordDraw(const State& s, uint32_t prim, uint32_t count, con
     draws_.push_back(std::move(r));
 }
 
+// FCI: frame replay, milestone 3: each run of consecutive registers in mask (an object's matrix, a bone palette),
+// by its first register, length and values
+template <typename F>
+void ForObjectBlocks(const std::vector<float>& orig, const std::bitset<192>& mask, F&& f) {
+    for (size_t r = 0; r < 192;) {
+        if (!mask[r]) {
+            r++;
+            continue;
+        }
+        size_t first = r;
+        while (r < 192 && mask[r]) r++;
+        uint64_t key = Hash(orig.data() + first * 4, (r - first) * 16, uint64_t(first) << 32 | (r - first));
+        f(first, r - first, key);
+    }
+}
+
 void D3D12Backend::MatchDraws() {
     // the first 32 registers' difference: among draws with one key (the same mesh drawn again: trees, props), the
     // nearest is the same instance a frame on, where the order of the draws may have changed
@@ -3453,6 +3469,7 @@ void D3D12Backend::MatchDraws() {
         }
     }
     std::bitset<192> camera = shared_ & prev_shared_;
+    std::unordered_map<uint64_t, std::vector<float>> object_from;  // by register block and its values
     // a loose key drawn once in both frames: the same mesh whatever its vertices (a weapon, a vehicle's body)
     std::unordered_map<uint64_t, int> loose_now, loose_before;
     for (const DrawRec& d : draws_) loose_now[d.loose]++;
@@ -3477,11 +3494,12 @@ void D3D12Backend::MatchDraws() {
             if (!object[r]) continue;
             for (size_t c = r * 4; c < r * 4 + 4; c++) {
                 float a = d.orig[c], b = p->orig[c];
-                if (std::fabs(a - b) > 0.5f * std::max({std::fabs(a), std::fabs(b), 1.0f})) own = false;
+                // at most half its size, and 1.5 at most: an object's own matrix holds still unless it moves,
+                // a metre or so a frame; another copy of a mesh (trees) is metres away however large the values
+                if (std::fabs(a - b) > std::min(1.5f, 0.5f * std::max({std::fabs(a), std::fabs(b), 1.0f}))) own = false;
             }
         }
         if (same && !own) match_.implausible++;
-        if (own) match_.blended++;
         bool cam = (d.pos & camera).any();
         if (cam) match_.camera++;
         if (!own && !cam) continue;
@@ -3493,6 +3511,29 @@ void D3D12Backend::MatchDraws() {
             else if (own)
                 std::memcpy(&d.from[r * 4], &p->orig[r * 4], 16);
         }
+        // the object's blend, by its register blocks' values: its other passes take the same
+        if (own)
+            ForObjectBlocks(d.orig, object, [&](size_t first, size_t n, uint64_t key) {
+                object_from.try_emplace(key, d.from.begin() + first * 4, d.from.begin() + (first + n) * 4);
+            });
+    }
+    // every draw of an object blends as its matched pass does: an overlay drawn over an earlier pass's depth
+    // (less-equal, no depth write) that blended differently would fall behind it and vanish between frames
+    for (DrawRec& d : draws_) {
+        if (d.pos.none() || d.orig.empty()) continue;
+        bool any = false;
+        ForObjectBlocks(d.orig, d.pos & ~camera, [&](size_t first, size_t, uint64_t key) {
+            auto it = object_from.find(key);
+            if (it == object_from.end()) return;
+            if (d.from.empty()) {
+                d.from = d.orig;
+                for (size_t r = 0; r < 192; r++)
+                    if (d.pos[r] && camera[r]) std::memcpy(&d.from[r * 4], &prev_shared_val_[r * 4], 16);
+            }
+            std::copy(it->second.begin(), it->second.end(), d.from.begin() + first * 4);
+            any = true;
+        });
+        if (any) match_.blended++;
     }
     prev_shared_ = shared_;
     prev_shared_val_ = shared_val_;
