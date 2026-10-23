@@ -149,6 +149,11 @@ REPLACE = {
         "a menu background video's update (eax = video, ret 4): skipped until its next frame is due by the "
         "Bink header's rate, as the game does only under 25 fps (fci_bink.c, re/notes/MOVIES.md)",
     ),
+    "sub_003741E0": (
+        "gate",
+        "the physics world's step (world, frame time; ret 8), Far Cry's CPhysicalWorld::TimeStep: stepped at "
+        "30 a second whatever the frame rate (fci_physics.c, re/notes/FRAME-RATE.md)",
+    ),
     "sub_00220200": (
         "gate",
         "the title's movie player (path, ...), cdecl; RECOMP_FCI_SKIP_INTROS / "

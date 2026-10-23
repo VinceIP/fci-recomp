@@ -31,6 +31,10 @@
       "prehook",
       "the other video player (PREY.bik, data-named videos), cdecl, the path first: logged (fci_disk.c)"
     ],
+    "sub_00282B1C": [
+      "gate",
+      "the physics world's step (edi = world, frame time; ret 4), as Instincts' 003741E0, called once a frame by 0017E353 with the frame time times the game's time scale: stepped at 30 a second whatever the frame rate (fci_physics.c)"
+    ],
     "sub_00196AD6": [
       "gate",
       "a menu background video's update (eax = video, ret 4), as Instincts' 0021FFA0: BinkWait only under 25 fps, otherwise a frame per call; skipped until the next frame is due (fci_bink.c)",

@@ -101,6 +101,26 @@ world stepped at 30 a second, with the drawn positions interpolated in between; 
 The drive also starts earlier at higher rates (game 17.89 s at 60, 18.01 s at 30): about seven frames of
 something before the AI first presses forward, presumably the AI's goal pipeline advancing a step a frame.
 
+### The physics world step at 30 (2026-10-23)
+
+The game steps the physics world once a frame (Evolution: 0017E353, from the game update 0017E185, calls
+00282B1C with edi = the world [0056B508] and the frame time times the time scale [[0056B594]+0x3E8], ret 4;
+Instincts: 001FCF40 calls 003741E0 (world, time), ret 8, the time scale at [[006B3984]+0x3D0]). It is Far
+Cry's CPhysicalWorld::TimeStep without the entity-type flags argument (so vehicles and characters cannot be
+stepped at different rates without changes inside it): steps over 0.2 s or under 0 are refused, the time is
+rounded to the granularity (world +0x3C) with the remainder carried in +0x20C (not in Far Cry). Each rigid
+body splits the step into whole substeps (max_time_step), with contacts, engine, suspension and handbrake
+per substep; the drive input (pedal, steering, handbrake) arrives once a frame as an action.
+
+src/fci_physics.c gates the step: frame times add up and the world steps only when a whole 1/30 s is due
+(RECOMP_FCI_PHYS_HZ=30; off by default, because without interpolated drawing everything that moves, the
+player too, updates 30 times a second). The jeep, handbrake hold off, 17-26 s: 95.0 m at 30, 99.0 m at 60
+(106.2 m stepping per frame), 104.4 m at 116. Better, not the same: the AI still decides once a frame. Its
+two-frame pulses (the handbrake between waypoints) can now fall between two physics steps, and its drive
+starts earlier (17.82 s at 116, 17.99 s at 30). Far Cry's AI (CryAISystem/Puppet.cpp) mixes real time
+(m_fTimePassed) with per-update counts (sound timeouts drop 0.001 an update; goal pipes advance an op an
+update; full and dry updates), so the AI is frame-counted in the original engine too.
+
 Experiments that changed nothing: holding the vehicle's bits to 30 changes a second (the AI's on/off
 decisions at the Xbox's rate): 105.2 m at 60 either way.
 
