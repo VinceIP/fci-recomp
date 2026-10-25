@@ -153,7 +153,19 @@ def current(info):
     )
 
 
-def fetch(root, accept_license=False, log=print):
+def ask_in_console(license_url):
+    print(
+        "Microsoft's C++ compiler and the Windows SDK are needed to build the game. They are "
+        "downloaded from Microsoft\nunder the Visual Studio Build Tools license terms:\n  "
+        f"{license_url}\n"
+    )
+    return input("Do you accept these license terms? (y/n) ").strip().lower() in ("y", "yes")
+
+
+def fetch(root, accept_license=False, log=print, ask=ask_in_console, progress=None):
+    """ask: called with the license terms' URL when they were not accepted before; True to go on.
+    progress: called with (done, in all) as the packages arrive: the compiler's by size, then the SDK's"""
+    progress = progress or (lambda done, total: None)
     root = Path(root).resolve()
     record = root / DONE
     accepted_before = record.exists()  # the record keeps the license the user accepted
@@ -163,31 +175,29 @@ def fetch(root, accept_license=False, log=print):
             return info
         # an older selection of packages: fetch again over it (the record is replaced at the end)
     packages, license_url = manifest()
-    if not accept_license and not accepted_before:
-        print(
-            "Microsoft's C++ compiler and the Windows SDK are needed to build the game. They are "
-            "downloaded from Microsoft\nunder the Visual Studio Build Tools license terms:\n  "
-            f"{license_url}\n"
-        )
-        if input("Do you accept these license terms? (y/n) ").strip().lower() not in ("y", "yes"):
-            raise DownloadError("the license terms were not accepted; nothing was downloaded")
+    if not accept_license and not accepted_before and not ask(license_url):
+        raise DownloadError("the license terms were not accepted; nothing was downloaded")
     vsix, msis, sdk_payloads = plan(packages)
     root.mkdir(parents=True, exist_ok=True)
     cache = root / "downloads"
     cache.mkdir(exist_ok=True)
     log(f"  MSVC {MSVC}: {sum(p['size'] for p in vsix) // 1_000_000} MB")
+    total, done = sum(p["size"] for p in vsix), 0
     for p in vsix:
         unpack_vsix(download(p, cache), root)
+        done += p["size"]
+        progress(done, 2 * total)
     log(f"  Windows SDK {SDK}")
     with tempfile.TemporaryDirectory(dir=root) as tmp:
         sdk_dir = Path(tmp) / "Installers"
         sdk_dir.mkdir()
-        for p in msis:
+        for i, p in enumerate(msis):
             msi = download(p, sdk_dir)
             for cab in cabs_of(msi):
                 if cab not in sdk_payloads:
                     raise DownloadError(f"{msi.name} needs {cab}, which the SDK package lacks")
                 download(sdk_payloads[cab], sdk_dir)
+            progress(total + total * (i + 1) // len(msis), 2 * total)
         for p in msis:
             msi = sdk_dir / p["fileName"].split("\\")[-1]
             log = root / "msiexec.log"

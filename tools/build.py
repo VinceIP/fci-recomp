@@ -32,6 +32,7 @@ import time
 REPO = Path(__file__).resolve().parents[1]
 TOOLS = REPO / "tools"
 sys.path.insert(0, str(TOOLS))
+import events  # noqa: E402
 import image_profile  # noqa: E402
 import patches  # noqa: E402
 import preflight  # noqa: E402
@@ -123,6 +124,7 @@ def compile_all(case, jobs, log, obj_cache=None):
             future.result()
             finished += 1
             percent = finished * 100 // files if console else finished * 10 // files * 10
+            events.progress("build", finished, files, f"Compiling ({finished} of {files} files)", part=case.parent.name)
             if percent != shown:
                 print(
                     f"{chr(13) if console else ''}  the game's code: {percent}% ({finished} of {files} files)",

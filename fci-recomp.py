@@ -3,10 +3,15 @@
   python fci-recomp.py setup <disc> [--install <folder>] [--editor] [--work <folder>] [--jobs N]
   python fci-recomp.py editor [<disc>] [--title instincts|evolution] [--install <folder>] [--work <folder>]
                               [--jobs N]
+  python fci-recomp.py update [--title instincts|evolution] [--install <folder>] [--work <folder>]
+  python fci-recomp.py status [--install <folder>]... [--work <folder>]
 
   setup        check the disc, copy its files, recompile and build the game, install it
   editor       build the map editor for a game set up earlier (the game's Map Editor menu starts it); with
                the disc, it is that disc's game
+  update       rebuild a game set up earlier (and its map editor, if built) with this version, from its
+               installed files: no disc needed. Only what this version changed is redone.
+  status       as JSON: each game set up here, the version it was built with, and what an update redoes
 
   <disc>       an Xbox disc image (XISO or full dump) or a folder with the disc's files; which game it is
                decides the rest (tools/titles.py)
@@ -22,6 +27,7 @@
                Visual Studio is not installed and its compiler is downloaded)
   --download-compiler     download Microsoft's compiler even when Visual Studio is installed (the
                pinned version this project is checked with)
+  --events     also print progress as JSON lines for the launcher (tools/events.py)
 
 Needs Windows 10/11 x64 and Python 3.11+ with the packages in requirements.txt (BuildGame.cmd provides
 both). Visual Studio is used when it is installed with "Desktop development with C++"; otherwise
@@ -40,9 +46,30 @@ import time
 VERSION = "0.2.1"
 REPO = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO / "tools"))
+import events  # noqa: E402
 import titles  # noqa: E402
 
 IMAGES = {"game": "default.xbe", "editor": "ige.xbe"}
+# the steps of a build, and roughly how much of its time each takes (for the launcher's progress bar)
+STEPS = {
+    "disc": ("Checking and copying the disc's files", 8),
+    "compiler": ("Finding the compiler", 2),
+    "toolkit": ("Fetching the recompiler toolkit", 2),
+    "lift": ("Recompiling the game's code to C", 45),
+    "build": ("Building", 43),
+}
+
+
+def plan(*keys):
+    events.emit("plan", steps=[{"key": k, "text": STEPS[k][0], "weight": STEPS[k][1]} for k in keys])
+    return list(keys)
+
+
+def step(keys, key, suffix=""):
+    """print and announce one step of the plan"""
+    text = STEPS[key][0] + suffix
+    print(f"{keys.index(key) + 1}/{len(keys)} {text}")
+    events.emit("step", key=key, text=text)
 
 
 def parts_dir(work, title, kind, image):
@@ -80,6 +107,14 @@ def find_toolchain(work, accept_license, download=False):
     import toolchain
 
     folder = work / "toolchain"
+
+    def ask(license_url):
+        """with the launcher, it asks: say so and stop; it starts the build again with --accept-msvc-license"""
+        if not events.enabled:
+            return msvc.ask_in_console(license_url)
+        events.emit("license", url=license_url)
+        raise SystemExit(3)
+
     try:
         tc = toolchain.downloaded(folder) if download else toolchain.discover(folder)
         if not tc:
@@ -87,7 +122,12 @@ def find_toolchain(work, accept_license, download=False):
     except toolchain.ToolchainError:
         print("Downloading Microsoft's compiler and the Windows SDK")  # why: the check at the start said
         try:
-            msvc.fetch(folder, accept_license)
+            msvc.fetch(
+                folder,
+                accept_license,
+                ask=ask,
+                progress=lambda done, total: events.progress("compiler", done, total, "Downloading the compiler"),
+            )
         except msvc.DownloadError as e:
             raise SystemExit(f"error: {e}")
         except OSError as e:  # urllib's errors too
@@ -116,10 +156,7 @@ def open_disc(disc_path):
         raise SystemExit(f"error: {e}")
     title = disc.identify(source)
     if title is None:
-        raise SystemExit(
-            "error: this disc is not a supported release: its default.xbe matches neither Far Cry Instincts "
-            "(title 55530008, version 1) nor Far Cry Instincts Evolution (title 55530060, version 3)"
-        )
+        raise SystemExit(f"error: this disc is not a supported release: {disc.why_unsupported(source)}")
     return source, title
 
 
@@ -184,7 +221,14 @@ def compile_part(part, title, install, work, jobs, tc):
     else:
         if built.exists():
             shutil.rmtree(built)
-        build.build(image, install / "game" / image, lifted, work / "deps", built, jobs, tc)
+        # objects of the generated files an earlier build compiled the same way are reused (an update that
+        # changes only the host code then recompiles only that); the cache keeps what this build used
+        cache = parts_dir(work, title, "objects", image)
+        started = time.time() - 1
+        build.build(image, install / "game" / image, lifted, work / "deps", built, jobs, tc, obj_cache=cache)
+        for obj in cache.glob("*.obj"):
+            if obj.stat().st_mtime < started:
+                obj.unlink()
     shutil.copy2(built / "bin" / "fci-whole.exe", install / title.exe(image))
     if part == "game":
         shutil.copy2(built / "bin" / "fci-kinit.dll", install / "fci-kinit.dll")
@@ -220,6 +264,20 @@ def install_ini(title, install):
         (install / "fci.ini").write_text(text, encoding="utf-8")
 
 
+def build_parts(keys, parts, title, install, work, a):
+    """the steps after the disc: compiler, toolkit, lift, build"""
+    step(keys, "compiler")
+    tc = find_toolchain(work, a.accept_msvc_license, a.download_compiler)
+    step(keys, "toolkit")
+    fetch_deps(work)
+    step(keys, "lift", " (the game and the map editor side by side)" if len(parts) > 1 else "")
+    translate(parts, title, install, work)
+    step(keys, "build")
+    for part in parts:
+        compile_part(part, title, install, work, a.jobs, tc)
+    install_ini(title, install)
+
+
 def setup(a):
     started = time.time()
     check_python()
@@ -228,23 +286,13 @@ def setup(a):
     install, work = Path(a.install or REPO / title.install).resolve(), Path(a.work).resolve()
     preflight(work, install, 2 if a.editor else 1, a.download_compiler)
     install.mkdir(parents=True, exist_ok=True)
-    print("1/5 Checking and copying the disc's files")
+    keys = plan("disc", "compiler", "toolkit", "lift", "build")
+    step(keys, "disc")
     copy_game(source, title, install / "game")
-    print("2/5 Finding the compiler")
-    tc = find_toolchain(work, a.accept_msvc_license, a.download_compiler)
-    print("3/5 Fetching the recompiler toolkit")
-    fetch_deps(work)
-    parts = ["game", "editor"] if a.editor else ["game"]
-    print("4/5 Recompiling the game's code to C" + (" (the game and the map editor side by side)" if a.editor else ""))
-    translate(parts, title, install, work)
-    print("5/5 Building")
-    for part in parts:
-        compile_part(part, title, install, work, a.jobs, tc)
-    install_ini(title, install)
-    print(
-        f"Done in {(time.time() - started) / 60:.0f} minutes. Start {install / title.game_exe}; "
-        f"settings are in {install / 'fci.ini'}."
-    )
+    build_parts(keys, ["game", "editor"] if a.editor else ["game"], title, install, work, a)
+    minutes = (time.time() - started) / 60
+    print(f"Done in {minutes:.0f} minutes. Start {install / title.game_exe}; settings are in {install / 'fci.ini'}.")
+    events.emit("done", minutes=round(minutes))
     if not a.editor:
         print("The map editor is not built; run BuildEditor.cmd (or: fci-recomp.py editor) to add it.")
 
@@ -282,14 +330,56 @@ def editor(a):
     if not (install / title.game_exe).exists() or not (install / "game" / "ige.xbe").exists():
         raise SystemExit(f"error: set up the game in {install} first (BuildGame.cmd or: fci-recomp.py setup)")
     preflight(work, install, 1, a.download_compiler)
-    tc = find_toolchain(work, a.accept_msvc_license, a.download_compiler)
-    fetch_deps(work)
-    translate(["editor"], title, install, work)
-    compile_part("editor", title, install, work, a.jobs, tc)
-    print(
-        f"Done in {(time.time() - started) / 60:.0f} minutes. The game's Map Editor menu starts "
-        f"{install / title.editor_exe}."
-    )
+    build_parts(plan("compiler", "toolkit", "lift", "build"), ["editor"], title, install, work, a)
+    minutes = (time.time() - started) / 60
+    print(f"Done in {minutes:.0f} minutes. The game's Map Editor menu starts {install / title.editor_exe}.")
+    events.emit("done", minutes=round(minutes))
+
+
+def update(a):
+    """rebuild with this version from the installed game files; the input digests decide what is redone"""
+    started = time.time()
+    check_python()
+    title, install = installed_title(a)
+    work = Path(a.work).resolve()
+    if not (install / "game" / "default.xbe").exists():
+        raise SystemExit(f"error: set up the game in {install} first (BuildGame.cmd or: fci-recomp.py setup)")
+    parts = ["game"] + (["editor"] if (install / title.editor_exe).exists() else [])
+    print(f"Updating {title.name} to {VERSION}")
+    preflight(work, install, len(parts), a.download_compiler)
+    build_parts(plan("compiler", "toolkit", "lift", "build"), parts, title, install, work, a)
+    minutes = (time.time() - started) / 60
+    print(f"Done in {minutes:.0f} minutes.")
+    events.emit("done", minutes=round(minutes))
+
+
+def status(a):
+    """each game set up in --install (or this folder): what is built, with which version, and whether this
+    version's update recompiles its code to C (the long step) or only builds"""
+    import lift
+
+    work = Path(a.work).resolve()
+    folders = [Path(p).resolve() for p in a.install or [REPO / t.install for t in titles.TITLES.values()]]
+    found = {}
+    for install in folders:
+        game = install / "game" / "default.xbe"
+        title = titles.of_image("default.xbe", game) if game.exists() else None
+        if title is None:
+            continue
+        record = install / "build.json"
+        info = json.loads(record.read_text(encoding="utf-8")) if record.exists() else {}
+        built = {part: (install / title.exe(image)).exists() for part, image in IMAGES.items()}
+        found[title.key] = {
+            "install": str(install),
+            "built": built,
+            "version": info.get("version"),
+            "recompile": {
+                part: not lift.current(image, title, parts_dir(work, title, "lift", image))
+                for part, image in IMAGES.items()
+                if built[part]
+            },
+        }
+    print(json.dumps({"protocol": events.PROTOCOL, "version": VERSION, "titles": found}, indent=1))
 
 
 def main():
@@ -300,15 +390,30 @@ def main():
     s.add_argument("--editor", action="store_true")
     e = sub.add_parser("editor", help="build the map editor for a game set up earlier")
     e.add_argument("disc", nargs="?")
-    e.add_argument("--title", choices=sorted(titles.TITLES))
-    for p in (s, e):
+    u = sub.add_parser("update", help="rebuild a game set up earlier with this version, without the disc")
+    for p in (e, u):
+        p.add_argument("--title", choices=sorted(titles.TITLES))
+    for p in (s, e, u):
         p.add_argument("--install")
         p.add_argument("--work", default=str(REPO / "build"))
         p.add_argument("--jobs", type=int)
         p.add_argument("--accept-msvc-license", action="store_true")
         p.add_argument("--download-compiler", action="store_true")
+        p.add_argument("--events", action="store_true")
+    t = sub.add_parser("status", help="the games set up here, as JSON")
+    t.add_argument("--install", action="append")
+    t.add_argument("--work", default=str(REPO / "build"))
     a = ap.parse_args()
-    (setup if a.action == "setup" else editor)(a)
+    events.enabled = getattr(a, "events", False)
+    try:
+        {"setup": setup, "editor": editor, "update": update, "status": status}[a.action](a)
+    except SystemExit as e:
+        if isinstance(e.code, str):
+            events.emit("error", text=e.code.removeprefix("error: "))
+        raise
+    except Exception as e:  # the traceback still goes to stderr, which the launcher keeps in its log
+        events.emit("error", text=f"{type(e).__name__}: {e}")
+        raise
 
 
 if __name__ == "__main__":

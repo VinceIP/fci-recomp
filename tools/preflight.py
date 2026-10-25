@@ -167,8 +167,11 @@ def checks(work, install, parts=1, download_compiler=False):
 
 def report(found):
     """print the findings; True when the build can go on"""
+    import events
+
     for level, text in found:
         print(f"{level}: {text}")
+        events.emit(level.lower(), text=text)
     return not any(level == "Error" for level, _ in found)
 
 

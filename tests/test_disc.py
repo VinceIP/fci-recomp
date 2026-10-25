@@ -136,3 +136,33 @@ def test_not_a_disc(tmp_path):
     except disc.DiscError:
         return
     raise AssertionError("expected DiscError")
+
+
+def xbe(title_id, version, region=1, name="Far Cry"):
+    """a default.xbe header with just a certificate"""
+    head = bytearray(0x1000)
+    head[:4] = b"XBEH"
+    struct.pack_into("<II", head, 0x104, 0x10000, 0)
+    struct.pack_into("<I", head, 0x118, 0x10000 + 0x200)
+    struct.pack_into("<I", head, 0x200 + 0x08, title_id)
+    head[0x20C : 0x20C + 2 * len(name)] = name.encode("utf-16-le")
+    struct.pack_into("<I", head, 0x200 + 0xA0, region)
+    struct.pack_into("<I", head, 0x200 + 0xAC, version)
+    return bytes(head)
+
+
+def test_certificate_says_what_the_disc_is(tmp_path):
+    build_image(tmp_path / "game.iso", {"default.xbe": xbe(0x55530008, 4, region=4)})
+    cert = disc.certificate(disc.Image(tmp_path / "game.iso"))
+    assert cert == {"title_id": "55530008", "name": "Far Cry", "version": 4, "region": "PAL: Europe and Australia"}
+
+
+def test_why_a_disc_is_not_supported(tmp_path):
+    def why(files):
+        build_image(tmp_path / "game.iso", files)
+        return disc.why_unsupported(disc.Image(tmp_path / "game.iso"))
+
+    assert "version 4 (PAL: Europe and Australia), and only version 1" in why({"default.xbe": xbe(0x55530008, 4, 4)})
+    assert "was modified" in why({"default.xbe": xbe(0x55530060, 3)})
+    assert "title 4D530004" in why({"default.xbe": xbe(0x4D530004, 1, name="Halo")})
+    assert "missing or unreadable" in why({"default.xbe": b"MZ" + b"\0" * 100})
