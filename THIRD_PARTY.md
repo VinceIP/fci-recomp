@@ -19,7 +19,7 @@ none of the LGPL code below.
 
 | Component | Where | License |
 |---|---|---|
-| [Inter](https://rsms.me/inter/) and [Barlow Condensed](https://github.com/jpt/barlow) fonts | `launcher/ui/fonts` | SIL Open Font License 1.1 (the `OFL-*.txt` files there) |
+| [Archivo](https://github.com/Omnibus-Type/Archivo), [Saira](https://github.com/Omnibus-Type/Saira) ExtraCondensed and [IBM Plex Mono](https://github.com/IBM/plex) fonts | `launcher/ui/fonts` | SIL Open Font License 1.1 (the `OFL-*.txt` files there) |
 | [Tauri](https://tauri.app) and the other Rust crates in `launcher/src-tauri/Cargo.toml` | built into the executable | MIT or Apache-2.0 (each crate's own) |
 
 ## Downloaded during the build

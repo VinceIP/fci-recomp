@@ -69,10 +69,9 @@ For working on the page without a disc or Windows, these variables help:
 
 ## Artwork
 
-The banners are `ui/art/instincts.jpg` and `ui/art/evolution.jpg`, 2:3 portrait (600x900 or
-larger). Until a game is built, its banner is shown greyed out. For a monochrome version made by
-hand, set `mono` for the title in `ART` at the top of `ui/app.js`. The banners in `ui/art` now are
-placeholders.
+The banners are `ui/art/instincts.jpg` and `ui/art/evolution.jpg`, the games' covers, 2:3 portrait
+(600x900 or larger). Until a game is built, its banner is shown greyed out. For a monochrome version
+made by hand, set `mono` for the title in `ART` at the top of `ui/app.js`.
 
-The fonts in `ui/fonts` are Inter and Barlow Condensed, under the SIL Open Font License (the
-`OFL-*.txt` files beside them).
+The fonts in `ui/fonts` are Archivo (text), Saira ExtraCondensed (names and headings) and IBM Plex
+Mono (versions, paths, numbers), under the SIL Open Font License (the `OFL-*.txt` files beside them).

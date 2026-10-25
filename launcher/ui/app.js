@@ -48,9 +48,6 @@ function h(tag, props, ...kids) {
 }
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
-const icon = {
-  warn: '<svg viewBox="0 0 24 24" width="16" height="16"><path d="M12 3 2 21h20L12 3Zm0 6v5m0 3.5v.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
-};
 
 let toastTimer;
 function toast(text, ms = 3800) {
@@ -87,6 +84,11 @@ function popover(anchor, items) {
   const top = r.bottom + 6;
   p.style.top = (top + p.offsetHeight > window.innerHeight ? r.top - p.offsetHeight - 6 : top) + "px";
 }
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  $("popover").hidden = true;
+  closeModal();
+});
 document.addEventListener("mousedown", (e) => {
   const p = $("popover");
   if (!p.hidden && !p.contains(e.target)) p.hidden = true;
@@ -375,7 +377,7 @@ function switchTab(tab) {
 function renderWarnings() {
   const box = $("warnings");
   box.replaceChildren(
-    ...(S.ov ? S.ov.warnings : []).map((w) => h("div", { class: "notice" }, h("span", { html: icon.warn }), h("span", {}, w))),
+    ...(S.ov ? S.ov.warnings : []).map((w) => h("div", { class: "notice" }, w)),
   );
 }
 
@@ -496,7 +498,7 @@ function renderSide() {
   const t = S.task;
   if (t) {
     side.replaceChildren(
-      h("div", { class: "eyebrow" }, t.label),
+      h("h2", {}, t.label),
       h("div", { class: "big-progress" },
         h("div", { class: "percent" }, h("span", { "data-pct": "" }, Math.floor(t.percent)), h("small", {}, "%")),
         h("div", { class: "bar" }, h("span", { "data-bar": "", style: `width:${t.percent}%` })),
@@ -504,7 +506,7 @@ function renderSide() {
         h("div", { class: "detail-line", "data-detail": "" }, t.detail || " "),
       ),
       h("div", { class: "meta" }, h("span", { "data-elapsed": "" }, "0:00 elapsed"), h("span", {}, "A first build takes 15 to 25 minutes")),
-      t.warnings.length && h("div", { class: "warn-list" }, t.warnings.map((w) => h("div", { class: "notice" }, h("span", { html: icon.warn }), h("span", {}, w)))),
+      t.warnings.length && h("div", { class: "warn-list" }, t.warnings.map((w) => h("div", { class: "notice" }, w))),
       h("p", { class: "muted", style: "margin:0;font-size:13px" }, "You can keep using the PC. Stopping is safe: the next build resumes where this one left off."),
       h("div", { class: "side-foot" }, h("button", { class: "btn danger", onclick: () => invoke("cancel") }, "Stop"), h("button", { class: "btn ghost", onclick: () => open("logs") }, "Open logs folder")),
     );
@@ -513,7 +515,7 @@ function renderSide() {
   const r = S.result;
   if (r && !r.ok) {
     side.replaceChildren(
-      h("div", { class: "eyebrow", style: "color:var(--bad)" }, "The build stopped"),
+      h("h2", {}, "Build stopped"),
       h("div", { class: "error-box" }, h("div", { class: "title" }, `${r.label} failed`), h("div", { class: "msg" }, r.error || "Unknown error")),
       h("p", { class: "muted", style: "margin:0;font-size:13px" }, "Building again resumes where it stopped. If it fails again, send the report: it says what went wrong and on what kind of PC, without your name or any game files."),
       h("div", { class: "btn-row" },
@@ -539,7 +541,6 @@ function renderSide() {
   const discReady = S.ov.titles.some((t) => t.disc && t.disc.ok);
   if (!anyBuilt()) {
     parts.push(
-      h("div", { class: "eyebrow" }, "Getting started"),
       h("h2", {}, "Build your games"),
       h("ol", { class: "steps" },
         h("li", { class: discReady ? "done" : "" }, h("div", {}, h("strong", {}, "Choose your disc"), h("span", {}, "An ISO of your own Far Cry Instincts or Evolution disc, or the folder with its files. It's checked right away."))),
@@ -548,10 +549,9 @@ function renderSide() {
       ),
     );
   } else {
-    parts.push(h("div", { class: "eyebrow" }, "What's new"));
     const rel = S.updates && S.updates.release;
     if (rel) {
-      parts.push(h("h2", {}, rel.name), h("div", { class: "muted", style: "margin-top:-8px;font-size:12px" }, rel.published),
+      parts.push(h("h2", {}, rel.name), h("div", { class: "date" }, `Released ${rel.published}`),
         h("div", { class: "notes", html: notesHtml(rel.notes) }));
     } else {
       parts.push(h("p", { class: "muted" }, "Release notes appear here when the launcher is online."));
