@@ -15,8 +15,9 @@ import subprocess
 import sys
 
 REPO = Path(__file__).resolve().parents[1]
-# for development only: tests, CI, lint settings
+# for development only: tests, CI, lint settings, and the launcher's source (it is released on its own)
 EXCLUDE = (
+    "launcher",
     "tests",
     ".github",
     ".gitattributes",

@@ -1,0 +1,427 @@
+//! fci-recomp's launcher: builds the games from the player's disc with fci-recomp.py, keeps them up to date
+//! with the releases on GitHub, and starts them. The page (../ui) calls the commands below.
+
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+mod disc;
+mod net;
+mod paths;
+mod report;
+mod settings;
+mod task;
+mod titles;
+
+use serde::Serialize;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_opener::OpenerExt;
+
+use task::Tasks;
+
+type Discs = Mutex<HashMap<String, disc::DiscCheck>>;
+
+#[derive(Serialize)]
+struct TitleStatus {
+    key: &'static str,
+    name: &'static str,
+    /// the disc's files are in the game's folder
+    installed: bool,
+    game: bool,
+    editor: bool,
+    /// the disc had the map editor (ige.xbe is among the installed files)
+    editor_available: bool,
+    built_version: Option<String>,
+    /// built with an older version than the source here
+    outdated: bool,
+    disc: Option<disc::DiscCheck>,
+    running: Vec<String>,
+    folder: String,
+}
+
+#[derive(Serialize)]
+struct Overview {
+    launcher_version: &'static str,
+    root: String,
+    warnings: Vec<String>,
+    source: Option<paths::Source>,
+    busy: bool,
+    titles: Vec<TitleStatus>,
+    sync_settings: bool,
+}
+
+fn built_version(install: &std::path::Path) -> Option<String> {
+    let text = std::fs::read_to_string(install.join("build.json")).ok()?;
+    serde_json::from_str::<serde_json::Value>(&text).ok()?["version"].as_str().map(str::to_string)
+}
+
+#[tauri::command]
+async fn overview(tasks: State<'_, Arc<Tasks>>, discs: State<'_, Discs>) -> Result<Overview, String> {
+    let source = paths::current_source();
+    let state = paths::load_state();
+    let running = tasks.running_games();
+    let mut titles_out = Vec::new();
+    for t in titles::TITLES.iter() {
+        let install = paths::install(t);
+        let built = built_version(&install);
+        let game = install.join(t.game_exe).exists();
+        let cached = discs.lock().unwrap().get(t.key).cloned(); // not in the match: its lock would last the match
+        let disc = match (cached, state.discs.get(t.key)) {
+            (Some(d), _) => Some(d),
+            (None, Some(p)) if PathBuf::from(p).exists() => {
+                let d = disc::check(&PathBuf::from(p), source.as_ref().map(|s| s.path.as_path()));
+                discs.lock().unwrap().insert(t.key.into(), d.clone());
+                Some(d)
+            }
+            _ => None,
+        };
+        titles_out.push(TitleStatus {
+            key: t.key,
+            name: t.name,
+            installed: install.join("game").join("default.xbe").exists(),
+            game,
+            editor: install.join(t.editor_exe).exists(),
+            editor_available: install.join("game").join("ige.xbe").exists(),
+            outdated: game
+                && match (&built, &source) {
+                    (Some(b), Some(s)) => paths::newer(&s.version, b),
+                    _ => false,
+                },
+            built_version: built,
+            disc,
+            running: running.iter().filter_map(|r| r.strip_prefix(&format!("{}:", t.key)).map(str::to_string)).collect(),
+            folder: install.to_string_lossy().into(),
+        });
+    }
+    Ok(Overview {
+        launcher_version: env!("CARGO_PKG_VERSION"),
+        root: paths::root().to_string_lossy().into(),
+        warnings: paths::root_warnings(),
+        source,
+        busy: tasks.busy(),
+        titles: titles_out,
+        sync_settings: state.sync_settings,
+    })
+}
+
+fn remember_disc(discs: &Discs, check: &disc::DiscCheck) -> Result<(), String> {
+    if let (true, Some(key)) = (check.ok, &check.title) {
+        let mut state = paths::load_state();
+        state.discs.insert(key.clone(), check.path.clone());
+        paths::save_state(&state)?;
+        discs.lock().unwrap().insert(key.clone(), check.clone());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn check_disc(path: String, discs: State<'_, Discs>) -> Result<disc::DiscCheck, String> {
+    let source = paths::current_source();
+    let p = PathBuf::from(path);
+    let check = tauri::async_runtime::spawn_blocking(move || disc::check(&p, source.as_ref().map(|s| s.path.as_path())))
+        .await
+        .map_err(|e| e.to_string())?;
+    remember_disc(&discs, &check)?;
+    Ok(check)
+}
+
+#[tauri::command]
+async fn pick_disc(app: AppHandle, folder: bool, discs: State<'_, Discs>) -> Result<Option<disc::DiscCheck>, String> {
+    let picked = if folder {
+        app.dialog().file().set_title("The folder with the disc's files").blocking_pick_folder()
+    } else {
+        app.dialog()
+            .file()
+            .set_title("Your Far Cry Instincts or Evolution disc image")
+            .add_filter("Xbox disc image", &["iso", "xiso", "img", "bin"])
+            .add_filter("All files", &["*"])
+            .blocking_pick_file()
+    };
+    let Some(path) = picked.and_then(|p| p.into_path().ok()) else { return Ok(None) };
+    check_disc(path.to_string_lossy().into(), discs).await.map(Some)
+}
+
+#[derive(Serialize)]
+struct Updates {
+    release: net::Release,
+    /// the release is newer than the source here (or there is none yet)
+    source: bool,
+    /// the release carries a newer launcher
+    launcher: bool,
+}
+
+#[tauri::command]
+async fn check_updates() -> Result<Updates, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let release = net::latest_release()?;
+        let here = paths::current_source().map(|s| s.version);
+        let launcher = release
+            .launcher
+            .as_ref()
+            .map(|a| launcher_version_of(&a.name))
+            .is_some_and(|v| paths::newer(&v, env!("CARGO_PKG_VERSION")));
+        Ok(Updates {
+            source: here.as_deref().map_or(true, |h| paths::newer(&release.version, h)),
+            launcher,
+            release,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// "FCI-Launcher-0.2.0.exe" -> "0.2.0"
+fn launcher_version_of(asset: &str) -> String {
+    asset.trim_end_matches(".exe").rsplit('-').next().unwrap_or("").to_string()
+}
+
+#[tauri::command]
+fn start(app: AppHandle, tasks: State<'_, Arc<Tasks>>, request: task::Request) -> Result<(), String> {
+    task::start(app, tasks.inner().clone(), request)
+}
+
+#[tauri::command]
+fn cancel(tasks: State<'_, Arc<Tasks>>) {
+    tasks.cancel();
+}
+
+#[tauri::command]
+fn launch(tasks: State<'_, Arc<Tasks>>, title: String, editor: bool) -> Result<(), String> {
+    tasks.launch(titles::by_key(&title)?, editor)
+}
+
+#[tauri::command]
+fn open(app: AppHandle, what: String) -> Result<(), String> {
+    let opener = app.opener();
+    let path = match what.split_once(':') {
+        Some(("url", url)) => return opener.open_url(url, None::<&str>).map_err(|e| e.to_string()),
+        Some(("log", file)) => return opener.reveal_item_in_dir(file).map_err(|e| e.to_string()),
+        Some(("title", key)) => paths::install(titles::by_key(key)?),
+        // the logs the games themselves write (crashes), in their %APPDATA% folder
+        Some(("gamelogs", key)) => {
+            let appdata = std::env::var_os("APPDATA").map(PathBuf::from).ok_or("no %APPDATA% folder")?;
+            let sub = if key == "evolution" { "fci-recomp\\evolution\\logs" } else { "fci-recomp\\logs" };
+            appdata.join(sub)
+        }
+        _ if what == "logs" => paths::logs(),
+        _ => paths::root(),
+    };
+    let _ = std::fs::create_dir_all(&path);
+    opener.open_path(path.to_string_lossy(), None::<&str>).map_err(|e| e.to_string())
+}
+
+#[derive(Serialize)]
+struct ReportOut {
+    text: String,
+    url: String,
+    log: String,
+}
+
+#[derive(Serialize)]
+struct LogEntry {
+    path: String,
+    label: String,
+    when: String,
+    /// "ok", "failed", "stopped" or "running"
+    result: String,
+    error: Option<String>,
+}
+
+/// a build log's label and how it ended, from its first and last lines (task.rs writes both)
+fn read_log(path: &std::path::Path) -> LogEntry {
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let first = text.lines().next().unwrap_or("").trim_start_matches("== ");
+    let (label, when) = first.rsplit_once(", ").unwrap_or((first, ""));
+    let end = text.lines().rev().find_map(|l| l.strip_prefix("== finished: ")).map(str::to_string);
+    let error = text.lines().rev().find_map(|l| l.strip_prefix("Error: ")).map(str::to_string);
+    let result = match end.as_deref() {
+        Some("ok") => "ok",
+        Some("stopped") => "stopped",
+        Some(_) => "failed",
+        None => "running",
+    };
+    LogEntry {
+        path: path.to_string_lossy().into(),
+        label: label.into(),
+        when: when.into(),
+        result: result.into(),
+        error: error.or_else(|| end.filter(|e| e != "ok" && e != "stopped")),
+    }
+}
+
+#[tauri::command]
+fn logs_list() -> Vec<LogEntry> {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(paths::logs())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "log"))
+        .collect();
+    files.sort();
+    files.iter().rev().take(30).map(|p| read_log(p)).collect()
+}
+
+/// the report for a build log (by default the last task's)
+#[tauri::command]
+fn report(tasks: State<'_, Arc<Tasks>>, path: Option<String>) -> Result<ReportOut, String> {
+    let log = match path {
+        Some(p) => p,
+        None => tasks.last.lock().unwrap().as_ref().map(|o| o.log.clone()).ok_or("no build has run yet")?,
+    };
+    let entry = read_log(std::path::Path::new(&log));
+    let r = report::build(std::path::Path::new(&log), &entry.label, entry.error.as_deref().unwrap_or("stopped"));
+    Ok(ReportOut { text: r.text, url: r.url, log })
+}
+
+#[derive(Serialize)]
+struct SettingsOut {
+    available: bool,
+    reason: String,
+    options: Vec<settings::Option_>,
+}
+
+fn template() -> Result<PathBuf, String> {
+    let source = paths::current_source().ok_or("fci-recomp is not downloaded yet")?;
+    Ok(source.path.join("src").join("fci.ini"))
+}
+
+#[tauri::command]
+fn settings_get(title: String) -> Result<SettingsOut, String> {
+    let t = titles::by_key(&title)?;
+    let ini = paths::install(t).join("fci.ini");
+    if !ini.exists() {
+        return Ok(SettingsOut {
+            available: false,
+            reason: format!("Build {} first: its settings file is made with it.", t.name),
+            options: vec![],
+        });
+    }
+    let template = template().unwrap_or_else(|_| ini.clone());
+    Ok(SettingsOut { available: true, reason: String::new(), options: settings::read(&template, &ini)? })
+}
+
+#[tauri::command]
+fn settings_save(title: String, changes: Vec<settings::Change>, sync: bool) -> Result<Vec<String>, String> {
+    let template_path = template()?;
+    let options = settings::parse_template(&std::fs::read_to_string(&template_path).map_err(|e| e.to_string())?);
+    let mut saved = Vec::new();
+    for t in titles::TITLES.iter() {
+        let ini = paths::install(t).join("fci.ini");
+        let ours = t.key == title;
+        if !(ours || sync) || !ini.exists() {
+            continue;
+        }
+        let changes: Vec<settings::Change> = changes
+            .iter()
+            .filter(|c| ours || !options.iter().any(|o| o.key == c.key && o.per_game))
+            .map(|c| settings::Change { key: c.key.clone(), value: c.value.clone() })
+            .collect();
+        let text = std::fs::read_to_string(&ini).map_err(|e| format!("{}: {e}", ini.display()))?;
+        std::fs::write(&ini, settings::apply(&text, &options, &changes)).map_err(|e| format!("{}: {e}", ini.display()))?;
+        saved.push(t.key.to_string());
+    }
+    let mut state = paths::load_state();
+    if state.sync_settings != sync {
+        state.sync_settings = sync;
+        paths::save_state(&state)?;
+    }
+    Ok(saved)
+}
+
+/// one game's settings onto the other's (the folders each game keeps for itself stay)
+#[tauri::command]
+fn settings_copy(from: String, to: String) -> Result<(), String> {
+    let (a, b) = (titles::by_key(&from)?, titles::by_key(&to)?);
+    let template_path = template()?;
+    let options = settings::read(&template_path, &paths::install(a).join("fci.ini"))?;
+    let changes: Vec<settings::Change> =
+        options.iter().filter(|o| !o.per_game).map(|o| settings::Change { key: o.key.clone(), value: o.value.clone() }).collect();
+    let ini = paths::install(b).join("fci.ini");
+    let text = std::fs::read_to_string(&ini).map_err(|e| format!("Build {} first ({e})", b.name))?;
+    std::fs::write(&ini, settings::apply(&text, &options, &changes)).map_err(|e| e.to_string())
+}
+
+/// the launcher from the latest release in place of this one, then started
+#[tauri::command]
+async fn update_launcher(app: AppHandle) -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let release = net::latest_release()?;
+        let asset = release.launcher.ok_or("this release has no launcher to download")?;
+        let new = exe.with_extension("exe.new");
+        net::download(&asset.url, &new, net::Expect::GitHub(asset.digest.as_deref()), &mut |_, _| {})?;
+        let old = exe.with_extension("exe.old");
+        let _ = std::fs::remove_file(&old);
+        std::fs::rename(&exe, &old).map_err(|e| format!("replacing the launcher: {e}"))?;
+        if let Err(e) = std::fs::rename(&new, &exe) {
+            let _ = std::fs::rename(&old, &exe);
+            return Err(format!("replacing the launcher: {e}"));
+        }
+        std::process::Command::new(&exe).spawn().map_err(|e| e.to_string())?;
+        app.exit(0);
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn quit(app: AppHandle, tasks: State<'_, Arc<Tasks>>) {
+    tasks.cancel();
+    app.exit(0);
+}
+
+fn main() {
+    // what an update of the launcher left behind
+    if let Ok(exe) = std::env::current_exe() {
+        let _ = std::fs::remove_file(exe.with_extension("exe.old"));
+    }
+    tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
+        .manage(Arc::new(Tasks::default()))
+        .manage(Discs::default())
+        .on_window_event(|window, event| match event {
+            tauri::WindowEvent::CloseRequested { api, .. } => {
+                if window.state::<Arc<Tasks>>().busy() {
+                    api.prevent_close();
+                    let _ = window.emit("close-requested", ());
+                }
+            }
+            tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Enter { .. }) => {
+                let _ = window.emit("drag", true);
+            }
+            tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Leave) => {
+                let _ = window.emit("drag", false);
+            }
+            tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) => {
+                let _ = window.emit("drag", false);
+                if let Some(p) = paths.first() {
+                    let _ = window.emit("dropped", p.to_string_lossy().to_string());
+                }
+            }
+            _ => {}
+        })
+        .invoke_handler(tauri::generate_handler![
+            overview,
+            check_disc,
+            pick_disc,
+            check_updates,
+            start,
+            cancel,
+            launch,
+            open,
+            logs_list,
+            report,
+            settings_get,
+            settings_save,
+            settings_copy,
+            update_launcher,
+            quit
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running the launcher");
+}
