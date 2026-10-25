@@ -209,6 +209,7 @@ listen("task", ({ payload: e }) => {
       toast("Stopped. Starting it again resumes where it left off.");
     }
     refresh().then(() => checkUpdates());
+    if (S.tab === "settings") loadCache();
   }
 });
 
@@ -667,8 +668,45 @@ function bindName(o) {
   return b.startsWith("dpad-") ? "D-pad " + b.slice(5) : null;
 }
 
+// the build cache: its size on the button, and clearing it after a warning
+function formatSize(bytes) {
+  return bytes >= 1e9 ? `${(bytes / 1e9).toFixed(1)} GB` : `${Math.max(1, Math.round(bytes / 1e6))} MB`;
+}
+
+async function loadCache() {
+  const btn = $("clear-cache");
+  try {
+    S.cache = await invoke("build_cache");
+  } catch (e) {
+    S.cache = null;
+  }
+  const bytes = S.cache ? S.cache.bytes : 0;
+  btn.textContent = bytes ? `Clear build cache (${formatSize(bytes)})` : "Build cache is empty";
+  btn.disabled = !bytes || !!S.task;
+}
+
+$("clear-cache").addEventListener("click", () => {
+  if (!S.cache) return;
+  const size = formatSize(S.cache.bytes);
+  modal(
+    h("h3", {}, "Clear build cache?"),
+    h("p", {}, `This will free ${size} from ${S.cache.drive}, but require a full rebuild on the next update.`),
+    h("div", { class: "buttons" },
+      h("button", { class: "btn", onclick: closeModal }, "Cancel"),
+      h("button", { class: "btn danger", onclick: async () => {
+        closeModal();
+        $("clear-cache").disabled = true;
+        $("clear-cache").textContent = "Clearing…";
+        await call("clear_build_cache").then(() => toast(`Freed ${size}.`)).catch(() => {});
+        loadCache();
+      } }, `Clear ${size}`),
+    ),
+  );
+});
+
 async function loadSettings(key) {
   S.settings.title = key;
+  loadCache();
   try {
     const r = await invoke("settings_get", { title: key });
     Object.assign(S.settings, { options: r.options, available: r.available, reason: r.reason, edits: {} });

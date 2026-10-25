@@ -24,6 +24,9 @@ The launcher doesn't build anything itself. It runs `fci-recomp.py` from a relea
 - **Starts** the game or its map editor.
 - **Settings:** the options of each game's `fci.ini`, read from the release's `src/fci.ini`. They can
   be kept the same for both games, except the folders each game keeps for itself.
+- **Clear build cache** (Settings): removes what `build\` holds that a build makes again (the C, the
+  builds, the object cache, the toolkit), after saying how much it frees. Python and the downloaded
+  compiler stay. The next build or update is a full one.
 - **Logs:** every build writes `logs\<date>-<game>-<kind>.log`. A failed build gets a report, without
   the user's name, to copy or to open as a pre-filled GitHub issue.
 

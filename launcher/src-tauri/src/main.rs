@@ -393,6 +393,86 @@ async fn update_launcher(app: AppHandle) -> Result<(), String> {
     .map_err(|e| e.to_string())?
 }
 
+/// what in build\ a build makes again by itself: the recompiled C, the builds, the object cache, the
+/// toolkit, downloads left over. Python and the downloaded compiler stay: they are tools, not a cache.
+const KEEP_IN_WORK: [&str; 2] = ["python", "toolchain"];
+
+fn cache_entries() -> Vec<PathBuf> {
+    std::fs::read_dir(paths::work())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| !KEEP_IN_WORK.contains(&e.file_name().to_string_lossy().as_ref()))
+        .map(|e| e.path())
+        .collect()
+}
+
+fn size_of(path: &std::path::Path) -> u64 {
+    match std::fs::symlink_metadata(path) {
+        Ok(m) if m.is_dir() => std::fs::read_dir(path).into_iter().flatten().flatten().map(|e| size_of(&e.path())).sum(),
+        Ok(m) => m.len(),
+        Err(_) => 0,
+    }
+}
+
+/// a file or a folder and everything in it; Git's read-only files too (tools/deps.py's remove_tree)
+fn remove_all(path: &std::path::Path) -> std::io::Result<()> {
+    fn writable(path: &std::path::Path) {
+        if let Ok(m) = std::fs::symlink_metadata(path) {
+            let mut perms = m.permissions();
+            #[allow(clippy::permissions_set_readonly_false)]
+            perms.set_readonly(false);
+            let _ = std::fs::set_permissions(path, perms);
+            if m.is_dir() {
+                for e in std::fs::read_dir(path).into_iter().flatten().flatten() {
+                    writable(&e.path());
+                }
+            }
+        }
+    }
+    let remove = |p: &std::path::Path| if p.is_dir() { std::fs::remove_dir_all(p) } else { std::fs::remove_file(p) };
+    remove(path).or_else(|_| {
+        writable(path);
+        remove(path)
+    })
+}
+
+#[derive(Serialize)]
+struct CacheSize {
+    bytes: u64,
+    /// the drive it is on ("C:"), or the folder elsewhere
+    drive: String,
+}
+
+#[tauri::command]
+async fn build_cache() -> Result<CacheSize, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let work = paths::work();
+        let drive = match work.components().next() {
+            Some(std::path::Component::Prefix(p)) => p.as_os_str().to_string_lossy().to_string(),
+            _ => work.to_string_lossy().to_string(),
+        };
+        CacheSize { bytes: cache_entries().iter().map(|p| size_of(p)).sum(), drive }
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn clear_build_cache(tasks: State<'_, Arc<Tasks>>) -> Result<(), String> {
+    if tasks.busy() {
+        return Err("Wait for the build to end first.".into());
+    }
+    tauri::async_runtime::spawn_blocking(|| {
+        for p in cache_entries() {
+            remove_all(&p).map_err(|e| format!("{} couldn't be removed ({e}). A program may be using it; close it and try again.", p.display()))?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 fn quit(app: AppHandle, tasks: State<'_, Arc<Tasks>>) {
     tasks.cancel();
@@ -445,6 +525,8 @@ fn main() {
             settings_save,
             settings_copy,
             update_launcher,
+            build_cache,
+            clear_build_cache,
             quit
         ])
         .run(tauri::generate_context!())
