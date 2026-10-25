@@ -67,6 +67,8 @@ code { font-family: var(--mono); }
   flex: none;
 }
 .brand { display: flex; align-items: center; gap: 10px; }
+.home { display: flex; align-items: center; gap: 10px; background: none; border: 0; padding: 4px 0; cursor: pointer; }
+.home:hover .wordmark { color: var(--paper-hover); }
 .brand img { width: 24px; height: 24px; }
 .wordmark { font: 700 22px/1 var(--display); letter-spacing: .04em; text-transform: uppercase; color: var(--paper); }
 .version { color: var(--faint); font: 400 11.5px/1 var(--mono); margin-top: 3px; }
@@ -212,7 +214,11 @@ main { flex: 1; min-height: 0; position: relative; }
 .notes li::before { content: ""; position: absolute; left: 2px; top: .62em; width: 5px; height: 5px; background: var(--faint); }
 .notes p { margin: 8px 0; color: var(--muted); }
 .notes code { color: var(--text); font-size: 12px; }
-.side-foot { margin-top: auto; display: flex; gap: 4px; flex-wrap: wrap; padding: 10px 0 0; border-top: 1px solid var(--line); }
+.side-foot { margin-top: auto; display: flex; gap: 4px; flex-wrap: wrap; align-items: center; padding: 10px 0 0; border-top: 1px solid var(--line); }
+.side-foot .btn { gap: 7px; }
+/* keyboard focus, visible only for the keyboard */
+:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
+.btn.primary:focus-visible { outline-offset: 3px; clip-path: none; }
 .big-progress { display: grid; gap: 12px; }
 .big-progress .percent { font: 700 76px/.9 var(--display); color: var(--paper); font-variant-numeric: tabular-nums; }
 .big-progress .percent small { font: 500 20px/1 var(--mono); color: var(--faint); margin-left: 6px; }

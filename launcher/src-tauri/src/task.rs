@@ -11,7 +11,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter};
+use tauri::window::{ProgressBarState, ProgressBarStatus};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::paths::{self, Source};
 use crate::{net, report, titles};
@@ -210,6 +211,13 @@ pub fn start(app: AppHandle, tasks: Arc<Tasks>, request: Request) -> Result<(), 
         ));
         *tasks.last.lock().unwrap() = Some(outcome.clone());
         *tasks.running.lock().unwrap() = None;
+        // the taskbar button: no more progress; it flashes when the window is in the background
+        if let Some(w) = app.get_webview_window("main") {
+            let _ = w.set_progress_bar(ProgressBarState { status: Some(ProgressBarStatus::None), progress: None });
+            if !w.is_focused().unwrap_or(true) {
+                let _ = w.request_user_attention(Some(tauri::UserAttentionType::Informational));
+            }
+        }
         let _ = app.emit("task", Event::Finished(outcome));
     });
     Ok(())
@@ -313,6 +321,13 @@ impl Job {
         }
         self.last_emit = Instant::now();
         self.last_percent = percent;
+        // the same on the taskbar button, for a build left running in the background
+        if let Some(w) = self.app.get_webview_window("main") {
+            let _ = w.set_progress_bar(ProgressBarState {
+                status: Some(ProgressBarStatus::Normal),
+                progress: Some(percent.round() as u64),
+            });
+        }
         let _ = self.app.emit(
             "task",
             Event::Progress { percent, status: self.status.clone(), detail: self.detail.clone() },

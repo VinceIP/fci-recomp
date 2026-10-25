@@ -199,17 +199,42 @@ fn open(app: AppHandle, what: String) -> Result<(), String> {
         Some(("url", url)) => return opener.open_url(url, None::<&str>).map_err(|e| e.to_string()),
         Some(("log", file)) => return opener.reveal_item_in_dir(file).map_err(|e| e.to_string()),
         Some(("title", key)) => paths::install(titles::by_key(key)?),
-        // the logs the games themselves write (crashes), in their %APPDATA% folder
-        Some(("gamelogs", key)) => {
-            let appdata = std::env::var_os("APPDATA").map(PathBuf::from).ok_or("no %APPDATA% folder")?;
-            let sub = if key == "evolution" { "fci-recomp\\evolution\\logs" } else { "fci-recomp\\logs" };
-            appdata.join(sub)
-        }
+        // what the games themselves write: crash logs and saves
+        Some(("gamelogs", key)) => game_folder(titles::by_key(key)?, "log-dir", "logs")?,
+        Some(("saves", key)) => game_folder(titles::by_key(key)?, "save-dir", "profile")?,
         _ if what == "logs" => paths::logs(),
         _ => paths::root(),
     };
     let _ = std::fs::create_dir_all(&path);
     opener.open_path(path.to_string_lossy(), None::<&str>).map_err(|e| e.to_string())
+}
+
+/// a folder a game keeps under %APPDATA% (fci.ini's option, when set there, or its default)
+fn game_folder(title: &titles::Title, option: &str, default: &str) -> Result<PathBuf, String> {
+    let ini = std::fs::read_to_string(paths::install(title).join("fci.ini")).unwrap_or_default();
+    if let Some(set) = settings::parse_values(&ini).get(option).filter(|v| !v.is_empty()) {
+        return Ok(PathBuf::from(expand_env(set)));
+    }
+    let appdata = std::env::var_os("APPDATA").map(PathBuf::from).ok_or("no %APPDATA% folder")?;
+    let base = if title.key == "evolution" { appdata.join("fci-recomp").join("evolution") } else { appdata.join("fci-recomp") };
+    Ok(base.join(default))
+}
+
+/// %NAME% replaced by the environment variable's value, as fci.ini's paths are written
+fn expand_env(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(start) = rest.find('%') {
+        let Some(len) = rest[start + 1..].find('%') else { break };
+        let name = &rest[start + 1..start + 1 + len];
+        out.push_str(&rest[..start]);
+        match std::env::var(name) {
+            Ok(v) if !name.is_empty() => out.push_str(&v),
+            _ => out.push_str(&rest[start..start + len + 2]),
+        }
+        rest = &rest[start + len + 2..];
+    }
+    out + rest
 }
 
 #[derive(Serialize)]
