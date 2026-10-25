@@ -1,5 +1,6 @@
 /* Direct mouse aim: a prehook on Player_ProcessInput (00098AE0) adds the mouse's counts, in degrees, to
- * the game view's turn, so a count is the same angle at any frame rate (re/notes/INPUT-CAMERA.md). */
+ * the game view's turn, so a count is the same angle at any frame rate (re/notes/INPUT-CAMERA.md). The right
+ * stick's turn comes the same way, past the game's look (fci_input.c, controls-stick-aim). */
 #include <stdint.h>
 #include <windows.h>
 
