@@ -36,12 +36,14 @@ again to resume after an interruption: finished steps are kept.
 """
 
 import argparse
+import errno
 import json
 from pathlib import Path
 import shutil
 import subprocess
 import sys
 import time
+import traceback
 
 VERSION = "0.2.2"
 REPO = Path(__file__).resolve().parent
@@ -91,6 +93,26 @@ def check_python():
 NETWORK_HINT = (
     "Check the internet connection; a proxy, firewall or antivirus can also block the download. Run it again to resume."
 )
+COMPILER_HINT = (
+    'Installing Visual Studio Build Tools with "Desktop development with C++" also works '
+    "(https://visualstudio.microsoft.com/downloads/); the build then uses it instead of the download."
+)
+LOCKED_HINT = (
+    "Another program had the file open: OneDrive, an antivirus or an open editor. Close it, or move fci-recomp "
+    "outside OneDrive to a folder such as C:\\Games\\fci-recomp, then run the build again."
+)
+FULL_HINT = "The drive is full. Free some space and run the build again; it resumes where it stopped."
+REPORT_HINT = "Run the build again; if it stops the same way, report it on Discord or GitHub with the build log."
+
+
+def what_to_do(e):
+    """the next step for an error nothing caught: one the player can fix, else a report"""
+    if isinstance(e, OSError):
+        if e.errno == errno.ENOSPC or getattr(e, "winerror", None) in (39, 112):
+            return FULL_HINT
+        if isinstance(e, PermissionError) or getattr(e, "winerror", None) in (5, 32, 33):
+            return LOCKED_HINT
+    return REPORT_HINT
 
 
 def preflight(work, install, parts, download_compiler):
@@ -129,7 +151,7 @@ def find_toolchain(work, accept_license, download=False):
                 progress=lambda done, total: events.progress("compiler", done, total, "Downloading the compiler"),
             )
         except msvc.DownloadError as e:
-            raise SystemExit(f"error: {e}")
+            raise SystemExit(f"error: {e}\n{COMPILER_HINT}")
         except OSError as e:  # urllib's errors too
             raise SystemExit(f"error: downloading the compiler failed ({e}). {NETWORK_HINT}")
         tc = toolchain.downloaded(folder)
@@ -412,8 +434,9 @@ def main():
             events.emit("error", text=e.code.removeprefix("error: "))
         raise
     except Exception as e:  # the traceback still goes to stderr, which the launcher keeps in its log
-        events.emit("error", text=f"{type(e).__name__}: {e}")
-        raise
+        events.emit("error", text=f"{type(e).__name__}: {e}\n{what_to_do(e)}")
+        traceback.print_exc()
+        raise SystemExit(f"\nerror: {type(e).__name__}: {e}\n{what_to_do(e)}")
 
 
 if __name__ == "__main__":

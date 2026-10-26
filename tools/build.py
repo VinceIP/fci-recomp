@@ -100,7 +100,10 @@ def compile_all(case, jobs, log, obj_cache=None):
         with open(log, "a", encoding="utf-8") as f:
             f.write(f"== {' '.join(args)}\n{done.stdout}{done.stderr}\n")
         if done.returncode:
-            raise SystemExit(f"error: {' '.join(args)} failed; see {log}")
+            raise SystemExit(
+                f"error: {' '.join(args)} failed; see {log}\n"
+                "Run the build again; if it stops the same way, report it on Discord or GitHub with that log."
+            )
 
     def step(*args):
         started = time.time()

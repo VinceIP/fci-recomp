@@ -62,7 +62,7 @@ if ($Made -ne $Ready -or -not (Test-Path $Python)) {
         if ($LASTEXITCODE) { throw 'Python couldn''t start' }
     } catch {
         Write-Host "error: Python failed to download. $($_.Exception.Message)"
-        Write-Host 'Check Internet connection.'
+        Write-Host 'Check the internet connection; a proxy, firewall or antivirus can also block the download.'
         exit 1
     }
     Set-Content $ReadyFile $Ready

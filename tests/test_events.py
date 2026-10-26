@@ -45,3 +45,18 @@ def test_status_lists_the_games_set_up(tmp_path):
     status = json.loads(done.stdout)
     assert status["protocol"] == events.PROTOCOL and status["titles"] == {}
     assert status["version"]
+
+
+def test_an_error_says_what_to_do():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("fci_recomp", REPO / "fci-recomp.py")
+    script = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(script)
+    held = OSError(13, "Access is denied")
+    held.winerror = 5
+    full = OSError(28, "No space left on device")
+    assert script.what_to_do(PermissionError(13, "denied")) == script.LOCKED_HINT
+    assert script.what_to_do(full) == script.FULL_HINT
+    assert script.what_to_do(held) == script.LOCKED_HINT
+    assert script.what_to_do(KeyError("x")) == script.REPORT_HINT

@@ -19,7 +19,8 @@ set "DISC=%DISC:"=%"
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\bootstrap.ps1" editor "%DISC%"
 if errorlevel 1 (
     echo.
-    echo Build error. Check dependencies, and run BuildEditor.cmd again to resume.
+    echo The build stopped. The reason and what to do are above.
+    echo Run BuildEditor.cmd again to resume where it stopped.
 ) else (
     echo.
     echo Build complete. Choose Map Editor in the game's main menu.
