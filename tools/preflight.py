@@ -124,16 +124,18 @@ def check_folder(path, what):
                 )
             )
             break
+    # the folder itself, made now (the build makes it anyway): a new folder at a drive root is writable
+    # where the root itself is not (#40)
     try:
-        base = existing(path)
-        probe = base / ".fci-write-test"
+        path.mkdir(parents=True, exist_ok=True)
+        probe = path / ".fci-write-test"
         probe.write_bytes(b"")
         probe.unlink()
     except OSError:
         found.append(
             (
                 "Error",
-                f"Invalid write permissions in {base}.",
+                f"Invalid write permissions in {path}.",
             )
         )
     return found
