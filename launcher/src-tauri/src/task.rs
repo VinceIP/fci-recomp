@@ -110,14 +110,16 @@ mod job {
                 }
                 let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
                 info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-                SetInformationJobObject(
+                let job = Job(h);
+                // Python starts its first child well after this; a job that didn't take is no job (Stop then
+                // ends Python alone, and the caller logs it)
+                let limited = SetInformationJobObject(
                     h,
                     JobObjectExtendedLimitInformation,
                     &info as *const _ as *const core::ffi::c_void,
                     std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
                 );
-                AssignProcessToJobObject(h, child.as_raw_handle() as HANDLE);
-                Some(Job(h))
+                (limited != 0 && AssignProcessToJobObject(h, child.as_raw_handle() as HANDLE) != 0).then_some(job)
             }
         }
 
@@ -488,27 +490,20 @@ impl Job {
 
     /// release's zip into source/<version>
     fn download(&mut self, release: &net::Release) -> Result<Source, String> {
-        let asset = release.source.clone().ok_or_else(|| {
-            format!("release {} has no fci-recomp zip to download; see {}", release.version, release.page)
-        })?;
-        let downloads = paths::work().join("downloads");
-        std::fs::create_dir_all(&downloads).map_err(|e| e.to_string())?;
-        let zip = downloads.join(&asset.name);
         let (tx, rx) = mpsc::channel::<(u64, u64)>();
-        let (url, digest, file) = (asset.url.clone(), asset.digest.clone(), zip.clone());
-        let worker = std::thread::spawn(move || {
-            net::download(&url, &file, net::Expect::GitHub(digest.as_deref()), &mut |d, t| {
-                let _ = tx.send((d, t));
+        let worker = {
+            let release = release.clone();
+            std::thread::spawn(move || {
+                net::fetch_source(&release, &mut |d, t| {
+                    let _ = tx.send((d, t));
+                })
             })
-        });
+        };
         for (done, total) in rx {
             self.detail = format!("Downloading fci-recomp {}: {} of {} MB", release.version, done >> 20, (total >> 20).max(1));
             self.show(done as f64 / total.max(1) as f64, false);
         }
-        worker.join().map_err(|_| "the download stopped".to_string())??;
-        let installed = net::install_source(&zip);
-        let _ = std::fs::remove_file(&zip);
-        installed
+        worker.join().map_err(|_| "the download stopped".to_string())?
     }
 
     fn fci_recomp(&mut self, python: &Path, source: &Path, args: &[String], parts: usize, name: &str) -> Result<(), Stop> {
@@ -561,9 +556,15 @@ impl Job {
             });
         }
         drop(tx);
+        #[cfg(windows)]
+        let job = job::Job::for_child(&child);
+        #[cfg(windows)]
+        if job.is_none() {
+            self.log("Warning: the build couldn't be put in a job object; Stop ends Python but not what it started.");
+        }
         *self.process.lock().unwrap() = Some(Process {
             #[cfg(windows)]
-            job: job::Job::for_child(&child),
+            job,
             child,
         });
         let mut run = Run { plan: Vec::new(), current: 0, parts: HashMap::new(), expected_parts: parts };

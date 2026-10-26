@@ -148,7 +148,7 @@ struct Updates {
     release: net::Release,
     /// the release is newer than the source here (or there is none yet)
     source: bool,
-    /// the release carries a newer launcher
+    /// a newer launcher: the launcher has the version of the release it comes in, so any newer release
     launcher: bool,
 }
 
@@ -157,24 +157,14 @@ async fn check_updates() -> Result<Updates, String> {
     tauri::async_runtime::spawn_blocking(|| {
         let release = net::latest_release()?;
         let here = paths::current_source().map(|s| s.version);
-        let launcher = release
-            .launcher
-            .as_ref()
-            .map(|a| launcher_version_of(&a.name))
-            .is_some_and(|v| paths::newer(&v, env!("CARGO_PKG_VERSION")));
         Ok(Updates {
             source: here.as_deref().map_or(true, |h| paths::newer(&release.version, h)),
-            launcher,
+            launcher: paths::newer(&release.version, env!("CARGO_PKG_VERSION")),
             release,
         })
     })
     .await
     .map_err(|e| e.to_string())?
-}
-
-/// "FCI-Launcher-0.2.0.exe" -> "0.2.0"
-fn launcher_version_of(asset: &str) -> String {
-    asset.trim_end_matches(".exe").rsplit('-').next().unwrap_or("").to_string()
 }
 
 #[tauri::command]
@@ -369,15 +359,29 @@ fn settings_copy(from: String, to: String) -> Result<(), String> {
     std::fs::write(&ini, settings::apply(&text, &options, &changes)).map_err(|e| e.to_string())
 }
 
-/// the launcher from the latest release in place of this one, then started
+/// the launcher in the release zip (tools/package.py puts it there)
+const LAUNCHER_IN_SOURCE: &str = "FCI Launcher.exe";
+
+/// the launcher of a newer release in place of this one, then started: from the source here when a games
+/// update brought it already, else from the latest release's zip, downloaded and checked like any other
 #[tauri::command]
-async fn update_launcher(app: AppHandle) -> Result<(), String> {
+async fn update_launcher(app: AppHandle, tasks: State<'_, Arc<Tasks>>) -> Result<(), String> {
+    if tasks.busy() {
+        return Err("Wait for the build to end first.".into());
+    }
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     tauri::async_runtime::spawn_blocking(move || {
-        let release = net::latest_release()?;
-        let asset = release.launcher.ok_or("this release has no launcher to download")?;
+        let newer = |s: &paths::Source| paths::newer(&s.version, env!("CARGO_PKG_VERSION"));
+        let source = match paths::current_source().filter(newer) {
+            Some(s) => s,
+            None => net::fetch_source(&net::latest_release()?, &mut |_, _| {})?,
+        };
+        let from = source.path.join(LAUNCHER_IN_SOURCE);
+        if !newer(&source) || !from.exists() {
+            return Err(format!("fci-recomp {} has no newer launcher in it", source.version));
+        }
         let new = exe.with_extension("exe.new");
-        net::download(&asset.url, &new, net::Expect::GitHub(asset.digest.as_deref()), &mut |_, _| {})?;
+        std::fs::copy(&from, &new).map_err(|e| format!("copying the new launcher: {e}"))?;
         let old = exe.with_extension("exe.old");
         let _ = std::fs::remove_file(&old);
         std::fs::rename(&exe, &old).map_err(|e| format!("replacing the launcher: {e}"))?;
@@ -394,17 +398,12 @@ async fn update_launcher(app: AppHandle) -> Result<(), String> {
 }
 
 /// what in build\ a build makes again by itself: the recompiled C, the builds, the object cache, the
-/// toolkit, downloads left over. Python and the downloaded compiler stay: they are tools, not a cache.
-const KEEP_IN_WORK: [&str; 2] = ["python", "toolchain"];
+/// toolkit, downloads left over. Only these names: anything else in the folder isn't ours to remove.
+/// Python and the downloaded compiler stay: they are tools, not a cache.
+const CACHE_IN_WORK: [&str; 6] = ["lift", "build", "objects", "deps", "downloads", "toolchain/downloads"];
 
 fn cache_entries() -> Vec<PathBuf> {
-    std::fs::read_dir(paths::work())
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter(|e| !KEEP_IN_WORK.contains(&e.file_name().to_string_lossy().as_ref()))
-        .map(|e| e.path())
-        .collect()
+    CACHE_IN_WORK.iter().map(|name| paths::work().join(name)).filter(|p| p.exists()).collect()
 }
 
 fn size_of(path: &std::path::Path) -> u64 {

@@ -40,10 +40,9 @@ pub struct Release {
     pub notes: String,
     pub page: String,
     pub published: String,
-    /// the zip players build from (tools/package.py's fci-recomp-<version>.zip)
+    /// the zip players build from (tools/package.py's fci-recomp-<version>.zip); it carries the launcher of
+    /// the same version too
     pub source: Option<Asset>,
-    /// the launcher itself, when this release carries one
-    pub launcher: Option<Asset>,
 }
 
 pub fn latest_release() -> Result<Release, String> {
@@ -66,7 +65,6 @@ pub fn latest_release() -> Result<Release, String> {
     };
     Ok(Release {
         source: asset(&|n| n.starts_with("fci-recomp-") && n.ends_with(".zip")),
-        launcher: asset(&|n| n.to_lowercase().starts_with("fci-launcher") && n.to_lowercase().ends_with(".exe")),
         name: v["name"].as_str().unwrap_or(&version).into(),
         notes: v["body"].as_str().unwrap_or("").replace("\r\n", "\n"),
         page: v["html_url"].as_str().unwrap_or("").into(),
@@ -78,12 +76,17 @@ pub fn latest_release() -> Result<Release, String> {
 pub enum Expect<'a> {
     Sha256Hex(&'a str),
     Sha512Base64(&'a str),
-    /// GitHub's "sha256:<hex>", or nothing for an asset uploaded before GitHub listed digests
+    /// GitHub's "sha256:<hex>"; a release asset without one is refused (every asset of ours has one)
     GitHub(Option<&'a str>),
 }
 
 /// url into file, checked; progress(bytes so far, bytes in all)
 pub fn download(url: &str, file: &Path, expect: Expect, progress: &mut dyn FnMut(u64, u64)) -> Result<(), String> {
+    if let Expect::GitHub(d) = &expect {
+        if !d.is_some_and(|d| d.starts_with("sha256:")) {
+            return Err(format!("{url} has no published SHA-256 to check it against; nothing was downloaded."));
+        }
+    }
     let response = agent().get(url).call().map_err(|e| format!("downloading {url} failed ({e}). {NETWORK_HINT}"))?;
     let total: u64 = response.header("Content-Length").and_then(|s| s.parse().ok()).unwrap_or(0);
     let mut reader = response.into_reader();
@@ -107,8 +110,7 @@ pub fn download(url: &str, file: &Path, expect: Expect, progress: &mut dyn FnMut
     let ok = match expect {
         Expect::Sha256Hex(hex) => format!("{:x}", sha256.finalize()) == hex.to_lowercase(),
         Expect::Sha512Base64(b64) => base64::engine::general_purpose::STANDARD.encode(sha512.finalize()) == b64,
-        Expect::GitHub(Some(d)) => d.strip_prefix("sha256:").map(|h| format!("{:x}", sha256.finalize()) == h).unwrap_or(true),
-        Expect::GitHub(None) => true,
+        Expect::GitHub(d) => d.and_then(|d| d.strip_prefix("sha256:")).is_some_and(|h| format!("{:x}", sha256.finalize()) == h),
     };
     if !ok {
         let _ = std::fs::remove_file(&partial);
@@ -121,6 +123,21 @@ pub fn unzip(zip: &Path, dst: &Path) -> Result<(), String> {
     let f = std::fs::File::open(zip).map_err(|e| e.to_string())?;
     let mut archive = zip::ZipArchive::new(f).map_err(|e| format!("{}: {e}", zip.display()))?;
     archive.extract(dst).map_err(|e| format!("unpacking {} failed: {e}", zip.display()))
+}
+
+/// release's zip, checked, into source/<version>; progress(bytes so far, bytes in all)
+pub fn fetch_source(release: &Release, progress: &mut dyn FnMut(u64, u64)) -> Result<Source, String> {
+    let asset = release
+        .source
+        .as_ref()
+        .ok_or_else(|| format!("release {} has no fci-recomp zip to download; see {}", release.version, release.page))?;
+    let downloads = paths::work().join("downloads");
+    std::fs::create_dir_all(&downloads).map_err(|e| e.to_string())?;
+    let zip = downloads.join(&asset.name);
+    download(&asset.url, &zip, Expect::GitHub(asset.digest.as_deref()), progress)?;
+    let installed = install_source(&zip);
+    let _ = std::fs::remove_file(&zip);
+    installed
 }
 
 /// a release zip into source/<version>, replacing a broken copy; the version comes from the zip itself

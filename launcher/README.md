@@ -24,9 +24,13 @@ The launcher doesn't build anything itself. It runs `fci-recomp.py` from a relea
 - **Starts** the game or its map editor.
 - **Settings:** the options of each game's `fci.ini`, read from the release's `src/fci.ini`. They can
   be kept the same for both games, except the folders each game keeps for itself.
-- **Clear build cache** (Settings): removes what `build\` holds that a build makes again (the C, the
-  builds, the object cache, the toolkit), after saying how much it frees. Python and the downloaded
-  compiler stay. The next build or update is a full one.
+- **Updates itself.** The launcher comes in the release zip, with the release's version, so a newer
+  release has a newer launcher. It takes it from that release's zip (already unpacked by a games update,
+  or downloaded and checked like one), puts it in place of itself and starts again.
+- **Clear build cache** (Settings): removes the folders in `build\` that a build makes again (`lift`,
+  `build`, `objects`, `deps`, `downloads`, the compiler's `downloads`), after saying how much it frees.
+  Nothing else in the folder is touched; Python and the downloaded compiler stay. The next build or
+  update is a full one.
 - **Logs:** every build writes `logs\<date>-<game>-<kind>.log`. A failed build gets a report, without
   the user's name, to copy or to open as a pre-filled GitHub issue.
 
@@ -44,13 +48,16 @@ FarCryInstincts\  FarCryEvolution\
 logs\
 ```
 
+An extracted release zip is such a folder already: `FCI Launcher.exe` is at its top, beside
+`BuildGame.cmd`, and the release itself is the source until a newer one is downloaded.
+
 A release zip (`fci-recomp-<version>.zip`) placed beside the launcher is used as if it had been
 downloaded, when it is newer than what's there. That works offline, and for testing a build before
 it is released.
 
 ## Building
 
-Needs Rust (stable) and, on Windows, the WebView2 runtime (part of Windows 10 and 11).
+Needs Rust 1.85 or newer and, on Windows, the WebView2 runtime (part of Windows 10 and 11).
 
 ```
 cd launcher/src-tauri
@@ -58,9 +65,12 @@ cargo test
 cargo build --release        # target/release/fci-launcher.exe
 ```
 
-The page and its files are built into the executable. Release it as `FCI-Launcher-<version>.exe`
-(the version in `Cargo.toml`): the launcher looks for an asset with that name in the latest release
-to update itself.
+The page and its files are built into the executable. Its version (`Cargo.toml`, `tauri.conf.json`,
+`Cargo.lock`) is the release's, `VERSION` in `fci-recomp.py` (tests/test_package.py checks it). A release
+puts it in the zip: `python -B tools/package.py vX.Y.Z --launcher launcher/src-tauri/target/release/fci-launcher.exe`.
+
+The executable isn't signed, so Windows SmartScreen asks before its first start ("More info", then
+"Run anyway").
 
 From Linux, `cargo xwin build --release --target x86_64-pc-windows-msvc` cross-compiles it (with
 [cargo-xwin](https://github.com/rust-cross/cargo-xwin)).
