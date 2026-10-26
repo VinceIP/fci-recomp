@@ -683,6 +683,9 @@ const LABELS = {
   "gfx-shadow-filter": "Soft shadows", "gfx-object-draw-distance": "Object draw distance", "gfx-object-lod-distance": "Object detail distance",
   "gfx-foliage-lod": "Foliage detail distance", "controls-mouse-keyboard": "Mouse and keyboard", "controls-mouse-aim": "Direct mouse aim",
   "controls-mouse-y-scale": "Vertical sensitivity", "controls-mouse-invert-y": "Invert vertical look", "controls-mouse-capture": "Capture the mouse",
+  "controls-stick-aim": "Direct stick aim", "controls-stick-speed": "Stick turn speed", "controls-stick-y-scale": "Stick vertical speed",
+  "controls-stick-deadzone": "Stick dead zone", "controls-stick-curve": "Stick response curve", "controls-stick-boost": "Stick rim boost",
+  "controls-stick-boost-ms": "Stick rim boost time", "controls-stick-invert-y": "Invert vertical stick look",
 };
 // shorter names for choices the ini explains at length
 const CHOICES = {
