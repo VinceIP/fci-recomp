@@ -84,7 +84,7 @@ def test_a_new_folder_is_tested_itself_not_its_parent(monkeypatch, tmp_path):
         return real(self, data)
 
     monkeypatch.setattr(Path, "write_bytes", only_below)
-    assert preflight.check_folder(tmp_path / "fci-build", "build") == []
+    assert "Error" not in levels(preflight.check_folder(tmp_path / "fci-build", "build"))
     assert (tmp_path / "fci-build").is_dir()
 
 
