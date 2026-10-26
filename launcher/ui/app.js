@@ -515,7 +515,7 @@ function renderSide() {
       ),
       h("div", { class: "meta" }, h("span", { "data-elapsed": "" }, "0:00 elapsed"), h("span", {}, "A first build takes 15 to 25 minutes")),
       t.warnings.length && h("div", { class: "warn-list" }, t.warnings.map((w) => h("div", { class: "notice" }, w))),
-      h("p", { class: "muted", style: "margin:0;font-size:13px" }, "You can keep using the PC. Stopping is safe: the next build resumes where this one left off."),
+      h("p", { class: "muted", style: "margin:0;font-size:13px" }, "Your build is in progress. You can stop and resume later at any time."),
       h("div", { class: "side-foot" }, h("button", { class: "btn danger", onclick: () => invoke("cancel") }, "Stop"), h("button", { class: "btn ghost", onclick: () => open("logs") }, "Open logs folder")),
     );
     return;
@@ -551,9 +551,9 @@ function renderSide() {
     parts.push(
       h("h2", {}, "Build your games"),
       h("ol", { class: "steps" },
-        h("li", { class: discReady ? "done" : "" }, h("div", {}, h("strong", {}, "Choose your disc"), h("span", {}, "An ISO of your own Far Cry Instincts or Evolution disc, or the folder with its files. It's checked right away."))),
-        h("li", {}, h("div", {}, h("strong", {}, "Build"), h("span", {}, "The game is recompiled for Windows on this PC: 15 to 25 minutes. Python and, without Visual Studio, Microsoft's compiler are downloaded first."))),
-        h("li", {}, h("div", {}, h("strong", {}, "Play"), h("span", {}, "Settings are on the Settings tab; saves are kept in %APPDATA%\\fci-recomp."))),
+        h("li", { class: discReady ? "done" : "" }, h("div", {}, h("strong", {}, "Choose your disc"), h("span", {}, "Provide an ISO of your own disc, or a directory of extracted game data."))),
+        h("li", {}, h("div", {}, h("strong", {}, "Build"), h("span", {}, "Build the game. See the requirements section of the README or drop by the Discord if something goes wrong. Building the map editor for either title is optional."))),
+        h("li", {}, h("div", {}, h("strong", {}, "Play"), h("span", {}, "Adjust settings to your liking from the Settings tab above, then launch a title."))),
       ),
     );
   } else {
@@ -635,6 +635,8 @@ async function renderLogs() {
   );
 }
 for (const b of document.querySelectorAll("[data-open]")) b.addEventListener("click", () => open(b.dataset.open));
+const LINKS = { discord: DISCORD, issues: GITHUB + "/issues" };
+for (const b of document.querySelectorAll("[data-link]")) b.addEventListener("click", () => open("url:" + LINKS[b.dataset.link]));
 
 // ---------------------------------------------------------------- settings
 

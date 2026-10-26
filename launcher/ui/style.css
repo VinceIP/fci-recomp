@@ -113,6 +113,7 @@ code { font-family: var(--mono); }
 .btn.update:hover { background: rgba(226, 103, 42, .12); }
 .link { background: none; border: 0; padding: 0; color: var(--muted); text-decoration: underline; text-decoration-color: var(--faint); text-underline-offset: 3px; cursor: pointer; font-size: 12px; }
 .link:hover { color: var(--text); text-decoration-color: currentColor; }
+.link.inline { font-size: inherit; font-family: inherit; color: var(--signal-soft); }
 
 main { flex: 1; min-height: 0; position: relative; }
 .page { display: none; height: 100%; }
