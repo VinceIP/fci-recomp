@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.2.2] - 2026-10-26
+
+### Added
+
+- Added the fci-recomp launcher. Allows building, updating, and launching fci-recomp titles, plus changing in-game settings, from one GUI. Editing .ini files by hand or dealing with the old command line BuildGame.cmd is no longer necessary. Building the old way is still supported if preferred.
+- Added support for building updates a little faster by saving a build object cache, so future updates with simple bugfixes don't require a painfully slow, full rebuild.
+
+### Fixed
+
+- Visual Studio wasn't found on Windows in other languages, so the build downloaded Microsoft's compiler instead (#40).
+- Building into a new folder at the root of a drive failed the permission check (#40).
+- The build failed with "Access is denied" when VS Code or an antivirus had the downloaded files open (#40).
+- Trying to build with an unsupported disc now gives a more detailed and informative error output.
+
+Built against xboxrecomp 193e2995 and Xbox XBE Recomp 65e959d4. Supported discs: Far Cry Instincts
+title 55530008, version 1 (`data/disc.json`); Far Cry Instincts Evolution title 55530060, version 3
+(`data/evolution/disc.json`).
+
 ## [0.2.1] - 2026-10-23
 
 ### Added

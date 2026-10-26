@@ -1,6 +1,6 @@
 [package]
 name = "fci-launcher"
-version = "0.2.1"
+version = "0.2.2"
 description = "Builds, updates and starts fci-recomp's games"
 license = "MIT"
 edition = "2021"

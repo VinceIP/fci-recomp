@@ -18,7 +18,7 @@ Regardless of your stance on AI in software development, it's my hope that this 
 
 ## Status
 
-**Version 0.2.1** - Story mode map editors for Instincts and Evolution are working, but have not yet been thoroughly tested end-to-end. Please continue to report crashes and issues in the Discord or Github. Enhanced visual features powered by a DirectX 12 renderer are implemented. Mouse and keyboard controls have been implemented and are customizable. Enhanced features and options are matched for both separate titles.
+**Version 0.2.2** - Story mode map editors for Instincts and Evolution are working, but have not yet been thoroughly tested end-to-end. Please continue to report crashes and issues in the Discord or Github. Enhanced visual features powered by a DirectX 12 renderer are implemented. Mouse and keyboard controls have been implemented and are customizable. Enhanced features and options are matched for both separate titles.
 
 ## Features
 
@@ -52,6 +52,15 @@ Some features are not yet complete or working as intended, but are planned.
 
 ## Setup
 
+### With the launcher
+
+1. Download the zip of the [latest release](../../releases/latest) and extract it.
+2. Start `FCI Launcher.exe`. Windows may warn that it's from an unknown publisher, since the launcher isn't signed. Click "More info", then "Run anyway".
+3. Choose your disc image (or drop it on the window), then Build. Tick the map editor box to build it too.
+4. Launch your game.
+
+### With BuildGame.cmd
+
 1. Download the zip of the [latest release](../../releases/latest) and extract.
 2. Drag your disc image (or the folder with the disc's files) onto `BuildGame.cmd`.
 3. Wait for it to finish: expect 15-25 minutes depending on your hardware, plus downloads for required
@@ -62,7 +71,7 @@ process.
 5. Start `FarCryInstincts\FarCryInstincts.exe`, or `FarCryEvolution\FarCryEvolution.exe`.
 6. Repeat the above steps for each title.
 
-Save data and log files are stored in `%APPDATA%\fci-recomp` by default. This directory can be changed by modifying `fci.ini`. Note that there are separate .ini files for each title. The `build` folder is only needed for rebuilding and can be deleted.
+Save data and log files are stored in `%APPDATA%\fci-recomp` by default. This directory can be changed by modifying `fci.ini`. Note that there are separate .ini files for each title. The `build` folder contains an object cache meant to keep future updates faster in some cases. It can be deleted safely, but keep it to speed up future updates.
 
 Developers can run the same steps via Python: `python fci-recomp.py setup <disc>`
 (`--help` lists the options).
