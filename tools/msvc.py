@@ -59,9 +59,14 @@ def fetch_json(url):
         return json.loads(r.read().decode("utf-8-sig"))
 
 
+def file_name(payload):
+    """a payload's file name; the manifest separates folders with either slash (SDK 26100.18 switched to /)"""
+    return re.split(r"[\\/]", payload["fileName"])[-1]
+
+
 def download(payload, folder):
     """one manifest payload into folder, checked against its SHA-256; kept if already complete"""
-    target = folder / payload["fileName"].replace("\\", "/").split("/")[-1]
+    target = folder / file_name(payload)
     if target.exists() and target.stat().st_size == payload["size"]:
         return target
     digest = hashlib.sha256()
@@ -110,7 +115,7 @@ def plan(packages):
     sdk = packages.get(f"win11sdk_{SDK}")
     if not sdk:
         raise DownloadError(f"Windows SDK {SDK} is no longer offered; install Visual Studio Build Tools instead")
-    by_name = {pl["fileName"].split("\\")[-1]: pl for pl in sdk["payloads"]}
+    by_name = {file_name(pl): pl for pl in sdk["payloads"]}
     missing = [m for m in SDK_INSTALLERS if m not in by_name]
     if missing:
         raise DownloadError(f"the Windows SDK package lacks {missing}")
@@ -199,7 +204,7 @@ def fetch(root, accept_license=False, log=print, ask=ask_in_console, progress=No
                 download(sdk_payloads[cab], sdk_dir)
             progress(total + total * (i + 1) // len(msis), 2 * total)
         for p in msis:
-            msi = sdk_dir / p["fileName"].split("\\")[-1]
+            msi = sdk_dir / file_name(p)
             log = root / "msiexec.log"
             done = subprocess.run(msiexec_command(msi, root, log))
             if done.returncode:

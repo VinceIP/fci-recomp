@@ -14,18 +14,19 @@ def payload(name):
     return {"fileName": name, "url": "https://example.invalid/" + name, "sha256": "0" * 64, "size": 1}
 
 
-def packages(sdk_files):
+def packages(sdk_files, sep="\\"):
     out = {f"microsoft.vc.{msvc.MSVC}.{n}": {"payloads": [payload(f"{n}.vsix")]} for n in msvc.MSVC_PACKAGES}
-    out[f"win11sdk_{msvc.SDK}"] = {"payloads": [payload("Installers\\" + f) for f in sdk_files]}
+    out[f"win11sdk_{msvc.SDK}"] = {"payloads": [payload("Installers" + sep + f) for f in sdk_files]}
     return out
 
 
 def test_plan_picks_the_pinned_packages():
     cab = "0123456789abcdef0123456789abcdef.cab"
-    vsix, msis, by_name = msvc.plan(packages(msvc.SDK_INSTALLERS + [cab, "Orca-x86_en-us.msi"]))
-    assert [p["fileName"] for p in vsix] == [f"{n}.vsix" for n in msvc.MSVC_PACKAGES]
-    assert [p["fileName"].split("\\")[-1] for p in msis] == msvc.SDK_INSTALLERS
-    assert cab in by_name
+    for sep in ("\\", "/"):  # the manifest has used both
+        vsix, msis, by_name = msvc.plan(packages(msvc.SDK_INSTALLERS + [cab, "Orca-x86_en-us.msi"], sep))
+        assert [p["fileName"] for p in vsix] == [f"{n}.vsix" for n in msvc.MSVC_PACKAGES]
+        assert [msvc.file_name(p) for p in msis] == msvc.SDK_INSTALLERS
+        assert cab in by_name
 
 
 def test_plan_names_what_is_missing():
