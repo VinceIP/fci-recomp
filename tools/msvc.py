@@ -1,10 +1,14 @@
 """Download Microsoft's C/C++ compiler and the Windows SDK into a folder, without an installer.
 
   python -B tools/msvc.py <folder> [--accept-license]
+  python -B tools/msvc.py --pin      record the current downloads in data/msvc.json (at a release)
+  python -B tools/msvc.py --check    every pinned download still there, the catalog still usable
 
-For players without Visual Studio. The packages come from Microsoft's own Visual Studio package
-manifest (the one the Visual Studio Installer reads) and are checked against its SHA-256 sums:
-MSVC's x64 compiler, linker and static libraries, and the Windows SDK's headers and libraries.
+For players without Visual Studio: MSVC's x64 compiler, linker and static libraries, and the Windows
+SDK's headers and libraries, from Microsoft's own Visual Studio package manifest (the one the Visual
+Studio Installer reads). data/msvc.json pins each download's address, size and SHA-256, so a change
+to Microsoft's catalog cannot break a release; only when a pinned file is gone is the live catalog
+read instead.
 Nothing is installed or registered; administrator rights are not needed (the SDK's .msi files are
 unpacked with an administrative install, msiexec /a, into the folder). About 400 MB to download,
 1.5 GB unpacked. Microsoft's license terms for the Build Tools apply; they are shown first.
@@ -20,6 +24,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
+import urllib.error
 import urllib.request
 import zipfile
 
@@ -48,6 +54,7 @@ SDK_INSTALLERS = [
     "Universal CRT Headers Libraries and Sources-x86_en-us.msi",
 ]
 DONE = "msvc.json"
+PINNED = Path(__file__).resolve().parents[1] / "data" / "msvc.json"
 
 
 class DownloadError(Exception):
@@ -122,6 +129,102 @@ def plan(packages):
     return vsix, [by_name[m] for m in SDK_INSTALLERS], by_name
 
 
+def served_size(url):
+    """the size Microsoft serves: the catalog's "size" of a .vsix is not its download's"""
+    with urllib.request.urlopen(urllib.request.Request(url, method="HEAD")) as r:
+        return int(r.headers.get("Content-Length", -1))
+
+
+def entry(payload):
+    """what a pin keeps of a manifest payload"""
+    return {
+        "fileName": file_name(payload),
+        "url": payload["url"],
+        "sha256": payload["sha256"].lower(),
+        "size": served_size(payload["url"]),
+    }
+
+
+def pinned(path=PINNED):
+    """data/msvc.json, when it pins the packages this version of the script selects"""
+    try:
+        pin_data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    same = (
+        pin_data.get("msvc") == MSVC
+        and pin_data.get("windows_sdk") == SDK
+        and pin_data.get("msvc_packages") == MSVC_PACKAGES
+        and [p["fileName"] for p in pin_data.get("sdk_installers", [])] == SDK_INSTALLERS
+    )
+    return pin_data if same else None
+
+
+def pin(path=PINNED, log=print):
+    """the catalog's current downloads, with the .cab files each SDK installer names, into data/msvc.json"""
+    packages, license_url = manifest()
+    vsix, msis, by_name = plan(packages)
+    cabs = set()
+    with tempfile.TemporaryDirectory() as tmp:
+        for p in msis:
+            cabs.update(cabs_of(download(p, Path(tmp))))
+    missing = sorted(cabs - by_name.keys())
+    if missing:
+        raise DownloadError(f"the SDK installers need {missing}, which the SDK package lacks")
+    data = {
+        "comment": "Microsoft's compiler and Windows SDK as tools/msvc.py downloads them for builds without Visual "
+        "Studio: each file's address, size and SHA-256, from the Visual Studio catalog when tools/msvc.py --pin "
+        "last ran. Pinned again at each release.",
+        "msvc": MSVC,
+        "msvc_version": packages[f"microsoft.vc.{MSVC}.{MSVC_PACKAGES[0]}"].get("version"),
+        "windows_sdk": SDK,
+        "windows_sdk_version": packages[f"win11sdk_{SDK}"].get("version"),
+        "license": license_url,
+        "msvc_packages": MSVC_PACKAGES,
+        "msvc_payloads": [entry(p) for p in vsix],
+        "sdk_installers": [entry(p) for p in msis],
+        "sdk_cabs": [entry(by_name[c]) for c in sorted(cabs)],
+    }
+    Path(path).write_text(json.dumps(data, indent=1) + "\n", encoding="utf-8", newline="\n")
+    log(f"MSVC {data['msvc_version']}, Windows SDK {data['windows_sdk_version']}, {len(cabs)} .cab files: {path}")
+    return data
+
+
+def check(path=PINNED, log=print):
+    """what is wrong with the pin: a pinned file gone or changed in size, or the catalog no longer usable as
+    the fallback. CI runs it every week (.github/workflows/compiler.yml)"""
+    pin_data = pinned(path)
+    if not pin_data:
+        return [f"{path} does not pin the packages tools/msvc.py selects; run tools/msvc.py --pin"]
+    problems = []
+    for p in pin_data["msvc_payloads"] + pin_data["sdk_installers"] + pin_data["sdk_cabs"]:
+        for attempt in range(3):  # a dropped connection is not a missing file
+            try:
+                size = served_size(p["url"])
+                if size != p["size"]:
+                    problems.append(f"{p['fileName']}: {size} bytes at Microsoft, {p['size']} pinned")
+                break
+            except urllib.error.HTTPError as e:
+                problems.append(f"{p['fileName']}: {e}")
+                break
+            except OSError as e:
+                if attempt == 2:
+                    problems.append(f"{p['fileName']}: {e}")
+                time.sleep(5)
+    try:
+        packages, _ = manifest()
+        plan(packages)
+        now = (
+            packages[f"win11sdk_{SDK}"].get("version"),
+            packages[f"microsoft.vc.{MSVC}.{MSVC_PACKAGES[0]}"].get("version"),
+        )
+        if now != (pin_data["windows_sdk_version"], pin_data["msvc_version"]):
+            log(f"note: the catalog now has Windows SDK {now[0]} and MSVC {now[1]}; the pin still works")
+    except (DownloadError, OSError, KeyError, ValueError) as e:
+        problems.append(f"the catalog (the fallback): {e}")
+    return problems
+
+
 def unpack_vsix(path, root):
     """a .vsix is a zip; its Contents/ folder is laid out from the Visual Studio root"""
     with zipfile.ZipFile(path) as z:
@@ -179,11 +282,39 @@ def fetch(root, accept_license=False, log=print, ask=ask_in_console, progress=No
         if current(info):
             return info
         # an older selection of packages: fetch again over it (the record is replaced at the end)
-    packages, license_url = manifest()
+    pin_data = pinned()
+    packages, license_url = (None, pin_data["license"]) if pin_data else manifest()
     if not accept_license and not accepted_before and not ask(license_url):
         raise DownloadError("the license terms were not accepted; nothing was downloaded")
-    vsix, msis, sdk_payloads = plan(packages)
     root.mkdir(parents=True, exist_ok=True)
+    if pin_data:
+        try:
+            cabs = {p["fileName"]: p for p in pin_data["sdk_cabs"]}
+            unpack(root, pin_data["msvc_payloads"], pin_data["sdk_installers"], cabs, log, progress)
+        except urllib.error.HTTPError as e:
+            if e.code not in (403, 404, 410):
+                raise
+            # a pinned file Microsoft no longer serves: its current catalog, as before the pin
+            log(f"  a pinned download is gone ({e.code}, {e.url}); using Microsoft's current catalog")
+            pin_data = None
+    if not pin_data:
+        unpack(root, *plan(packages or manifest()[0]), log, progress)
+    tools = sorted((root / "VC" / "Tools" / "MSVC").glob(MSVC + ".*"))
+    if not tools or not (tools[-1] / "bin" / "Hostx64" / "x64" / "cl.exe").exists():
+        raise DownloadError("the compiler was not found after unpacking")
+    info = {
+        "msvc": tools[-1].name,
+        "windows_sdk": SDK,
+        "msvc_packages": MSVC_PACKAGES,
+        "sdk_installers": SDK_INSTALLERS,
+        "license": license_url,
+    }
+    record.write_text(json.dumps(info, indent=1) + "\n", encoding="utf-8")
+    return info
+
+
+def unpack(root, vsix, msis, cabs, log, progress):
+    """the compiler's .vsix files, and the SDK's installers with the .cab files they name, unpacked into root"""
     cache = root / "downloads"
     cache.mkdir(exist_ok=True)
     log(f"  MSVC {MSVC}: {sum(p['size'] for p in vsix) // 1_000_000} MB")
@@ -199,34 +330,32 @@ def fetch(root, accept_license=False, log=print, ask=ask_in_console, progress=No
         for i, p in enumerate(msis):
             msi = download(p, sdk_dir)
             for cab in cabs_of(msi):
-                if cab not in sdk_payloads:
+                if cab not in cabs:
                     raise DownloadError(f"{msi.name} needs {cab}, which the SDK package lacks")
-                download(sdk_payloads[cab], sdk_dir)
+                download(cabs[cab], sdk_dir)
             progress(total + total * (i + 1) // len(msis), 2 * total)
         for p in msis:
             msi = sdk_dir / file_name(p)
-            log = root / "msiexec.log"
-            done = subprocess.run(msiexec_command(msi, root, log))
-            if done.returncode:
-                raise DownloadError(f"unpacking {msi.name} failed (msiexec {done.returncode}); its log is {log}")
-            log.unlink(missing_ok=True)
+            msi_log = root / "msiexec.log"
+            unpacked = subprocess.run(msiexec_command(msi, root, msi_log))
+            if unpacked.returncode:
+                raise DownloadError(
+                    f"unpacking {msi.name} failed (msiexec {unpacked.returncode}); its log is {msi_log}"
+                )
+            msi_log.unlink(missing_ok=True)
             (root / msi.name).unlink(missing_ok=True)  # the administrative install copies the .msi too
     shutil.rmtree(cache)
-    tools = sorted((root / "VC" / "Tools" / "MSVC").glob(MSVC + ".*"))
-    if not tools or not (tools[-1] / "bin" / "Hostx64" / "x64" / "cl.exe").exists():
-        raise DownloadError("the compiler was not found after unpacking")
-    info = {
-        "msvc": tools[-1].name,
-        "windows_sdk": SDK,
-        "msvc_packages": MSVC_PACKAGES,
-        "sdk_installers": SDK_INSTALLERS,
-        "license": license_url,
-    }
-    record.write_text(json.dumps(info, indent=1) + "\n", encoding="utf-8")
-    return info
 
 
 def main(argv):
+    if argv[:1] == ["--pin"]:
+        pin()
+        return
+    if argv[:1] == ["--check"]:
+        problems = check()
+        for problem in problems:
+            print(f"error: {problem}")
+        raise SystemExit(1 if problems else 0)
     if not argv or argv[0].startswith("-"):
         raise SystemExit(__doc__)
     try:
