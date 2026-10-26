@@ -46,10 +46,19 @@ struct Overview {
     launcher_version: &'static str,
     root: String,
     warnings: Vec<String>,
+    /// C:\Games\fci-recomp, when the launcher can move itself there (see move_launcher)
+    move_to: Option<String>,
+    /// the folder this launcher was moved from, when it was started by a move
+    moved_from: Option<String>,
     source: Option<paths::Source>,
     busy: bool,
     titles: Vec<TitleStatus>,
     sync_settings: bool,
+}
+
+fn moved_from() -> Option<String> {
+    let args: Vec<String> = std::env::args().collect();
+    args.iter().position(|a| a == "--moved-from").and_then(|i| args.get(i + 1)).cloned()
 }
 
 fn built_version(install: &std::path::Path) -> Option<String> {
@@ -95,10 +104,13 @@ async fn overview(tasks: State<'_, Arc<Tasks>>, discs: State<'_, Discs>) -> Resu
             folder: install.to_string_lossy().into(),
         });
     }
+    let warnings = paths::root_warnings();
     Ok(Overview {
         launcher_version: env!("CARGO_PKG_VERSION"),
         root: paths::root().to_string_lossy().into(),
-        warnings: paths::root_warnings(),
+        move_to: paths::move_target(&warnings).map(|p| p.to_string_lossy().into()),
+        moved_from: moved_from(),
+        warnings,
         source,
         busy: tasks.busy(),
         titles: titles_out,
@@ -397,6 +409,29 @@ async fn update_launcher(app: AppHandle, tasks: State<'_, Arc<Tasks>>) -> Result
     .map_err(|e| e.to_string())?
 }
 
+/// fci-recomp copied to C:\Games\fci-recomp and started from there, for a folder that is a poor place to
+/// build (OneDrive, a long path, Program Files); this folder stays for the player to delete
+#[tauri::command]
+async fn move_launcher(app: AppHandle, tasks: State<'_, Arc<Tasks>>) -> Result<(), String> {
+    if tasks.busy() {
+        return Err("Wait for the build to end first.".into());
+    }
+    let old = paths::root();
+    tauri::async_runtime::spawn_blocking(move || {
+        let target = paths::move_target(&paths::root_warnings())
+            .ok_or_else(|| format!("{} isn't empty, or a game is built here already.", paths::SUGGESTED_ROOT))?;
+        let source = paths::current_source().ok_or("There is no fci-recomp release here to move.")?;
+        let exe = paths::copy_to(&target, &source).inspect_err(|_| {
+            let _ = std::fs::remove_dir_all(&target); // it was empty: nothing of the player's is lost
+        })?;
+        std::process::Command::new(&exe).arg("--moved-from").arg(&old).spawn().map_err(|e| e.to_string())?;
+        app.exit(0);
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// what in build\ a build makes again by itself: the recompiled C, the builds, the object cache, the
 /// toolkit, downloads left over. Only these names: anything else in the folder isn't ours to remove.
 /// Python and the downloaded compiler stay: they are tools, not a cache.
@@ -524,6 +559,7 @@ fn main() {
             settings_save,
             settings_copy,
             update_launcher,
+            move_launcher,
             build_cache,
             clear_build_cache,
             quit

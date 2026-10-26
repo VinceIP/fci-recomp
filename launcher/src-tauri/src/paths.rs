@@ -14,7 +14,27 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use crate::titles::Title;
+use crate::titles::{Title, TITLES};
+
+/// where the launcher offers to move itself when its folder is a poor place to build
+pub const SUGGESTED_ROOT: &str = r"C:\Games\fci-recomp";
+
+/// what a release zip holds beside the launcher (tests/test_package.py keeps this in step with the zip)
+pub const RELEASE_ENTRIES: [&str; 13] = [
+    "BuildEditor.cmd",
+    "BuildGame.cmd",
+    "CHANGELOG.md",
+    "LICENSE",
+    "README.md",
+    "THIRD_PARTY.md",
+    "data",
+    "fci-recomp.py",
+    "patches",
+    "re",
+    "requirements.txt",
+    "src",
+    "tools",
+];
 
 pub fn root() -> PathBuf {
     if let Some(dir) = std::env::var_os("FCI_LAUNCHER_ROOT") {
@@ -161,4 +181,80 @@ pub fn root_warnings() -> Vec<String> {
     }
     let _ = std::fs::remove_file(probe);
     found
+}
+
+/// the folder to move to, when a move is worth offering: this folder has a warning, no game is built here
+/// yet (the disc's files copied so far are copied again from the disc) and C:\Games\fci-recomp is free
+pub fn move_target(warnings: &[String]) -> Option<PathBuf> {
+    if warnings.is_empty() || TITLES.iter().any(|t| install(t).join(t.game_exe).exists()) {
+        return None;
+    }
+    let target = PathBuf::from(SUGGESTED_ROOT);
+    let free = std::fs::read_dir(&target).map(|mut d| d.next().is_none()).unwrap_or(!target.exists());
+    (free && target != root()).then_some(target)
+}
+
+fn copy_all(from: &Path, to: &Path) -> std::io::Result<()> {
+    if from.is_dir() {
+        std::fs::create_dir_all(to)?;
+        for e in std::fs::read_dir(from)? {
+            let e = e?;
+            copy_all(&e.path(), &to.join(e.file_name()))?;
+        }
+        Ok(())
+    } else {
+        std::fs::copy(from, to).map(|_| ())
+    }
+}
+
+/// the launcher, the release and the disc choices copied into target, laid out as the launcher keeps them;
+/// returns the copied launcher. This folder stays as it was. From an extracted zip only the zip's own files
+/// are copied: anything else beside the launcher (a Desktop's) isn't ours.
+pub fn copy_to(target: &Path, source: &Source) -> Result<PathBuf, String> {
+    let fail = |what: &str, e: std::io::Error| format!("copying {what} to {}: {e}", target.display());
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let to_source = target.join("source").join(&source.version);
+    std::fs::create_dir_all(&to_source).map_err(|e| fail("fci-recomp", e))?;
+    if source.path == root() {
+        for name in RELEASE_ENTRIES {
+            let from = root().join(name);
+            if from.exists() {
+                copy_all(&from, &to_source.join(name)).map_err(|e| fail(name, e))?;
+            }
+        }
+    } else {
+        copy_all(&source.path, &to_source).map_err(|e| fail("fci-recomp", e))?;
+    }
+    if state_file().exists() {
+        std::fs::copy(state_file(), target.join("launcher.json")).map_err(|e| fail("launcher.json", e))?;
+    }
+    let new_exe = target.join(exe.file_name().unwrap_or_default());
+    std::fs::copy(&exe, &new_exe).map_err(|e| fail("the launcher", e))?;
+    Ok(new_exe)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_move_copies_the_release_and_nothing_else_beside_it() {
+        let base = std::env::temp_dir().join(format!("fci-move-{}", std::process::id()));
+        let (here, target) = (base.join("OneDrive").join("Desktop"), base.join("Games"));
+        std::fs::create_dir_all(here.join("tools")).unwrap();
+        std::fs::write(here.join("fci-recomp.py"), "VERSION = \"9.9.9\"\n").unwrap();
+        std::fs::write(here.join("tools").join("events.py"), format!("PROTOCOL = {PROTOCOL}\n")).unwrap();
+        std::fs::write(here.join("launcher.json"), "{}").unwrap();
+        std::fs::write(here.join("holiday.jpg"), "a Desktop's own file").unwrap();
+        std::env::set_var("FCI_LAUNCHER_ROOT", &here);
+        let source = current_source().unwrap();
+        let exe = copy_to(&target, &source).unwrap();
+        let copied = target.join("source").join("9.9.9");
+        assert!(copied.join("fci-recomp.py").exists() && copied.join("tools").join("events.py").exists());
+        assert!(!copied.join("holiday.jpg").exists() && !copied.join("launcher.json").exists());
+        assert!(target.join("launcher.json").exists() && exe.exists());
+        std::env::set_var("FCI_LAUNCHER_ROOT", &target);
+        assert_eq!(current_source().unwrap().path, copied); // the moved launcher finds the release
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }

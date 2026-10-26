@@ -51,6 +51,12 @@ logs\
 An extracted release zip is such a folder already: `FCI Launcher.exe` is at its top, beside
 `BuildGame.cmd`, and the release itself is the source until a newer one is downloaded.
 
+When the folder is a poor place to build (OneDrive, a long path, Program Files, a temporary folder, the
+Desktop itself) and no game is built there yet, the launcher offers to move to `C:\Games\fci-recomp`,
+also before a build starts. It copies itself, the release (only the zip's own files, `RELEASE_ENTRIES`
+in `paths.rs`) and `launcher.json` there, starts from there and leaves the old folder for the player to
+delete.
+
 A release zip (`fci-recomp-<version>.zip`) placed beside the launcher is used as if it had been
 downloaded, when it is newer than what's there. That works offline, and for testing a build before
 it is released.

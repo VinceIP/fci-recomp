@@ -178,6 +178,8 @@ const titleOf = (key) => S.ov && S.ov.titles.find((t) => t.key === key);
 // ---------------------------------------------------------------- tasks
 
 async function start(request) {
+  // a build in a poor folder (OneDrive, a long path) is the most common way to fail: offer the move first
+  if (S.ov && S.ov.move_to && !S.buildHere && (request.kind === "game" || request.kind === "editor")) return moveDialog(request);
   S.lastRequest = request;
   S.result = null;
   try {
@@ -383,10 +385,41 @@ function switchTab(tab) {
 }
 
 function renderWarnings() {
-  const box = $("warnings");
-  box.replaceChildren(
-    ...(S.ov ? S.ov.warnings : []).map((w) => h("div", { class: "notice" }, w)),
+  const ov = S.ov;
+  const notes = ov ? ov.warnings.map((w) => h("div", { class: "notice" }, w)) : [];
+  if (ov && ov.move_to) {
+    notes.push(h("div", { class: "notice" }, "The launcher can move itself and fci-recomp there for you. ",
+      h("button", { class: "btn small", onclick: () => moveDialog() }, `Move to ${ov.move_to}`)));
+  }
+  if (ov && ov.moved_from) notes.push(h("div", { class: "notice" }, `fci-recomp moved here from ${ov.moved_from}. That folder isn't needed anymore; you can delete it.`));
+  $("warnings").replaceChildren(...notes);
+}
+
+// request: the build that is waiting, when the move is offered before it starts
+function moveDialog(request) {
+  const ov = S.ov;
+  modal(
+    h("h3", {}, `Move to ${ov.move_to}?`),
+    request && h("p", {}, "This folder may make the build fail:"),
+    request && h("div", { class: "warn-list" }, ov.warnings.map((w) => h("div", { class: "notice" }, w))),
+    h("p", {}, "The launcher copies itself, fci-recomp and your disc choices there and starts again from there. Anything half-built here is built again. This folder stays as it is; you can delete it afterwards."),
+    h("div", { class: "buttons" },
+      request
+        ? h("button", { class: "btn", onclick: () => { closeModal(); S.buildHere = true; start(request); } }, "Build here anyway")
+        : h("button", { class: "btn", onclick: closeModal }, "Cancel"),
+      h("button", { class: "btn primary", onclick: moveNow }, "Move"),
+    ),
   );
+}
+
+async function moveNow() {
+  closeModal();
+  toast("Moving fci-recomp…", 30000);
+  try {
+    await invoke("move_launcher");
+  } catch (e) {
+    toast(String(e), 8000);
+  }
 }
 
 // ---------------------------------------------------------------- rendering: cards

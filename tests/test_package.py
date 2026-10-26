@@ -45,3 +45,14 @@ def test_the_launcher_has_the_release_version():
     assert json.loads((tauri / "tauri.conf.json").read_text())["version"] == release
     lock = (tauri / "Cargo.lock").read_text()
     assert re.search(r'name = "fci-launcher"\nversion = "([^"]+)"', lock).group(1) == release
+
+
+def test_the_launcher_knows_what_the_zip_holds(tmp_path):
+    """the launcher's move copies only these from beside it (launcher/src-tauri/src/paths.rs RELEASE_ENTRIES)"""
+    paths_rs = (REPO / "launcher/src-tauri/src/paths.rs").read_text(encoding="utf-8")
+    listed = re.search(r"RELEASE_ENTRIES: \[&str; \d+\] = \[(.*?)\];", paths_rs, re.S).group(1)
+    assert package.main(["HEAD", "--out", str(tmp_path)]) == 0
+    (zip_path,) = tmp_path.glob("fci-recomp-*.zip")
+    with zipfile.ZipFile(zip_path) as z:
+        top = {n.split("/")[0] for n in z.namelist()}
+    assert sorted(re.findall(r'"([^"]+)"', listed)) == sorted(top)
