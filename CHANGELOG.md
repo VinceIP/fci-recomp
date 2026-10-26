@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.3] - 2026-10-26
+
+### Fixed
+
+- Fixed an issue where building without Visual Studio installed would fail with "the Windows SDK package lacks [...]", after Microsoft changed how it lists the SDK's files.
+- Fixed certain build errors not containing enough information.
+- The launcher now offers to move itself to `C:\Games\fci-recomp` when its folder is in OneDrive or is otherwise a bad place to build.
+
 ## [0.2.2] - 2026-10-26
 
 ### Added

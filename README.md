@@ -18,7 +18,7 @@ Regardless of your stance on AI in software development, it's my hope that this 
 
 ## Status
 
-**Version 0.2.2** - Story mode map editors for Instincts and Evolution are working, but have not yet been thoroughly tested end-to-end. Please continue to report crashes and issues in the Discord or Github. Enhanced visual features powered by a DirectX 12 renderer are implemented. Mouse and keyboard controls have been implemented and are customizable. Enhanced features and options are matched for both separate titles.
+**Version 0.2.3** - Story mode map editors for Instincts and Evolution are working, but have not yet been thoroughly tested end-to-end. Please continue to report crashes and issues in the Discord or Github. Enhanced visual features powered by a DirectX 12 renderer are implemented. Mouse and keyboard controls have been implemented and are customizable. Enhanced features and options are matched for both separate titles.
 
 ## Features
 
