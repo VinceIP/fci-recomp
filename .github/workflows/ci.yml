@@ -38,3 +38,22 @@ jobs:
       # the patches apply, the lifter tests pass, and the patched runtime compiles with MSVC
       - name: Tests
         run: python -m pytest -v
+
+  launcher:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: launcher/src-tauri
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tests
+        run: cargo test
+
+      - name: Build
+        run: cargo build --release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fci-launcher
+          path: launcher/src-tauri/target/release/fci-launcher.exe

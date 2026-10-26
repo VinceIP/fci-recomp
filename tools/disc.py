@@ -19,6 +19,7 @@ import struct
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import events  # noqa: E402
 import titles  # noqa: E402
 
 SECTOR = 2048
@@ -139,6 +140,56 @@ def identify(disc):
     return titles.of_digest("default.xbe", digest)
 
 
+REGIONS = {1: "North America", 2: "Japan", 4: "PAL: Europe and Australia"}
+
+
+def certificate(disc):
+    """what default.xbe's certificate says it is: {"title_id": hex, "name", "version", "region"}, or None
+    when there is no readable default.xbe"""
+    name = next((k for k in disc.files if k.lower() == "default.xbe"), None)
+    if name is None:
+        return None
+    with disc.open(name) as f:
+        head = f.read(64 * 1024)
+    if head[:4] != b"XBEH" or len(head) < 0x120:
+        return None
+    base, cert = struct.unpack_from("<I", head, 0x104)[0], struct.unpack_from("<I", head, 0x118)[0]
+    at = cert - base
+    if at < 0 or at + 0xB0 > len(head):
+        return None
+    title_id, region, version = (struct.unpack_from("<I", head, at + o)[0] for o in (0x08, 0xA0, 0xAC))
+    raw = head[at + 0x0C : at + 0x0C + 80].decode("utf-16-le", errors="replace")
+    regions = [n for bit, n in REGIONS.items() if region & bit]
+    return {
+        "title_id": f"{title_id:08X}",
+        "name": raw.split("\0")[0].strip(),
+        "version": version,
+        "region": ", ".join(regions) or f"0x{region:08X}",
+    }
+
+
+def why_unsupported(disc):
+    """why this disc is not a supported release, in a sentence for the player"""
+    cert = certificate(disc)
+    if cert is None:
+        return "its default.xbe is missing or unreadable; use a complete, unmodified dump of the disc"
+    for title in titles.TITLES.values():
+        if cert["title_id"] != title.title_id.upper():
+            continue
+        supported = manifest_of(title)["version"]
+        if cert["version"] != supported:
+            return (
+                f"it is {title.name} version {cert['version']} ({cert['region']}), and only version "
+                f"{supported} is supported for now"
+            )
+        return (
+            f"it is {title.name} version {supported}, but its default.xbe was modified (a patched XISO, "
+            "for example); use an unmodified dump of the disc"
+        )
+    named = f"{cert['name']} " if cert["name"] else ""
+    return f"it is {named}(title {cert['title_id']}), not Far Cry Instincts or Far Cry Instincts Evolution"
+
+
 def manifest_of(title):
     return json.loads((title.data / "disc.json").read_text())
 
@@ -161,6 +212,7 @@ def verify(disc, quiet=False, title=None):
         done[0] += n
         if not quiet and done[0] * 100 // total != before:
             print(f"\r  checking {done[0] * 100 // total:3d}%", end="", flush=True)
+        events.progress("disc", done[0], 2 * total, "Checking the disc's files")
 
     for name, want in expected.items():
         actual = have.get(name.lower())
@@ -184,14 +236,16 @@ def extract(disc, dst, title=None):
     skip = {s.lower() for s in manifest["not_copied"]}
     have = {k.lower(): k for k in disc.files}
     dst = Path(dst)
-    for name in manifest["files"]:
-        if name.lower() in skip:
-            continue
+    copied = [n for n in manifest["files"] if n.lower() not in skip]
+    total, done = sum(manifest["files"][n]["size"] for n in copied), 0
+    for name in copied:
         target = dst / name
         target.parent.mkdir(parents=True, exist_ok=True)
         with disc.open(have[name.lower()]) as src, open(target, "wb") as out:
             for block in iter(lambda: src.read(1 << 20), b""):
                 out.write(block)
+                done += len(block)
+                events.progress("disc", total + done, 2 * total, "Copying the game's files")
 
 
 def main():

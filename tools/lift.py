@@ -28,6 +28,7 @@ import time
 REPO = Path(__file__).resolve().parents[1]
 LIFTER_HELPER = REPO / "patches" / "lifter" / "fci_direct.py"
 sys.path.insert(0, str(REPO / "tools"))
+import events  # noqa: E402
 import titles  # noqa: E402
 
 
@@ -100,7 +101,8 @@ def run_steps(toolkit, xbe, seeds, out, log, tag=None):
             str(out / "gen"),
         ],
     ]
-    for step in steps:
+    for number, step in enumerate(steps):
+        events.progress("lift", number, len(steps), f"Recompiling to C: {step[0][6:]}", part=Path(xbe).name)
         started = time.time()
         if not tag:
             print(f"  {step[0][6:]} ...", end="", flush=True)
@@ -113,6 +115,7 @@ def run_steps(toolkit, xbe, seeds, out, log, tag=None):
             print(f" {time.time() - started:.0f} s", flush=True)
         if done.returncode:
             raise SystemExit(f"error: {step[0]} failed (exit {done.returncode}); see {log}")
+    events.progress("lift", len(steps), len(steps), part=Path(xbe).name)
 
 
 def supplement(toolkit, xbe, profile, out):

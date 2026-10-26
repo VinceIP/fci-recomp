@@ -22,6 +22,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import time
 import urllib.request
 import zipfile
 
@@ -109,9 +110,27 @@ def fetch(name, root, local=None):
     if got != dep["digest"]:
         remove_tree(partial)
         raise SystemExit(f"error: {name} at {dep['commit'][:8]} does not match its digest ({got}); not using it")
-    partial.rename(dst)
+    move_into_place(partial, dst)
     print(f"{name}: fetched {dep['commit'][:8]}, verified")
     return dst
+
+
+def move_into_place(partial, dst, seconds=10):
+    """partial renamed to dst. A program that opened the new checkout (VS Code's Git, an antivirus scan) holds
+    it for a moment and Windows refuses the rename meanwhile (#40), so it is tried again for a while."""
+    for _ in range(seconds * 4):
+        try:
+            partial.rename(dst)
+            return
+        except PermissionError:
+            time.sleep(0.25)
+    try:
+        partial.rename(dst)
+    except PermissionError as e:
+        raise SystemExit(
+            f"error: {partial} can't be renamed to {dst.name} ({e}). Another program has it open: an editor such "
+            "as VS Code with this folder open, or an antivirus scan. Close it and run the build again."
+        )
 
 
 def main():

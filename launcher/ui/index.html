@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>fci-recomp</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <button class="home" id="home" title="Games">
+        <img src="icon.png" alt="" width="26" height="26">
+        <span class="wordmark">fci-recomp</span>
+      </button>
+      <span class="version" id="version"></span>
+    </div>
+    <nav class="tabs" role="tablist">
+      <button class="tab active" data-tab="games" role="tab">Games</button>
+      <button class="tab" data-tab="settings" role="tab">Settings</button>
+      <button class="tab" data-tab="logs" role="tab">Logs</button>
+    </nav>
+    <div class="top-actions">
+      <div id="update-slot"></div>
+      <button class="btn ghost icon-only" id="menu-button" title="More" aria-label="More">
+        <svg viewBox="0 0 24 24" width="18" height="18"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <main>
+    <section class="page active" id="page-games">
+      <div id="warnings"></div>
+      <div class="games">
+        <div class="cards" id="cards"></div>
+        <aside class="side" id="side"></aside>
+      </div>
+    </section>
+
+    <section class="page" id="page-settings">
+      <div class="settings">
+        <aside class="settings-nav">
+          <div class="segmented" id="settings-title"></div>
+          <label class="sync">
+            <span class="switch"><input type="checkbox" id="sync"><span></span></span>
+            <span>Same settings for both games</span>
+          </label>
+          <button class="btn small" id="settings-copy"></button>
+          <nav id="settings-sections"></nav>
+          <div class="storage">
+            <button class="btn small" id="clear-cache" disabled>Clear build cache</button>
+            <p>Your games, settings and saves stay. The cache is rebuilt by the next build or update.</p>
+          </div>
+        </aside>
+        <div class="settings-main" id="settings-list"></div>
+      </div>
+      <footer class="savebar" id="savebar" hidden>
+        <span id="savebar-text">Unsaved changes</span>
+        <button class="btn" id="settings-discard">Discard</button>
+        <button class="btn primary" id="settings-save">Save</button>
+      </footer>
+    </section>
+
+    <section class="page" id="page-logs">
+      <div class="logs">
+        <div class="logs-head">
+          <div>
+            <h2>Build logs</h2>
+            <p class="muted">Encounter a bug? Drop in the <button class="link inline" data-link="discord">Discord</button> and let us know, or raise an Issue on <button class="link inline" data-link="issues">Github</button>. Make sure to include a relevant crash or build log.</p>
+          </div>
+          <div class="logs-actions">
+            <button class="btn" data-open="logs">Open logs folder</button>
+            <button class="btn" data-open="gamelogs:instincts">Instincts crash logs</button>
+            <button class="btn" data-open="gamelogs:evolution">Evolution crash logs</button>
+          </div>
+        </div>
+        <div id="logs-list"></div>
+      </div>
+    </section>
+  </main>
+
+  <div class="drop" id="drop" hidden>
+    <div class="drop-box">
+      <svg viewBox="0 0 24 24" width="44" height="44"><path d="M12 3v12m0 0-4.5-4.5M12 15l4.5-4.5M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <strong>Drop your disc image</strong>
+      <span>an ISO of Far Cry Instincts or Evolution, or the folder with the disc's files</span>
+    </div>
+  </div>
+  <div id="popover" class="popover" hidden></div>
+  <div id="modal" class="modal-wrap" hidden></div>
+  <div id="toast" class="toast" hidden></div>
+  <script src="app.js"></script>
+</body>
+</html>
