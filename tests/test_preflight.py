@@ -74,6 +74,47 @@ def test_long_onedrive_and_unwritable_folders(monkeypatch, tmp_path):
     assert level == "Error" and "write permissions" in text
 
 
+def test_a_new_folder_is_tested_itself_not_its_parent(monkeypatch, tmp_path):
+    # a drive root normal users can't write to, with a new folder in it (#40): the folder is made and tested
+    real = Path.write_bytes
+
+    def only_below(self, data):
+        if self.parent == tmp_path:
+            raise PermissionError("denied")
+        return real(self, data)
+
+    monkeypatch.setattr(Path, "write_bytes", only_below)
+    assert "Error" not in levels(preflight.check_folder(tmp_path / "fci-build", "build"))
+    assert (tmp_path / "fci-build").is_dir()
+
+
+def test_a_held_checkout_is_moved_once_it_is_let_go(monkeypatch, tmp_path):
+    # VS Code's Git opens the new checkout and holds it for a moment (#40)
+    partial, dst = tmp_path / "dep.partial", tmp_path / "dep"
+    partial.mkdir()
+    real, tries = Path.rename, []
+
+    def held(self, target):
+        tries.append(1)
+        if len(tries) < 3:
+            raise PermissionError("Access is denied")
+        return real(self, target)
+
+    monkeypatch.setattr(Path, "rename", held)
+    monkeypatch.setattr(deps.time, "sleep", lambda s: None)
+    deps.move_into_place(partial, dst)
+    assert dst.is_dir() and not partial.exists()
+
+    # held for good: the error says what holds it
+    def refuse(self, target):
+        raise PermissionError("denied")
+
+    partial.mkdir()
+    monkeypatch.setattr(Path, "rename", refuse)
+    with pytest.raises(SystemExit, match="VS Code"):
+        deps.move_into_place(partial, tmp_path / "other", seconds=1)
+
+
 def test_report_stops_only_on_errors(capsys):
     assert preflight.report([("Warning", "a")])
     assert not preflight.report([("Warning", "a"), ("Error", "b")])

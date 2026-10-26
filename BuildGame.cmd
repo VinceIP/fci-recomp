@@ -20,7 +20,8 @@ set "DISC=%DISC:"=%"
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\bootstrap.ps1" setup "%DISC%"
 if errorlevel 1 (
     echo.
-    echo Build error. Check dependencies, and run BuildGame.cmd again to resume.
+    echo The build stopped. The reason and what to do are above.
+    echo Run BuildGame.cmd again to resume where it stopped.
 ) else (
     echo.
     echo Build complete. The game is in the folder named after it, beside BuildGame.cmd.

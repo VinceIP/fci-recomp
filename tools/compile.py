@@ -631,6 +631,7 @@ def cached_objects(cache, sources, gen, inputs, flags, obj, record):
         key = h.hexdigest()
         if (cache / (key + ".obj")).exists():
             shutil.copy2(cache / (key + ".obj"), obj / (source.stem + ".obj"))
+            os.utime(cache / (key + ".obj"))  # used by this build: kept when the cache is pruned
             record["cached"].append(source.name)
         else:
             missing.append(source)

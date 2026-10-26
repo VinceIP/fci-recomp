@@ -1,0 +1,15 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "FCI Launcher",
+  "version": "0.2.3",
+  "identifier": "io.github.vinceip.fci-recomp.launcher",
+  "build": { "frontendDist": "../ui" },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      { "title": "fci-recomp", "width": 1120, "height": 720, "minWidth": 960, "minHeight": 640, "dragDropEnabled": true }
+    ],
+    "security": { "csp": "default-src 'self'; img-src 'self' data: asset: http://asset.localhost; style-src 'self' 'unsafe-inline'; connect-src ipc: http://ipc.localhost" }
+  },
+  "bundle": { "active": false, "icon": ["icons/icon.ico", "icons/icon.png"] }
+}

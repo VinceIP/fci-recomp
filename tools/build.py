@@ -32,6 +32,7 @@ import time
 REPO = Path(__file__).resolve().parents[1]
 TOOLS = REPO / "tools"
 sys.path.insert(0, str(TOOLS))
+import events  # noqa: E402
 import image_profile  # noqa: E402
 import patches  # noqa: E402
 import preflight  # noqa: E402
@@ -99,7 +100,10 @@ def compile_all(case, jobs, log, obj_cache=None):
         with open(log, "a", encoding="utf-8") as f:
             f.write(f"== {' '.join(args)}\n{done.stdout}{done.stderr}\n")
         if done.returncode:
-            raise SystemExit(f"error: {' '.join(args)} failed; see {log}")
+            raise SystemExit(
+                f"error: {' '.join(args)} failed; see {log}\n"
+                "Run the build again; if it stops the same way, report it on Discord or GitHub with that log."
+            )
 
     def step(*args):
         started = time.time()
@@ -123,6 +127,7 @@ def compile_all(case, jobs, log, obj_cache=None):
             future.result()
             finished += 1
             percent = finished * 100 // files if console else finished * 10 // files * 10
+            events.progress("build", finished, files, f"Compiling ({finished} of {files} files)", part=case.parent.name)
             if percent != shown:
                 print(
                     f"{chr(13) if console else ''}  the game's code: {percent}% ({finished} of {files} files)",

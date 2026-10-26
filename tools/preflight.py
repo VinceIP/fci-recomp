@@ -124,16 +124,18 @@ def check_folder(path, what):
                 )
             )
             break
+    # the folder itself, made now (the build makes it anyway): a new folder at a drive root is writable
+    # where the root itself is not (#40)
     try:
-        base = existing(path)
-        probe = base / ".fci-write-test"
+        path.mkdir(parents=True, exist_ok=True)
+        probe = path / ".fci-write-test"
         probe.write_bytes(b"")
         probe.unlink()
     except OSError:
         found.append(
             (
                 "Error",
-                f"Invalid write permissions in {base}.",
+                f"Invalid write permissions in {path}.",
             )
         )
     return found
@@ -167,8 +169,11 @@ def checks(work, install, parts=1, download_compiler=False):
 
 def report(found):
     """print the findings; True when the build can go on"""
+    import events
+
     for level, text in found:
         print(f"{level}: {text}")
+        events.emit(level.lower(), text=text)
     return not any(level == "Error" for level, _ in found)
 
 

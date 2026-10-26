@@ -1,0 +1,13 @@
+{
+ "comment": "The private Python that BuildGame.cmd (tools/bootstrap.ps1) and the launcher make in build/python: the Python Software Foundation's NuGet package (a plain copy of Python) and capstone's wheel, with their published digests. sha512 is base64, as NuGet lists it.",
+ "python": {
+  "version": "3.13.16",
+  "url": "https://api.nuget.org/v3-flatcontainer/python/3.13.16/python.3.13.16.nupkg",
+  "sha512": "TGEhuRTpWtRifDR4r/GEhmg/cGMqtwB4kOCkt1QhXnCmdDE3Dict3iLJI1xrsNSRbXGyCwLEhe6qa5Rd2s376w=="
+ },
+ "capstone": {
+  "version": "5.0.7",
+  "url": "https://files.pythonhosted.org/packages/70/39/2138d890a8e827636b9de9924fbc8527fe83e38b6d26605b30ac55e30ebe/capstone-5.0.7-py3-none-win_amd64.whl",
+  "sha256": "4ab8bcb7da8f221ff45926ca168ca33e76f7237d06fbf3c10780002faa2670e1"
+ }
+}

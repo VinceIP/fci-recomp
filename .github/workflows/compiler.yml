@@ -1,0 +1,31 @@
+name: Compiler download
+
+# Microsoft can change its downloads at any time; this finds out before a player does. A failed
+# scheduled run is emailed to whoever last changed this file.
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+jobs:
+  download:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Every pinned file still served, the catalog still usable
+        run: python -B tools/msvc.py --check
+
+      - name: Download and unpack, as a build without Visual Studio does
+        run: python -B tools/msvc.py "${{ runner.temp }}/toolchain" --accept-license
+
+      - name: The download builds a program
+        env:
+          FCI_DOWNLOADED_TOOLCHAIN: ${{ runner.temp }}/toolchain
+        run: |
+          python -m pip install pytest
+          python -m pytest -v tests/test_msvc.py -k downloaded

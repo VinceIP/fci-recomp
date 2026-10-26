@@ -14,18 +14,19 @@ def payload(name):
     return {"fileName": name, "url": "https://example.invalid/" + name, "sha256": "0" * 64, "size": 1}
 
 
-def packages(sdk_files):
+def packages(sdk_files, sep="\\"):
     out = {f"microsoft.vc.{msvc.MSVC}.{n}": {"payloads": [payload(f"{n}.vsix")]} for n in msvc.MSVC_PACKAGES}
-    out[f"win11sdk_{msvc.SDK}"] = {"payloads": [payload("Installers\\" + f) for f in sdk_files]}
+    out[f"win11sdk_{msvc.SDK}"] = {"payloads": [payload("Installers" + sep + f) for f in sdk_files]}
     return out
 
 
 def test_plan_picks_the_pinned_packages():
     cab = "0123456789abcdef0123456789abcdef.cab"
-    vsix, msis, by_name = msvc.plan(packages(msvc.SDK_INSTALLERS + [cab, "Orca-x86_en-us.msi"]))
-    assert [p["fileName"] for p in vsix] == [f"{n}.vsix" for n in msvc.MSVC_PACKAGES]
-    assert [p["fileName"].split("\\")[-1] for p in msis] == msvc.SDK_INSTALLERS
-    assert cab in by_name
+    for sep in ("\\", "/"):  # the manifest has used both
+        vsix, msis, by_name = msvc.plan(packages(msvc.SDK_INSTALLERS + [cab, "Orca-x86_en-us.msi"], sep))
+        assert [p["fileName"] for p in vsix] == [f"{n}.vsix" for n in msvc.MSVC_PACKAGES]
+        assert [msvc.file_name(p) for p in msis] == msvc.SDK_INSTALLERS
+        assert cab in by_name
 
 
 def test_plan_names_what_is_missing():
@@ -76,3 +77,71 @@ def test_msiexec_quotes_each_path_its_own_way(tmp_path):
     cmd = msvc.msiexec_command(root / "a b.msi", root, root / "msiexec.log")
     assert cmd == f'msiexec.exe /a "{root / "a b.msi"}" /qn /l*v "{root / "msiexec.log"}" TARGETDIR="{root}"'
     assert '"TARGETDIR=' not in cmd  # the form that opens msiexec's usage window
+
+
+def test_the_pin_is_for_these_packages():
+    pin = msvc.pinned()
+    assert pin, "data/msvc.json pins other packages than tools/msvc.py selects: run tools/msvc.py --pin"
+    assert [p["fileName"] for p in pin["sdk_installers"]] == msvc.SDK_INSTALLERS
+    for p in pin["msvc_payloads"] + pin["sdk_installers"] + pin["sdk_cabs"]:
+        assert p["url"].startswith("https://download.visualstudio.microsoft.com/")
+        assert len(p["sha256"]) == 64 and p["size"] > 0
+    assert all(len(p["fileName"]) == 36 and p["fileName"].endswith(".cab") for p in pin["sdk_cabs"])
+
+
+def fake_unpack(calls, fail=None):
+    def unpack(root, vsix, msis, cabs, log, progress):
+        calls.append((vsix, msis, cabs))
+        if fail and len(calls) == 1:
+            raise fail
+        (root / f"VC/Tools/MSVC/{msvc.MSVC}.1/bin/Hostx64/x64").mkdir(parents=True, exist_ok=True)
+        (root / f"VC/Tools/MSVC/{msvc.MSVC}.1/bin/Hostx64/x64/cl.exe").write_bytes(b"")
+
+    return unpack
+
+
+def test_fetch_takes_the_pin_without_reading_the_catalog(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(msvc, "manifest", lambda: (_ for _ in ()).throw(AssertionError("catalog read")))
+    monkeypatch.setattr(msvc, "unpack", fake_unpack(calls))
+    info = msvc.fetch(tmp_path, accept_license=True, log=lambda *a: None)
+    pin = msvc.pinned()
+    assert calls == [(pin["msvc_payloads"], pin["sdk_installers"], {p["fileName"]: p for p in pin["sdk_cabs"]})]
+    assert info["license"] == pin["license"] and info["msvc"] == msvc.MSVC + ".1"
+
+
+def test_fetch_falls_back_to_the_catalog_when_a_pinned_file_is_gone(tmp_path, monkeypatch):
+    import urllib.error
+
+    calls = []
+    gone = urllib.error.HTTPError("https://download.visualstudio.microsoft.com/x", 404, "Not Found", {}, None)
+    catalog = packages(msvc.SDK_INSTALLERS, "/")
+    monkeypatch.setattr(msvc, "manifest", lambda: (catalog, "https://example.invalid/license"))
+    monkeypatch.setattr(msvc, "unpack", fake_unpack(calls, fail=gone))
+    msvc.fetch(tmp_path, accept_license=True, log=lambda *a: None)
+    assert len(calls) == 2 and calls[1] == msvc.plan(catalog)
+
+
+def test_the_downloaded_toolchain_builds_a_program(tmp_path):
+    """the weekly compiler workflow: the headers and libraries the game's runtime uses, from a real download"""
+    import os
+    import subprocess
+
+    import pytest
+
+    folder = os.environ.get("FCI_DOWNLOADED_TOOLCHAIN")
+    if not folder:
+        pytest.skip("set FCI_DOWNLOADED_TOOLCHAIN to a tools/msvc.py download")
+    tc = toolchain.downloaded(Path(folder))
+    assert tc, f"no finished download in {folder}"
+    (tmp_path / "t.cpp").write_text(
+        "#include <windows.h>\n#include <windowsx.h>\n#include <d3d12.h>\n#include <dxgi1_6.h>\n"
+        "#include <xaudio2.h>\n#include <wrl/client.h>\n#include <stdio.h>\n"
+        "int main() { Microsoft::WRL::ComPtr<IDXGIFactory4> f;"
+        ' printf("%d\\n", SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&f)))); return 0; }\n'
+    )
+    env = dict(os.environ, INCLUDE=";".join(tc["include"] + [tc["winrt"]]), LIB=";".join(tc["lib"]))
+    argv = [tc["cl"], "/nologo", "/EHsc", "/MT", "/O2", "t.cpp", "d3d12.lib", "dxgi.lib", "xaudio2.lib", "ole32.lib"]
+    built = subprocess.run(argv, cwd=tmp_path, env=env, capture_output=True, text=True)
+    assert built.returncode == 0, built.stdout + built.stderr
+    assert subprocess.run([str(tmp_path / "t.exe")], capture_output=True).returncode == 0
