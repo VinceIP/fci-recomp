@@ -1,0 +1,170 @@
+Subject: Pads follow the host's controllers
+
+The emulated root hub plugged pads only at startup, as many as RECOMP_USB_PADS (default 1), so a
+second controller never reached the game. Pad 1 is still always present (it carries the keyboard and
+mouse); pads 2-4 now arrive when host XInput pad n connects and leave when it disconnects, one change
+at a time once every present pad is configured, so the driver enumerates each in turn. A leaving pad
+clears its port's connect and enable bits, raises the connect change and goes back to the default
+state; a transfer to an address no pad holds answers DEVICE NOT RESPONDING, as on hardware.
+RECOMP_USB_PADS still keeps the first n pads present for scripted tests.
+
+---
+diff --git a/src/usb/ohci.c b/src/usb/ohci.c
+--- a/src/usb/ohci.c
++++ b/src/usb/ohci.c
+@@ -392,6 +392,7 @@
+ #define TD_DP_IN       2u
+ #define TD_CC_NOERROR  0u
+ #define TD_CC_STALL    4u
++#define TD_CC_DEVICENOTRESPONDING 5u
+ #define TD_CC_DATAUNDERRUN 9u
+ #define TD_ROUNDING    (1u << 18)   /* bufferRounding: a short packet is fine */
+ 
+@@ -418,21 +419,22 @@
+ #define g_ctrl_len  g_ctrl_len_[pad]
+ #define g_ctrl_sent g_ctrl_sent_[pad]
+ 
+-/* Pads plugged in so far, in port order. */
+-static int s_plugged_pads;
++/* Pads on the bus now. Pad 0 never leaves: the keyboard and mouse are player 1. */
++static int s_pad_present[USB_GAMEPAD_MAX];
+ 
+ /* Which pad an endpoint descriptor talks to: by its function address, and
+  * address 0 -- the default address a device answers before SET_ADDRESS --
+- * is the plugged pad that has not been given one yet. Pads are plugged one
+- * at a time, each after the previous is configured, so there is never more
++ * is the plugged pad that has not been given one yet. Pads arrive one at a
++ * time, each once every present pad is configured, so there is never more
+  * than one at address 0. */
+ static int ohci_pad_for(uint32_t ed0)
+ {
+     uint32_t fa = ed0 & 0x7Fu;
+     int d;
+-    for (d = 0; d < s_plugged_pads; d++)
+-        if (fa ? usb_gamepad_address(d) == fa : usb_gamepad_address(d) == 0)
+-            return d;
++    for (d = 0; d < USB_GAMEPAD_MAX; d++)
++        if (s_pad_present[d])
++            if (fa ? usb_gamepad_address(d) == fa : usb_gamepad_address(d) == 0)
++                return d;
+     return -1;
+ }
+ 
+@@ -542,8 +544,10 @@
+     int      moved = 0;
+     int      pad = ohci_pad_for(ed0);
+ 
++    /* An addressed device that is not there (a pad unplugged) does not answer;
++     * address 0 after SET_ADDRESS is the status stage of that request. */
+     if (pad < 0)
+-        return TD_CC_NOERROR;   /* no device at that address: ignore */
++        return (ed0 & 0x7Fu) ? TD_CC_DEVICENOTRESPONDING : TD_CC_NOERROR;
+ 
+     if (s_trace) {
+         static unsigned n;
+@@ -1065,28 +1069,45 @@
+             hc->reg[(HcRhPortStatus1 + port * 4) / 4] |= PORT_CCS | PORT_CSC;
+             hc->reg[HcInterruptStatus / 4] |= INTR_RHSC;
+             plugged = 1;
+-            s_plugged_pads = 1;
++            s_pad_present[0] = 1;
+             first_port = port;
+             fprintf(stderr, "  [OHCI0] operational after %u ms; device "
+                             "arriving on port 1\n", waited * 20);
+             fflush(stderr);
+         }
+ 
+-        /* More pads, one at a time: each arrives after the previous one is
+-         * configured, on the next port, so the driver enumerates them in
+-         * turn and there is only ever one device at the default address.
+-         * RECOMP_USB_PADS sets how many (1-4). */
+-        if (plugged && s_plugged_pads < s_npads
+-            && usb_gamepad_configured(s_plugged_pads - 1)) {
+-            if (++settle > 50) {                 /* ~1 s after the last */
+-                unsigned port = (first_port + (unsigned)s_plugged_pads) % s_ndp;
+-                hc->reg[(HcRhPortStatus1 + port * 4) / 4] |= PORT_CCS | PORT_CSC;
+-                hc->reg[HcInterruptStatus / 4] |= INTR_RHSC;
+-                fprintf(stderr, "  [OHCI0] pad %d arriving on port %u%c",
+-                        s_plugged_pads + 1, port + 1, 10);
+-                fflush(stderr);
+-                s_plugged_pads++;
++        /* The other pads follow the host's controllers, one change at a time
++         * and only once every present pad is configured, so the driver
++         * enumerates each in turn. RECOMP_USB_PADS keeps the first n present. */
++        if (plugged) {
++            int busy = 0, d;
++            for (d = 0; d < USB_GAMEPAD_MAX; d++)
++                busy |= s_pad_present[d] && !usb_gamepad_configured(d);
++            if (busy) {
++                settle = 0;
++            } else if (++settle > 50) {          /* ~1 s after the last */
+                 settle = 0;
++                for (d = 1; d < USB_GAMEPAD_MAX && (unsigned)d < s_ndp; d++) {
++                    int want = d < s_npads || usb_gamepad_host_connected(d);
++                    unsigned port = (first_port + (unsigned)d) % s_ndp;
++                    uint32_t *ps = &hc->reg[(HcRhPortStatus1 + port * 4) / 4];
++                    if (want == s_pad_present[d])
++                        continue;
++                    s_pad_present[d] = want;
++                    if (want) {
++                        *ps |= PORT_CCS | PORT_CSC;
++                    } else {
++                        *ps = (*ps & ~(PORT_CCS | PORT_PES)) | PORT_CSC;
++                        usb_gamepad_unplug(d);
++                        g_ctrl_len_[d] = -1;
++                        g_ctrl_sent_[d] = 0;
++                    }
++                    hc->reg[HcInterruptStatus / 4] |= INTR_RHSC;
++                    fprintf(stderr, "  [OHCI0] pad %d %s port %u%c", d + 1,
++                            want ? "arriving on" : "leaving", port + 1, 10);
++                    fflush(stderr);
++                    break;
++                }
+             }
+         }
+ 
+diff --git a/src/usb/usb_gamepad.c b/src/usb/usb_gamepad.c
+--- a/src/usb/usb_gamepad.c
++++ b/src/usb/usb_gamepad.c
+@@ -56,6 +56,11 @@
+ 
+ uint8_t usb_gamepad_address(int pad) { return s_address[pad & 3]; }
+ int usb_gamepad_configured(int pad) { return s_configuration[pad & 3] != 0; }
++void usb_gamepad_unplug(int pad)
++{
++    s_address[pad & 3] = 0;
++    s_configuration[pad & 3] = 0;
++}
+ 
+ /* ---- control transfers ------------------------------------------------- */
+ 
+@@ -576,6 +581,12 @@
+  * host's input recorder (fci_record.c in fci-recomp). */
+ extern void fci_pad_report(int pad, uint8_t *report);
+ 
++int usb_gamepad_host_connected(int pad)
++{
++    XBOX_INPUT_STATE state;
++    return pad == 0 || xbox_InputGetState((DWORD)pad, &state) == 0;
++}
++
+ int usb_gamepad_report(int pad, uint8_t *out, int max)
+ {
+     XBOX_INPUT_STATE state;
+diff --git a/src/usb/usb_gamepad.h b/src/usb/usb_gamepad.h
+--- a/src/usb/usb_gamepad.h
++++ b/src/usb/usb_gamepad.h
+@@ -41,6 +41,13 @@
+ uint8_t usb_gamepad_address(int pad);
+ int usb_gamepad_configured(int pad);
+ 
++/* Pad `pad` left the bus: it is back in the default state, unaddressed and
++ * unconfigured, for whenever it is plugged in again. */
++void usb_gamepad_unplug(int pad);
++
++/* Whether host pad `pad` is connected (pad 0, the keyboard and mouse's, always is). */
++int usb_gamepad_host_connected(int pad);
++
+ /* Up to four pads, one per Xbox controller port. Pad n is driven by host
+  * XInput pad n and by pad-script steps prefixed "p<n+1>-". */
+ #define USB_GAMEPAD_MAX 4
