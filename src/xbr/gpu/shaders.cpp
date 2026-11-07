@@ -78,7 +78,9 @@ int mac_arl(float v) { return (int)floor(v + 1e-3); }
 float magclamp(float v) { float m = clamp(abs(v), 5.42101e-20, 1.84467e+19); return v < 0 ? -m : m; }
 float4 ilu_rcp(float v) { return (1.0 / v).xxxx; }
 float4 ilu_rcc(float v) { return magclamp(1.0 / v).xxxx; }
-float4 ilu_rsq(float v) { return v == 0 ? (1.#INF).xxxx : (rsqrt(abs(v))).xxxx; }
+// FCI: infinity by its bits: 1.#INF is fxc-only, and Wine's HLSL compiler (Proton) rejects the shader
+static const float kInf = asfloat(0x7f800000);
+float4 ilu_rsq(float v) { return v == 0 ? kInf.xxxx : (rsqrt(abs(v))).xxxx; }
 // 2^floor(v), fraction, 2^v
 float4 ilu_exp(float v) {
     float whole = floor(v);
@@ -87,7 +89,7 @@ float4 ilu_exp(float v) {
 // exponent, mantissa, log2 of |v|; zero logs to negative infinity
 float4 ilu_log(float v) {
     float mag = abs(v), l2 = log2(mag), ex = floor(l2);
-    return mag == 0 ? float4(-1.#INF, 1, -1.#INF, 1) : float4(ex, mag / exp2(ex), l2, 1);
+    return mag == 0 ? float4(-kInf, 1, -kInf, 1) : float4(ex, mag / exp2(ex), l2, 1);
 }
 // power clamped to 128 less 1/256
 float4 ilu_lit(float4 s) {
@@ -479,7 +481,11 @@ float3 sbyte(float3 u, float lo, float hi, float d) { float3 b = u * 255; return
 float2 sbump(Texture2D t, SamplerState s, float2 uv) {
     uint w, h, n;
     t.GetDimensions(0, w, h, n);
-    uint m = (uint)clamp(round(t.CalculateLevelOfDetail(s, uv)), 0, (float)n - 1);
+    // FCI: the console's isotropic mip from the uv derivatives, the same on every driver (CalculateLevelOfDetail
+    // followed the forced anisotropy, and Wine's HLSL compiler lacks it)
+    float2 dx = ddx(uv * float2(w, h)), dy = ddy(uv * float2(w, h));
+    float lod = 0.5 * log2(max(dot(dx, dx), dot(dy, dy)));
+    uint m = (uint)clamp(round(lod), 0, (float)n - 1);
     int2 sz = int2(max(w >> m, 1u), max(h >> m, 1u));
     float2 p = uv * sz - 0.5, f = frac(p);
     int2 b = (int2)floor(p);
