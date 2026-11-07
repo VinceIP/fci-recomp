@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.2.4] - 2026-11-07
+
+### Added
+
+- Retooled the build process to use a bundled clang/mingw compiler, Python, and recompiler toolkit, eliminating the requirements for heavy Visual Studio and Windows SDK downloads.
+- Builds are much faster. Compiling now takes a couple of minutes per game instead of about ten, and recompiling to C takes about half as long.
+- Clear cache in the launcher now removes the Python and Microsoft compiler downloaded by earlier versions, freeing about 2 GB.
+- Up to 4 controllers are now supported and detected automatically when connected, enabling local split screen multiplayer.
+- Added experimental Steam Deck support. Build on a PC, copy the game to the Deck, and run it with Proton 10 or newer. See the README.
+
+### Fixed
+
+- Fixed an issue where some players in split screen multiplayer rendered incorrectly (#16). 3- and 4-player split screen now draw every view properly.
+- Fixed a black screen in 3D and a map editor crash when running under Proton.
+- Fixed builds failing with older Windows SDKs ("ID3D12InfoQueue1 undeclared", #49), and other errors caused by the Visual Studio, SDK, or Git requirements (#22, #25, #40).
+
+Built against xboxrecomp 193e2995 and Xbox XBE Recomp 65e959d4, with llvm-mingw 20261006 (LLVM 23.1.3).
+Supported discs: Far Cry Instincts title 55530008, version 1 (`data/disc.json`); Far Cry Instincts
+Evolution title 55530060, version 3 (`data/evolution/disc.json`).
+
 ## [0.2.3] - 2026-10-26
 
 ### Fixed
