@@ -432,10 +432,10 @@ async fn move_launcher(app: AppHandle, tasks: State<'_, Arc<Tasks>>) -> Result<(
     .map_err(|e| e.to_string())?
 }
 
-/// what in build\ a build makes again by itself: the recompiled C, the builds, the object cache, the
-/// toolkit, downloads left over. Only these names: anything else in the folder isn't ours to remove.
-/// Python and the downloaded compiler stay: they are tools, not a cache.
-const CACHE_IN_WORK: [&str; 6] = ["lift", "build", "objects", "deps", "downloads", "toolchain/downloads"];
+/// what in build\ a build makes again by itself: the recompiled C, the builds, the object cache, downloads
+/// left over, and what releases before 0.2.3 kept there (the toolkit, Python, Microsoft's compiler) and no
+/// longer use. Only these names: anything else in the folder isn't ours to remove.
+const CACHE_IN_WORK: [&str; 7] = ["lift", "build", "objects", "deps", "downloads", "toolchain", "python"];
 
 fn cache_entries() -> Vec<PathBuf> {
     CACHE_IN_WORK.iter().map(|name| paths::work().join(name)).filter(|p| p.exists()).collect()

@@ -19,20 +19,15 @@
                FarCryInstincts or FarCryEvolution, in this folder)
   --title      for editor without a disc: which game, when both are set up here
   --editor     build the map editor too
-  --work       where the toolkit, the compiler, the generated C and the build go (default: build/ in
-               this folder); about 10 GB per game, and it can be deleted afterwards. Both games share the
-               compiler and the toolkit.
-  --jobs       compilers at once (default: by the processor's cores and the memory, about 2 GB each)
-  --accept-msvc-license   accept Microsoft's Build Tools license terms without asking (only used when
-               Visual Studio is not installed and its compiler is downloaded)
-  --download-compiler     download Microsoft's compiler even when Visual Studio is installed (the
-               pinned version this project is checked with)
+  --work       where the generated C and the build go (default: build/ in this folder); about 1 GB per
+               part (the game, the editor), and it can be deleted afterwards
+  --jobs       compilers at once (default: by the processor's cores and the memory)
   --events     also print progress as JSON lines for the launcher (tools/events.py)
 
 Needs Windows 10/11 x64 and Python 3.11+ with the packages in requirements.txt (BuildGame.cmd provides
-both). Visual Studio is used when it is installed with "Desktop development with C++"; otherwise
-Microsoft's compiler and the Windows SDK are downloaded into the work folder (tools/msvc.py). Run it
-again to resume after an interruption: finished steps are kept.
+both). The release carries everything else: the compiler (llvm-mingw, toolchain/, tools/toolchain.py) and
+the recompiler toolkit (deps/, tools/deps.py), so a build downloads nothing. A git checkout downloads them
+once. Run it again to resume after an interruption: finished steps are kept.
 """
 
 import argparse
@@ -55,8 +50,7 @@ IMAGES = {"game": "default.xbe", "editor": "ige.xbe"}
 # the steps of a build, and roughly how much of its time each takes (for the launcher's progress bar)
 STEPS = {
     "disc": ("Checking and copying the disc's files", 8),
-    "compiler": ("Finding the compiler", 2),
-    "toolkit": ("Fetching the recompiler toolkit", 2),
+    "tools": ("Checking the compiler and the recompiler toolkit", 1),
     "lift": ("Recompiling the game's code to C", 45),
     "build": ("Building", 43),
 }
@@ -93,10 +87,6 @@ def check_python():
 NETWORK_HINT = (
     "Check the internet connection; a proxy, firewall or antivirus can also block the download. Run it again to resume."
 )
-COMPILER_HINT = (
-    'Installing Visual Studio Build Tools with "Desktop development with C++" also works '
-    "(https://visualstudio.microsoft.com/downloads/); the build then uses it instead of the download."
-)
 LOCKED_HINT = (
     "Another program had the file open: OneDrive, an antivirus or an open editor. Close it, or move fci-recomp "
     "outside OneDrive to a folder such as C:\\Games\\fci-recomp, then run the build again."
@@ -115,48 +105,34 @@ def what_to_do(e):
     return REPORT_HINT
 
 
-def preflight(work, install, parts, download_compiler):
+def preflight(work, install, parts):
     """what this PC lacks, said before anything starts; stops only on what the build cannot get past"""
     import preflight as checks
 
-    if not checks.report(checks.checks(work, install, parts, download_compiler)):
+    if not checks.report(checks.checks(work, install, parts)):
         raise SystemExit(1)
 
 
-def find_toolchain(work, accept_license, download=False):
-    """the installed Visual Studio, or Microsoft's compiler downloaded into <work>/toolchain"""
-    import msvc
+def find_tools(work):
+    """the compiler and the toolkit: the release's own, or downloaded once into a git checkout"""
+    import deps
     import toolchain
 
-    folder = work / "toolchain"
-
-    def ask(license_url):
-        """with the launcher, it asks: say so and stop; it starts the build again with --accept-msvc-license"""
-        if not events.enabled:
-            return msvc.ask_in_console(license_url)
-        events.emit("license", url=license_url)
-        raise SystemExit(3)
-
     try:
-        tc = toolchain.downloaded(folder) if download else toolchain.discover(folder)
-        if not tc:
-            raise toolchain.ToolchainError("not downloaded yet")
-    except toolchain.ToolchainError:
-        print("Downloading Microsoft's compiler and the Windows SDK")  # why: the check at the start said
-        try:
-            msvc.fetch(
-                folder,
-                accept_license,
-                ask=ask,
-                progress=lambda done, total: events.progress("compiler", done, total, "Downloading the compiler"),
-            )
-        except msvc.DownloadError as e:
-            raise SystemExit(f"error: {e}\n{COMPILER_HINT}")
-        except OSError as e:  # urllib's errors too
-            raise SystemExit(f"error: downloading the compiler failed ({e}). {NETWORK_HINT}")
-        tc = toolchain.downloaded(folder)
-    print(f"Compiler: MSVC {tc['msvc']}, Windows SDK {tc['windows_sdk']}")
-    return tc
+        found = deps.bundled()
+        if found is None:
+            for name in deps.DEPS:
+                deps.fetch(name, work / "deps")
+            found = work / "deps"
+        if not (toolchain.REPO / "toolchain").exists():
+            toolchain.fetch()
+        tc = toolchain.discover()
+    except (deps.DepsError, toolchain.ToolchainError) as e:
+        raise SystemExit(f"error: {e}")
+    except (OSError, subprocess.CalledProcessError) as e:  # network, git and unpacking errors
+        raise SystemExit(f"error: downloading the compiler or the toolkit failed ({e}). {NETWORK_HINT}")
+    print(f"Compiler: {tc['release']}")
+    return tc, found
 
 
 def repository_commit():
@@ -203,7 +179,7 @@ def copy_game(source, title, game):
     partial.rename(game)
 
 
-def translate(parts, title, install, work):
+def translate(parts, title, install, work, deps_root):
     """lift the game and/or the editor to C; two lifts run side by side (each is one process). A lift
     made from the same inputs earlier is kept; one from older inputs (an updated repository) is redone."""
     from concurrent.futures import ThreadPoolExecutor
@@ -224,14 +200,14 @@ def translate(parts, title, install, work):
     with ThreadPoolExecutor(max(1, len(todo))) as pool:
         for f in [
             pool.submit(
-                lift.lift, image, install / "game" / image, work / "deps" / "xboxrecomp", out, image if tag else None
+                lift.lift, image, install / "game" / image, deps_root / "xboxrecomp", out, image if tag else None
             )
             for image, out in todo
         ]:
             f.result()
 
 
-def compile_part(part, title, install, work, jobs, tc):
+def compile_part(part, title, install, work, jobs, tc, deps_root):
     """build the game or the editor from its lift, then install its executable"""
     import build
 
@@ -247,7 +223,7 @@ def compile_part(part, title, install, work, jobs, tc):
         # changes only the host code then recompiles only that); the cache keeps what this build used
         cache = parts_dir(work, title, "objects", image)
         started = time.time() - 1
-        build.build(image, install / "game" / image, lifted, work / "deps", built, jobs, tc, obj_cache=cache)
+        build.build(image, install / "game" / image, lifted, deps_root, built, jobs, tc, obj_cache=cache)
         for obj in cache.glob("*.obj"):
             if obj.stat().st_mtime < started:
                 obj.unlink()
@@ -268,16 +244,6 @@ def compile_part(part, title, install, work, jobs, tc):
     record.write_text(json.dumps(info, indent=1) + "\n", encoding="utf-8")
 
 
-def fetch_deps(work):
-    import deps
-
-    for name in deps.DEPS:
-        try:
-            deps.fetch(name, work / "deps")
-        except (OSError, subprocess.CalledProcessError) as e:  # network, git and unpacking errors
-            raise SystemExit(f"error: fetching {name} failed ({e}). {NETWORK_HINT}")
-
-
 def install_ini(title, install):
     """the options file, its default folders under the title's %APPDATA% folder"""
     if not (install / "fci.ini").exists():
@@ -287,16 +253,14 @@ def install_ini(title, install):
 
 
 def build_parts(keys, parts, title, install, work, a):
-    """the steps after the disc: compiler, toolkit, lift, build"""
-    step(keys, "compiler")
-    tc = find_toolchain(work, a.accept_msvc_license, a.download_compiler)
-    step(keys, "toolkit")
-    fetch_deps(work)
+    """the steps after the disc: tools, lift, build"""
+    step(keys, "tools")
+    tc, deps_root = find_tools(work)
     step(keys, "lift", " (the game and the map editor side by side)" if len(parts) > 1 else "")
-    translate(parts, title, install, work)
+    translate(parts, title, install, work, deps_root)
     step(keys, "build")
     for part in parts:
-        compile_part(part, title, install, work, a.jobs, tc)
+        compile_part(part, title, install, work, a.jobs, tc, deps_root)
     install_ini(title, install)
 
 
@@ -306,9 +270,9 @@ def setup(a):
     source, title = open_disc(a.disc)
     print(title.name)
     install, work = Path(a.install or REPO / title.install).resolve(), Path(a.work).resolve()
-    preflight(work, install, 2 if a.editor else 1, a.download_compiler)
+    preflight(work, install, 2 if a.editor else 1)
     install.mkdir(parents=True, exist_ok=True)
-    keys = plan("disc", "compiler", "toolkit", "lift", "build")
+    keys = plan("disc", "tools", "lift", "build")
     step(keys, "disc")
     copy_game(source, title, install / "game")
     build_parts(keys, ["game", "editor"] if a.editor else ["game"], title, install, work, a)
@@ -351,8 +315,8 @@ def editor(a):
     work = Path(a.work).resolve()
     if not (install / title.game_exe).exists() or not (install / "game" / "ige.xbe").exists():
         raise SystemExit(f"error: set up the game in {install} first (BuildGame.cmd or: fci-recomp.py setup)")
-    preflight(work, install, 1, a.download_compiler)
-    build_parts(plan("compiler", "toolkit", "lift", "build"), ["editor"], title, install, work, a)
+    preflight(work, install, 1)
+    build_parts(plan("tools", "lift", "build"), ["editor"], title, install, work, a)
     minutes = (time.time() - started) / 60
     print(f"Done in {minutes:.0f} minutes. The game's Map Editor menu starts {install / title.editor_exe}.")
     events.emit("done", minutes=round(minutes))
@@ -368,8 +332,8 @@ def update(a):
         raise SystemExit(f"error: set up the game in {install} first (BuildGame.cmd or: fci-recomp.py setup)")
     parts = ["game"] + (["editor"] if (install / title.editor_exe).exists() else [])
     print(f"Updating {title.name} to {VERSION}")
-    preflight(work, install, len(parts), a.download_compiler)
-    build_parts(plan("compiler", "toolkit", "lift", "build"), parts, title, install, work, a)
+    preflight(work, install, len(parts))
+    build_parts(plan("tools", "lift", "build"), parts, title, install, work, a)
     minutes = (time.time() - started) / 60
     print(f"Done in {minutes:.0f} minutes.")
     events.emit("done", minutes=round(minutes))
@@ -419,8 +383,6 @@ def main():
         p.add_argument("--install")
         p.add_argument("--work", default=str(REPO / "build"))
         p.add_argument("--jobs", type=int)
-        p.add_argument("--accept-msvc-license", action="store_true")
-        p.add_argument("--download-compiler", action="store_true")
         p.add_argument("--events", action="store_true")
     t = sub.add_parser("status", help="the games set up here, as JSON")
     t.add_argument("--install", action="append")

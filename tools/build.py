@@ -7,12 +7,13 @@
   --lift   tools/lift.py's output for this executable
   --deps   tools/deps.py's folder (xboxrecomp, xbe-recomp)
   --out    created; the build happens in <out>/case, the result goes to <out>/bin
-  --jobs   compilers at once (default: by the processor's cores and the memory, about 2 GB each)
-  --toolchain  tools/msvc.py's folder, used when Visual Studio is not installed
+  --jobs   compilers at once (default: by the processor's cores and the memory, about 1 GB each)
+  --toolchain  a folder holding the pinned llvm-mingw (tools/toolchain.py fetch), when the repository's
+           toolchain/ does not
   --obj-cache  a folder of compiled generated files kept between builds; a file whose rewritten source,
                headers, compiler and flags are unchanged is copied instead of compiled (runtime work)
 
-Steps: find Visual Studio and the Windows SDK (tools/toolchain.py); stage the build (the runtime from
+Steps: find the bundled llvm-mingw (tools/toolchain.py); stage the build (the runtime from
 xboxrecomp with patches/runtime, src/, the generated C); match the XDK library functions the D3D and
 DirectSound layer replaces (tools/sigmatch.py); compile every group with tools/compile.py, the generated
 C one file per compiler, as many at once as --jobs; link fci-whole.exe and fci-kinit.dll.
@@ -45,9 +46,9 @@ BUILD_TOOLS = ("compile.py", "image_profile.py")
 
 
 def default_jobs():
-    """one compiler per core, as far as the memory goes: an /O1 compile of a generated file takes up to
-    about 2 GB, and the rest of the machine keeps 3 GB"""
-    return max(1, min(os.cpu_count() or 1, int((preflight.memory_gb() - 3) / 2)))
+    """one compiler per core, as far as the memory goes: clang takes up to about 1 GB for the largest generated
+    file, and the rest of the machine keeps 3 GB"""
+    return max(1, min(os.cpu_count() or 1, int(preflight.memory_gb() - 3)))
 
 
 def stage(image, title, xbe, lift_dir, deps, case, tc):
@@ -174,8 +175,7 @@ def build(image, xbe, lift_dir, deps, out, jobs=None, tc=None, obj_cache=None):
                 "image": image,
                 "title": title.key,
                 "inputs_sha256": inputs_digest(lift_dir, tc),
-                "msvc": tc["msvc"],
-                "windows_sdk": tc["windows_sdk"],
+                "toolchain": tc["release"],
                 "jobs": jobs,
                 "seconds": round(time.time() - started),
             },
@@ -192,7 +192,8 @@ def inputs_digest(lift_dir, tc):
     host code, the runtime patches and the build tools (line endings normalised)"""
     h = hashlib.sha256()
     h.update((Path(lift_dir) / "lift.json").read_bytes())
-    h.update(json.dumps(tc, sort_keys=True).encode())
+    # the compiler by its release, not its folder: a release folder moved elsewhere builds the same
+    h.update(json.dumps({k: tc[k] for k in ("release", "sha256")}, sort_keys=True).encode())
     files = sorted(p for p in HOST.rglob("*") if p.is_file() and "__pycache__" not in p.parts)
     files += patches.series("runtime") + sorted(DATA.rglob("*.json"))
     files += [TOOLS / n for n in ("build.py", "patches.py", "sigmatch.py", "titles.py", *BUILD_TOOLS)]
@@ -218,11 +219,11 @@ def main():
     ap.add_argument("--deps", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--jobs", type=int, help="parallel compilers, about 2 GB of memory each")
-    ap.add_argument("--toolchain", help="tools/msvc.py's folder, when Visual Studio is not installed")
+    ap.add_argument("--toolchain", help="a folder with the pinned llvm-mingw, when toolchain/ has none")
     ap.add_argument("--obj-cache", help="compiled generated files kept between builds")
     a = ap.parse_args()
     try:
-        tc = toolchain.discover(a.toolchain)
+        tc = toolchain.discover(*([a.toolchain] if a.toolchain else []))
     except toolchain.ToolchainError as e:
         raise SystemExit(f"error: {e}")
     build(a.image, a.xbe, Path(a.lift), Path(a.deps), a.out, a.jobs, tc, a.obj_cache)

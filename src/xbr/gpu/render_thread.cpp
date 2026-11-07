@@ -93,7 +93,8 @@ bool Same(const uint8_t* a, const uint8_t* b, size_t n) {
     for (; i + 16 <= n; i += 16)
         diff = _mm_or_si128(diff, _mm_xor_si128(_mm_loadu_si128(reinterpret_cast<const __m128i*>(a + i)),
                                                 _mm_loadu_si128(reinterpret_cast<const __m128i*>(b + i))));
-    if (!_mm_testz_si128(diff, diff)) return false;
+    // SSE2 only: every x64 CPU has it, SSE4.1's ptest is not guaranteed
+    if (_mm_movemask_epi8(_mm_cmpeq_epi8(diff, _mm_setzero_si128())) != 0xFFFF) return false;
     return i == n || !std::memcmp(a + i, b + i, n - i);
 }
 

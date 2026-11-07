@@ -5,15 +5,16 @@ and errors are also printed as single lines of JSON after "@fci ". Without it no
   {"event": "step", "key": "disc", "text": "..."}                                    one starts
   {"event": "progress", "key": "build", "percent": 40, "part": "game", "text": "..."}
   {"event": "warning" | "error", "text": "..."}
-  {"event": "license", "url": "..."}    Microsoft's terms must be accepted first (exit code 3)
   {"event": "done", "minutes": 12}
+
+PROTOCOL 2 (0.2.3): the release carries Python in python/ and the compiler; there is no "license" event.
 """
 
 import json
 import threading
 
 enabled = False
-PROTOCOL = 1
+PROTOCOL = 2
 _lock = threading.Lock()
 _shown = {}
 

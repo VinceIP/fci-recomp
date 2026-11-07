@@ -62,6 +62,7 @@ def run_steps(toolkit, xbe, seeds, out, log, tag=None):
             str(d),
             "--seed-functions",
             str(seeds),
+            "--no-listings",  # the per-section listings: about a minute, and no later step reads them
         ],
         [
             "tools.func_id",

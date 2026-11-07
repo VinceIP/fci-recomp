@@ -63,30 +63,41 @@ RUNTIME_SOURCES = {
     "usb": ["ohci.c", "usb_gamepad.c"],
     "video": ["video_player.c", "video_pump.c", "fb_present.c"],
 }
+# import libraries of the system DLLs the executable uses (llvm-mingw's x86_64-w64-mingw32/lib)
 SYSTEM_LIBS = [
-    "kernel32.lib",
-    "user32.lib",
-    "gdi32.lib",
-    "advapi32.lib",
-    "ole32.lib",
-    "shell32.lib",
-    "winmm.lib",
-    "dbghelp.lib",
-    "bcrypt.lib",
-    "d3d11.lib",
-    "dxgi.lib",
-    "dxguid.lib",
-    "d3dcompiler.lib",
-    "xinput.lib",
-    "mfplat.lib",
-    "mfreadwrite.lib",
-    "mfuuid.lib",
-    "mf.lib",
-    "propsys.lib",
-    "uuid.lib",
-    "d3d12.lib",
+    "kernel32",
+    "user32",
+    "gdi32",
+    "advapi32",
+    "ole32",
+    "shell32",
+    "winmm",
+    "dbghelp",
+    "bcrypt",
+    "d3d11",
+    "dxgi",
+    "dxguid",
+    "d3dcompiler",
+    "xinput1_4",  # Windows' own XInput; mingw's plain libxinput names 1.3, from the old DirectX redistributable
+    "xaudio2_9",  # Windows 10's own; MSVC took it from a #pragma comment(lib), which lld ignores here
+    "mfplat",
+    "mfreadwrite",
+    "mfuuid",
+    "mf",
+    "propsys",
+    "uuid",
+    "d3d12",
 ]
-GEN_OPT = "/O1"  # the generated C, optimised for size
+DEFINES = ["-DWIN32_LEAN_AND_MEAN", "-DNOMINMAX", "-D_CRT_SECURE_NO_WARNINGS", "-D_USE_MATH_DEFINES"]
+# the semantics the lifted and runtime code were written and tested against with MSVC: no type-based alias
+# analysis, and signed arithmetic wraps
+SEMANTICS = ["-fno-strict-aliasing", "-fwrapv"]
+# an attribute clang drops changes the meaning silently: it ignores __declspec(thread) for mingw targets
+CHECKS = ["-Werror=unknown-attributes", "-Werror=ignored-attributes"]
+# the upstream and generated code: no warnings, but the checks above still apply (plain -w drops them)
+QUIET = ["-Wno-everything", *CHECKS]
+DEBUG = ["-g", "-gcodeview"]  # CodeView in fci-whole.pdb, which crash reports read through dbghelp
+GEN_OPT = "-O2"  # the generated C: clang compiles it at -O2 about as fast as at -O1
 
 # Generated bodies replaced at build time, each with the reason (see also re/notes):
 #  quarantine: data the detector took for code, not valid C; the body becomes a visible stop (exit 85)
@@ -172,7 +183,7 @@ LABEL = re.compile(rb"^loc_([0-9A-F]{8}): ;", re.M)
 GOTO = re.compile(rb"goto (loc_([0-9A-F]{8}));")
 # A direct branch whose label the translator could not place: reaching it stops instead of falling through
 MISSING_GOTO = re.compile(rb"\(void\)0; /\* goto loc_([0-9A-Fa-f]{8}) - dead code, label not in function \*/")
-ERROR_LINE = re.compile(r"\((\d+)\): (?:fatal )?error (C\d+): (.*)")
+ERROR_LINE = re.compile(r":(\d+):\d+: (?:fatal )?error: (.*)")
 DEFINITION = re.compile(rb"^void (sub_[0-9A-F]{8})\(void\)(?:\r?\n\{| \{ /\* translation failed)", re.M)
 REFERENCE = re.compile(rb"\bsub_[0-9A-F]{8}\b")
 
@@ -369,47 +380,6 @@ def replace_bodies(source, work, record, prefix=""):
     return out
 
 
-def auto_quarantine(chunk, syntax_argv, work, record):
-    """a function whose body is not valid C (data decoded as code) becomes a visible stop (exit 85);
-    the compiler's error is recorded as the reason"""
-    text = chunk.read_bytes()
-    quarantined = {}
-    for _ in range(6):
-        done = subprocess.run(syntax_argv + [str(chunk)], capture_output=True)
-        if done.returncode == 0:
-            break
-        errors = ERROR_LINE.findall((done.stdout + done.stderr).decode(errors="replace"))
-        lines = text.split(b"\n")
-        names = {}
-        for number, code, message in errors:
-            i = int(number) - 1
-            while i >= 0 and not re.match(rb"void sub_[0-9A-F]{8}\(void\)$", lines[i]):
-                i -= 1
-            if i < 0:
-                raise ValueError(f"error outside a function in {chunk.name}: {code} {message}")
-            names.setdefault(lines[i][5:17].decode(), f"{code} {message.strip()}")
-        if not names:
-            raise ValueError(f"unparsed compile failure in {chunk.name}")
-        for name, why in names.items():
-            head = b"\nvoid " + name.encode() + b"(void)\n{"
-            start = text.index(head) + len(head)
-            end = text.index(b"\n}\n", start)
-            text = text[:start] + b"\n    fci_quarantined_lift(0x" + name[4:].encode() + b"u);" + text[end:]
-            quarantined[name] = why
-        if b"void fci_quarantined_lift(uint32_t va);" not in text:
-            text = text.replace(
-                b'#include "recomp_funcs.h"', b'#include "recomp_funcs.h"\nvoid fci_quarantined_lift(uint32_t va);', 1
-            )
-        chunk = work / "gen-q" / chunk.name  # same name, so the object keeps its name
-        chunk.parent.mkdir(exist_ok=True)
-        chunk.write_bytes(text)
-    else:
-        raise ValueError(f"auto-quarantine did not converge for {chunk.name}")
-    if quarantined:
-        record.setdefault("auto_quarantine", {}).update(quarantined)
-    return chunk
-
-
 def lift_symbols(inputs):
     """what each lift defines: (base definitions, base unresolved stubs, supplemental definitions the base
     lacks, supplemental definitions the base has too, names the supplement uses that nothing defines)"""
@@ -439,19 +409,72 @@ def supplemental_names(supp):
 
 
 def toolchain(inputs):
-    """the compiler, linker and paths from inputs/toolchain.json (tools/toolchain.py)"""
+    """the bundled llvm-mingw from inputs/toolchain.json (tools/toolchain.py): its tools by name"""
     tc = json.loads((inputs / "toolchain.json").read_text(encoding="utf-8"))
-    return (
-        Path(tc["cl"]),
-        Path(tc["link"]),
-        Path(tc["dumpbin"]),
-        [Path(p) for p in tc["include"]],
-        Path(tc["winrt"]),
-        [Path(p) for p in tc["lib"]],
-    )
+    tools = {name: Path(tc["bin"]) / (name + ".exe") for name in ("clang", "clang++", "llvm-nm")}
+    return tc, tools
 
 
-def compile_groups(group, inputs, work, obj, base, inc, winrt, dumpbin, record):
+def run_jobs(jobs, record):
+    """compile each (argv, sources) at once, FCI_JOBS at a time; the records in order; False at the first failure
+    (its output printed)"""
+    with ThreadPoolExecutor(int(os.environ.get("FCI_JOBS", "4"))) as pool:
+        done = list(pool.map(lambda job: subprocess.run(job[0], capture_output=True), jobs))
+    ok = True
+    for (argv, sources), result in zip(jobs, done):
+        record["compiles"].append(
+            {"argv": argv, "exit": result.returncode, "sources": {s.name: digest(s) for s in sources}}
+        )
+        if result.returncode and ok:
+            print((result.stdout + result.stderr).decode(errors="replace")[-12000:])
+            ok = False
+    return ok
+
+
+def compile_gen(source, obj_path, argv_head, work, record):
+    """one generated file: a function whose body is not valid C (data decoded as code) becomes a visible stop
+    (exit 85) with the compiler's error recorded as the reason, and the file compiles again"""
+    quarantined = {}
+    text = source.read_bytes()
+    for _ in range(6):
+        argv = argv_head + ["-o", str(obj_path), str(source)]
+        done = subprocess.run(argv, capture_output=True)
+        if done.returncode == 0:
+            break
+        output = (done.stdout + done.stderr).decode(errors="replace")
+        errors = ERROR_LINE.findall(output)
+        if not errors:
+            return argv, done.returncode, output
+        lines = text.split(b"\n")
+        names = {}
+        for number, message in errors:
+            i = int(number) - 1
+            while i >= 0 and not re.match(rb"(static )?void sub_[0-9A-F]{8}\(void\)$", lines[i]):
+                i -= 1
+            if i < 0:
+                return argv, done.returncode, output  # outside any function: a real build error
+            names.setdefault(lines[i].split(b"void ")[1][:12].decode(), message.strip())
+        for name, why in names.items():
+            head = b"\nvoid " + name.encode() + b"(void)\n{"
+            start = text.index(head) + len(head)
+            end = text.index(b"\n}\n", start)
+            text = text[:start] + b"\n    fci_quarantined_lift(0x" + name[4:].encode() + b"u);" + text[end:]
+            quarantined[name] = why
+        if b"void fci_quarantined_lift(uint32_t va);" not in text:
+            text = text.replace(
+                b'#include "recomp_funcs.h"', b'#include "recomp_funcs.h"\nvoid fci_quarantined_lift(uint32_t va);', 1
+            )
+        source = work / "gen-q" / source.name  # same name, so the object keeps its name
+        source.parent.mkdir(exist_ok=True)
+        source.write_bytes(text)
+    else:
+        return argv, 1, f"auto-quarantine did not converge for {source.name}"
+    if quarantined:
+        record.setdefault("auto_quarantine", {}).update(quarantined)
+    return argv, 0, ""
+
+
+def compile_groups(group, inputs, work, obj, tools, base, record):
     toolkit, gen = inputs / "toolkit", inputs / "gen"
     src = toolkit / "src"
     rt_inc = [
@@ -467,41 +490,28 @@ def compile_groups(group, inputs, work, obj, base, inc, winrt, dumpbin, record):
         src / "video",
         src / "platform",
     ]
-    groups = []  # (flags, sources)
+    cc, cxx = [str(tools["clang"])] + base, [str(tools["clang++"])] + [a for a in base if a != "-std=gnu11"]
+    inc = lambda paths: ["-I" + str(p) for p in paths]  # noqa: E731
+    out = lambda name: ["-o", str(obj / name)]  # noqa: E731
+    jobs = []  # (argv, sources)
+    record["compiles"] = []
     if group == "runtime":
         for lib, files in RUNTIME_SOURCES.items():
-            extra = ["/GS-", "/Gy"] if lib == "kernel" else []
-            groups.append(
-                (["/O2", "/W3", "/Z7", *extra] + ["/I" + str(p) for p in rt_inc + inc], [src / lib / f for f in files])
-            )
+            extra = ["-ffunction-sections"] if lib == "kernel" else []
+            for f in files:
+                argv = cc + ["-O2", *DEBUG, *QUIET, *extra] + inc(rt_inc) + out(f.removesuffix(".c") + ".obj")
+                jobs.append((argv + [str(src / lib / f)], [src / lib / f]))
     elif group == "host":
-        groups.append(
-            (
-                ["/O2", "/W4", "/Z7", "/we4013"] + ["/I" + str(p) for p in [gen] + rt_inc + inc],
-                sorted((inputs / "host").glob("*.c")),
-            )
-        )
+        for f in sorted((inputs / "host").glob("*.c")):
+            flags = ["-O2", *DEBUG, "-Wall", "-Wno-unused", "-Werror=implicit-function-declaration"]
+            jobs.append((cc + flags + inc([gen] + rt_inc) + out(f.stem + ".obj") + [str(f)], [f]))
     elif group == "xbr":
         # Xbox XBE Recomp's D3D8 and DirectSound layers and the Direct3D 12 renderer (src/xbr), with the
         # addresses tools/sigmatch.py found in this image (inputs/xbr-symbols/image_symbols.h)
         xbr = inputs / "host" / "xbr"
-        inc_xbr = [xbr, inputs / "xbr-symbols"] + inc + [winrt]
         for cpp in sorted(xbr.rglob("*.cpp")):
-            groups.append(
-                (
-                    [
-                        "/std:c++20",
-                        "/EHsc",
-                        "/O2",
-                        "/W3",
-                        "/Z7",
-                        "/Zc:preprocessor",
-                        "/Fo:" + str(obj / ("xbr_" + cpp.stem + ".obj")),
-                    ]
-                    + ["/I" + str(p) for p in inc_xbr],
-                    [cpp],
-                )
-            )
+            flags = ["-std=c++20", "-O2", *DEBUG, *QUIET] + inc([xbr, inputs / "xbr-symbols"])
+            jobs.append((cxx + flags + out("xbr_" + cpp.stem + ".obj") + [str(cpp)], [cpp]))
     elif group == "supp":
         # the map editor's measured entries (tools/lift.py supplement), reached through fci_supp_lookup
         names = sorted(supplemental_names(inputs / "supp"))
@@ -528,7 +538,8 @@ def compile_groups(group, inputs, work, obj, base, inc, winrt, dumpbin, record):
             encoding="utf-8",
         )
         record["supplement"] = {"functions": names, "table_sha256": digest(table), "new_unresolved_stubs": extra}
-        groups.append((["/O1", "/W0"] + ["/I" + str(p) for p in inc], [table, stubs]))
+        for f in (table, stubs):
+            jobs.append((cc + ["-O2", *QUIET] + out(f.stem + ".obj") + [str(f)], [f]))
     elif group.startswith("supp:"):
         index = int(group.split(":")[1])
         chunk = replace_bodies(inputs / "supp" / f"recomp_{index:04d}.c", work, record, prefix="supp-")
@@ -544,9 +555,11 @@ def compile_groups(group, inputs, work, obj, base, inc, winrt, dumpbin, record):
             chunk.parent.mkdir(exist_ok=True)
             chunk.write_bytes(text)
             record["duplicates_of_base"] = sorted(renamed)
-        includes = ["/I" + str(p) for p in [inputs / "supp"] + inc]
-        chunk = auto_quarantine(chunk, base + ["/W0", "/Zs"] + includes, work, record)
-        groups.append((["/O1", "/W0", "/Fo:" + str(obj / f"supp_recomp_{index:04d}.obj")] + includes, [chunk]))
+        head = cc + [GEN_OPT, *QUIET] + inc([inputs / "supp"])
+        argv, code, output = compile_gen(chunk, obj / f"supp_recomp_{index:04d}.obj", head, work, record)
+        record["compiles"].append({"argv": argv, "exit": code, "sources": {chunk.name: digest(chunk)}})
+        if code:
+            print(output[-12000:])
     elif group == "stubs":
         text = (gen / "recomp_stubs_unresolved.c").read_bytes()
         count = len(STUB.findall(text))
@@ -565,50 +578,42 @@ def compile_groups(group, inputs, work, obj, base, inc, winrt, dumpbin, record):
         )
         if b"g_esp += 4; /*" in text:
             raise ValueError("unrecognized unresolved stub shape")
-        out = work / "stubs_failvisible.c"
-        out.write_bytes(text)
+        stubs = work / "stubs_failvisible.c"
+        stubs.write_bytes(text)
         record["stubs"] = {
             "rewritten": count - len(dropped),
             "defined_by_supplement": dropped,
             "source_sha256": digest(gen / "recomp_stubs_unresolved.c"),
-            "rewritten_sha256": digest(out),
+            "rewritten_sha256": digest(stubs),
         }
-        groups.append((["/O2", "/W0"] + ["/I" + str(p) for p in [gen] + inc], [out]))
+        jobs.append((cc + ["-O2", *QUIET] + inc([gen]) + out("stubs_failvisible.obj") + [str(stubs)], [stubs]))
     elif group == "dispatch":
-        groups.append((["/O2", "/W0"] + ["/I" + str(p) for p in [gen] + inc], [gen / "recomp_dispatch.c"]))
+        f = gen / "recomp_dispatch.c"
+        jobs.append((cc + ["-O2", *QUIET] + inc([gen]) + out("recomp_dispatch.obj") + [str(f)], [f]))
     elif group.startswith("gen:"):
         first, last = (int(n) for n in group.split(":")[1:])
         sources = [replace_bodies(gen / f"recomp_{i:04d}.c", work, record) for i in range(first, last + 1)]
-        syntax = base + ["/W0", "/Zs"] + ["/I" + str(p) for p in [gen] + inc]
-        jobs = int(os.environ.get("FCI_JOBS", "4"))
-        with ThreadPoolExecutor(jobs) as pool:
-            sources = list(pool.map(lambda s: auto_quarantine(s, syntax, work, record), sources))
         record["gen_opt"] = GEN_OPT
-        parallel = [f"/MP{jobs}"] if jobs > 1 and len(sources) > 1 else []
         # FCI_CALL_PROFILE=1 (diagnostic): every direct call counts its target (fci_probe.c)
-        prof = ["/DRECOMP_CALL_PROFILE"] if os.environ.get("FCI_CALL_PROFILE") == "1" else []
+        prof = ["-DRECOMP_CALL_PROFILE"] if os.environ.get("FCI_CALL_PROFILE") == "1" else []
         record["call_profile"] = bool(prof)
+        flags = [GEN_OPT, *QUIET, *prof]
         cache = os.environ.get("FCI_OBJ_CACHE")
         if cache:  # build.py --obj-cache: an unchanged file's object from an earlier build
-            sources = cached_objects(Path(cache), sources, gen, inputs, base + [GEN_OPT, "/W0", *prof], obj, record)
-        if sources:
-            groups.append(([GEN_OPT, "/W0", *parallel, *prof] + ["/I" + str(p) for p in [gen] + inc], sources))
+            sources = cached_objects(Path(cache), sources, gen, inputs, base + flags, obj, record)
+        for source in sources:
+            head = cc + flags + inc([gen])
+            argv, code, output = compile_gen(source, obj / (source.stem + ".obj"), head, work, record)
+            record["compiles"].append({"argv": argv, "exit": code, "sources": {source.name: digest(source)}})
+            if code:
+                print(output[-12000:])
+                break
     else:
         raise ValueError("unknown group")
-    record["compiles"] = []
-    for flags, sources in groups:
-        out_flag = [] if any(f.startswith("/Fo:") for f in flags) else ["/Fo:" + str(obj) + "\\"]
-        std = [] if any(f.startswith("/std:c++") for f in flags) else ["/std:c11"]
-        argv = [a for a in base if a != "/std:c11"] + std + flags + ["/c"] + out_flag + [str(s) for s in sources]
-        done = subprocess.run(argv, capture_output=True)
-        record["compiles"].append(
-            {"argv": argv, "exit": done.returncode, "sources": {s.name: digest(s) for s in sources}}
-        )
-        if done.returncode:
-            print((done.stdout + done.stderr).decode(errors="replace")[-12000:])
-            break
+    if jobs:
+        run_jobs(jobs, record)
     if group == "xbr" and all(c["exit"] == 0 for c in record["compiles"]):
-        list_xbr(inputs, work, obj, base, inc, dumpbin, record)
+        list_xbr(inputs, work, obj, tools, cc, record)
     if record.get("cache_keys") and all(c["exit"] == 0 for c in record["compiles"]):
         for name, key in record["cache_keys"].items():
             shutil.copy2(obj / (Path(name).stem + ".obj"), Path(os.environ["FCI_OBJ_CACHE"]) / (key + ".obj"))
@@ -616,11 +621,12 @@ def compile_groups(group, inputs, work, obj, base, inc, winrt, dumpbin, record):
 
 def cached_objects(cache, sources, gen, inputs, flags, obj, record):
     """copy the objects the cache has for these sources into obj and return the rest; the key is what
-    the compile reads (the rewritten source, the generated headers, the profile header it force-includes,
-    the compiler) and its flags without the build's own paths"""
+    the compile reads (the source before any quarantine, the generated headers, the profile header it
+    force-includes, the compiler) and its flags without the build's own paths"""
     cache.mkdir(parents=True, exist_ok=True)
     shared = hashlib.sha256(record["compiler_sha256"].encode())
-    shared.update("\0".join(f for f in flags if not f.startswith(("/FI", "/I", "/Fo"))).encode())
+    paths = {str(inputs / "image-profile.h")}
+    shared.update("\0".join(f for f in flags if not f.startswith("-I") and f not in paths).encode())
     for header in [*sorted(gen.glob("*.h")), inputs / "image-profile.h"]:
         if header.exists():
             shared.update(header.name.encode() + b"\0" + header.read_bytes())
@@ -639,16 +645,16 @@ def cached_objects(cache, sources, gen, inputs, flags, obj, record):
     return missing
 
 
-def list_xbr(inputs, work, obj, base, inc, dumpbin, record):
+def list_xbr(inputs, work, obj, tools, cc, record):
     """the functions the D3D8 and DirectSound objects define (xbr_sub_X) and wrap (xbr_orig_sub_X_c): the
     generated files give those functions their run-time switch (replace_bodies)"""
     defined, wrapped, audio = set(), set(), set()
     for name in ("xbr_d3d8.obj", "xbr_dsound.obj"):
-        dump = subprocess.run([str(dumpbin), "/symbols", str(obj / name)], capture_output=True)
+        dump = subprocess.run([str(tools["llvm-nm"]), "--extern-only", str(obj / name)], capture_output=True)
         text = dump.stdout.decode(errors="replace")
-        here = set(re.findall(r"SECT\w+\s+notype \(\)\s+External\s+\|\s+xbr_(sub_[0-9A-F]{8})\b", text))
+        here = set(re.findall(r"^\S*\s+T\s+xbr_(sub_[0-9A-F]{8})\s*$", text, re.M))
         defined |= here
-        wrapped |= set(re.findall(r"UNDEF\s+notype \(\)\s+External\s+\|\s+xbr_orig_(sub_[0-9A-F]{8})_c\b", text))
+        wrapped |= set(re.findall(r"^\s*U\s+xbr_orig_(sub_[0-9A-F]{8})_c\s*$", text, re.M))
         if name == "xbr_dsound.obj":
             audio |= here
     present = lambda names: sorted(n for n in names if not n.startswith("sub_FFFF"))  # noqa: E731
@@ -667,12 +673,16 @@ def list_xbr(inputs, work, obj, base, inc, dumpbin, record):
         "#include <stdint.h>\nvoid fci_quarantined_lift(uint32_t va);\n"
         + "".join(f"void xbr_orig_{n}_c(void) {{ fci_quarantined_lift(0x{n[4:]}u); }}\n" for n in absent)
     )
-    done = subprocess.run(
-        base + ["/O2", "/W3", "/c", "/Fo:" + str(obj / "xbr_absent.obj"), str(stub)] + ["/I" + str(p) for p in inc],
-        capture_output=True,
-    )
+    done = subprocess.run(cc + ["-O2", *QUIET, "-o", str(obj / "xbr_absent.obj"), str(stub)], capture_output=True)
     record["compiles"].append({"argv": ["xbr_absent.c"], "exit": done.returncode, "sources": {}})
     record["xbr"] = {"replace": len(listing["replace"]), "wrap": listing["wrap"]}
+
+
+def link_args(tools, work, objects, argv):
+    """the linker's inputs through a response file: a few hundred object paths pass Windows' command line limit"""
+    rsp = work / (Path(argv[argv.index("-o") + 1]).stem + ".rsp")
+    rsp.write_text("\n".join('"' + str(o).replace("\\", "/") + '"' for o in objects) + "\n", encoding="utf-8")
+    return argv + ["@" + str(rsp)]
 
 
 def main():
@@ -690,46 +700,35 @@ def main():
         if (inputs / "image-profile.h").read_text(encoding="utf-8") != profile_header(profile):
             raise ValueError("compile header does not match image profile")
     action = sys.argv[1]
-    cl, link, dumpbin, inc, winrt, libpaths = toolchain(inputs)
-    record = {"action": sys.argv[1:], "compiler_sha256": digest(cl), "linker_sha256": digest(link)}
+    tc, tools = toolchain(inputs)
+    record = {"action": sys.argv[1:], "toolchain": tc["release"], "compiler_sha256": tc["sha256"]}
     if profile:
         record["image_profile_sha256"] = digest(profile_path)
         record["image_header_sha256"] = digest(inputs / "image-profile.h")
-    base = [
-        str(cl),
-        "/nologo",
-        "/std:c11",
-        "/MT",
-        "/bigobj",
-        "/DWIN32_LEAN_AND_MEAN",
-        "/DNOMINMAX",
-        "/D_CRT_SECURE_NO_WARNINGS",
-        "/D_USE_MATH_DEFINES",
-    ]
+    base = ["-c", "-std=gnu11", *DEFINES, *SEMANTICS, *CHECKS]
     if profile:
-        base += ["/FI" + str(inputs / "image-profile.h")]
+        base += ["-include", str(inputs / "image-profile.h")]
     if action == "cc":
-        compile_groups(sys.argv[2], inputs, work, obj, base, inc, winrt, dumpbin, record)
+        compile_groups(sys.argv[2], inputs, work, obj, tools, base, record)
     elif action == "kinit":
-        # the kernel-image metadata DLL (src/kinit): no entry point, no CRT, no absolute fixups
+        # the kernel-image metadata DLL (src/kinit): no entry point, no C runtime, no absolute fixups, its INIT
+        # section last and discardable (fci_main.c checks that layout)
         src = inputs / "host" / "kinit" / "fci_kinit.c"
-        cc = base + ["/O2", "/W4", "/GS-", "/c", "/Fo:" + str(obj) + "\\", str(src)]
+        cc = [str(tools["clang"])] + base + ["-O2", "-fno-stack-protector", "-o", str(obj / "fci_kinit.obj"), str(src)]
         done = subprocess.run(cc, capture_output=True)
         record["compiles"] = [{"argv": cc, "exit": done.returncode, "sources": {src.name: digest(src)}}]
         if done.returncode == 0:
             ld = [
-                str(link),
-                "/NOLOGO",
-                "/DLL",
-                "/NOENTRY",
-                "/NODEFAULTLIB",
-                "/DYNAMICBASE",
-                "/FIXED:NO",
-                "/INCREMENTAL:NO",
-                "/MANIFEST:NO",
-                "/SECTION:INIT,ERD",
-                "/OUT:" + str(work / "fci-kinit.dll"),
+                str(tools["clang"]),
+                "-shared",
+                "-nostdlib",
+                "-o",
+                str(work / "fci-kinit.dll"),
                 str(obj / "fci_kinit.obj"),
+                "-Wl,--entry=",  # none: the DLL is only ever read, and its INIT function called once
+                "-Xlinker",  # -Wl would split the option at its comma
+                "-Xlink=-section:INIT,ERD",
+                "-Wl,--no-insert-timestamp",
             ]
             linked = subprocess.run(ld, capture_output=True)
             record["link"] = {"argv": ld, "exit": linked.returncode}
@@ -744,30 +743,22 @@ def main():
         out = work / "fci-whole.exe"
         manifest = work / "fci-whole-manifest.res"
         write_manifest_res(inputs / "host" / "fci-whole.manifest", manifest)
-        argv = (
-            [
-                str(link),
-                "/NOLOGO",
-                "/OUT:" + str(out),
-                "/SUBSYSTEM:WINDOWS",
-                "/ENTRY:mainCRTStartup",
-                "/LARGEADDRESSAWARE",
-                "/DEBUG:FULL",
-                "/PDB:" + str(work / "fci-whole.pdb"),
-                "/MAP:" + str(work / "fci-whole.map"),
-                "/INCREMENTAL:NO",
-                "/MANIFEST:NO",  # src/fci-whole.manifest comes in as a resource
-                "/STACK:16777216",
-            ]
-            + ["/LIBPATH:" + str(p) for p in libpaths]
-            + SYSTEM_LIBS
-            + [str(o) for o in objs]
-            + [str(manifest)]
-        )
+        argv = [
+            str(tools["clang++"]),
+            "-static",  # libc++ and the unwinder inside the executable; the C runtime is Windows' own UCRT
+            "-mwindows",
+            "-o",
+            str(out),
+            "-Wl,--pdb=" + str(work / "fci-whole.pdb"),
+            "-Wl,-Map=" + str(work / "fci-whole.map"),
+            "-Wl,--stack,16777216",
+            str(manifest),
+        ] + ["-l" + lib for lib in SYSTEM_LIBS]
+        argv = link_args(tools, work, objs, argv)
         done = subprocess.run(argv, capture_output=True)
         log = (done.stdout + done.stderr).decode(errors="replace")
         (work / "link.log").write_text(log, encoding="utf-8")
-        record["link"] = {"argv_head": argv[:12], "objects": len(objs), "exit": done.returncode}
+        record["link"] = {"argv_head": argv[:9], "objects": len(objs), "exit": done.returncode}
         if done.returncode == 0:
             record["link"]["exe_sha256"] = digest(out)
         else:

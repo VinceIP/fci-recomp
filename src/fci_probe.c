@@ -194,8 +194,8 @@ static void trace_return(uint32_t va)
         fprintf(trace, "R %08X %08X\n", va, block_hash(nest[depth].a1, nest[depth].a2));
 }
 
-static __declspec(thread) uint32_t t_logged_va;
-static __declspec(thread) uint32_t t_zero_va, t_zero_ret, t_zero_args[4];
+static _Thread_local uint32_t t_logged_va;
+static _Thread_local uint32_t t_zero_va, t_zero_ret, t_zero_args[4];
 
 void fci_probe_enter(uint32_t va)
 {

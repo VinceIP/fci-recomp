@@ -1,5 +1,6 @@
 """Direct-branch recovery in the patched lifter (patches/lifter/fci_direct.py), on synthetic code"""
 
+from pathlib import Path
 import subprocess
 
 import pytest
@@ -74,7 +75,7 @@ class TestDirectBranches:
         assert not t._fci_direct_extended
         assert "sub_00011004();" in c
 
-    def test_compiled_results_match_reference_x86(self, lifter_toolkit, msvc, tmp_path):
+    def test_compiled_results_match_reference_x86(self, lifter_toolkit, compiler, tmp_path):
         unicorn = pytest.importorskip("unicorn")
         from unicorn.x86_const import UC_X86_REG_EAX, UC_X86_REG_EBX, UC_X86_REG_ECX, UC_X86_REG_ESP
 
@@ -98,18 +99,15 @@ class TestDirectBranches:
                 + 'printf("%u %u %u %u",g_eax,g_ecx,g_ebx,g_esp); return 0; }\n'
             )
             command = [
-                msvc["cl"],
-                "/nologo",
-                "/O2",
-                "/MT",
-                "/TC",
-                *["/I" + p for p in msvc["include"]],
-                "/I" + str(lifter_toolkit / "templates" / "runtime"),
+                str(Path(compiler["bin"]) / "clang.exe"),
+                "-O2",
+                "-std=gnu11",
+                "-fno-strict-aliasing",
+                "-fwrapv",
+                "-I" + str(lifter_toolkit / "templates" / "runtime"),
                 str(source),
-                "/Fo:" + str(scratch / f"case{index}.obj"),
-                "/Fe:" + str(exe),
-                "/link",
-                *["/LIBPATH:" + p for p in msvc["lib"]],
+                "-o",
+                str(exe),
             ]
             cc = subprocess.run(command, capture_output=True, text=True, timeout=60)
             assert cc.returncode == 0, cc.stdout + cc.stderr

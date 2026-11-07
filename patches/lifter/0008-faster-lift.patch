@@ -1,0 +1,242 @@
+Subject: A faster lift with the same output
+
+Profiling a lift showed most of its time going to repeated work. The disassembler copied a section's
+bytes for every function it read (35,000 times) and re-sorted every known address after each new one
+(787 times); the bytes are now read once per section and the addresses kept sorted as they arrive.
+The per-section assembly listings, which no later step reads, are not written with --no-listings.
+The recompiler decoded each instruction with Capstone's detail once per function and pass that covered
+it, 7.5 million decodes for the game's 24,000 functions. It now walks instruction streams with
+Capstone's light decode and reads an instruction's detail once per address and encoding, sharing the
+result, since nothing changes an instruction once made. The generated C is the same, byte for byte.
+
+---
+diff --git a/tools/disasm/__main__.py b/tools/disasm/__main__.py
+--- a/tools/disasm/__main__.py
++++ b/tools/disasm/__main__.py
+@@ -44,6 +44,12 @@ def main():
+         action="store_true",
+         help="Only disassemble the .text section (faster, ~2.73 MB)",
+     )
++    parser.add_argument(
++        "--no-listings",
++        action="store_true",
++        help="Write the JSON databases only, without the per-section ASM "
++             "listings, which no later step reads",
++    )
+     parser.add_argument(
+         "--stats-only",
+         action="store_true",
+@@ -108,6 +114,7 @@ def main():
+             output_dir=args.output_dir,
+             text_only=args.text_only,
+             stats_only=args.stats_only,
++            listings=not args.no_listings,
+             verbose=args.verbose,
+             force=args.force,
+             extra_sections=extra,
+diff --git a/tools/disasm/disasm.py b/tools/disasm/disasm.py
+--- a/tools/disasm/disasm.py
++++ b/tools/disasm/disasm.py
+@@ -35,6 +35,7 @@ class Disassembler:
+                  output_dir: Optional[str] = None,
+                  text_only: bool = False,
+                  stats_only: bool = False,
++                 listings: bool = True,
+                  verbose: bool = False,
+                  force: bool = False,
+                  extra_sections: Optional[list] = None,
+@@ -45,6 +46,7 @@ class Disassembler:
+         self.output_dir = output_dir or config.DEFAULT_OUTPUT_DIR
+         self.text_only = text_only
+         self.stats_only = stats_only
++        self.listings = listings
+         self.verbose = verbose
+         self.force = force
+         self.extra_sections = extra_sections or []
+@@ -294,7 +296,8 @@ class Disassembler:
+             writer = OutputWriter(
+                 self.output_dir, self.engine, self.func_detector,
+                 self.xrefs, self.labels, self.image, self.strings)
+-            writer.write_all(sections_to_disasm=sections, verbose=self.verbose)
++            writer.write_all(sections_to_disasm=sections if self.listings else None,
++                             verbose=self.verbose)
+ 
+             # Save cache
+             json_path = self._find_analysis_json()
+diff --git a/tools/disasm/engine.py b/tools/disasm/engine.py
+--- a/tools/disasm/engine.py
++++ b/tools/disasm/engine.py
+@@ -87,8 +87,12 @@ class DisasmEngine:
+         # Instruction cache: address -> Instruction
+         self.instructions: Dict[int, Instruction] = {}
+ 
+-        # Sorted address list (built lazily for range queries)
++        # Sorted address list (built lazily for range queries). decode_at
++        # appends its new addresses and marks it unsorted: list.sort() on a
++        # sorted run plus a short tail is linear, while a full sort of the
++        # dict's keys after each of a thousand decode_at calls is not.
+         self._sorted_addrs: Optional[List[int]] = None
++        self._sorted_dirty = False
+ 
+         # Embedded jump tables: table VA -> end VA (exclusive).
+         # Populated by resync_jump_tables() from the indexed indirect jumps
+@@ -328,7 +332,7 @@ class DisasmEngine:
+                     tbl - 16, end):
+                 if insn.end_address > tbl and insn.address < end:
+                     del self.instructions[insn.address]
+-            self._sorted_addrs = None
++                    self._forget_sorted(insn.address)
+ 
+             self.jump_tables[tbl] = end
+             self.decode_at(end)
+@@ -394,6 +398,9 @@ class DisasmEngine:
+             if cs_insn.address not in self.instructions:
+                 self.instructions[cs_insn.address] = \
+                     self._classify_instruction(cs_insn)
++                if self._sorted_addrs is not None:
++                    self._sorted_addrs.append(cs_insn.address)
++                    self._sorted_dirty = True
+                 added += 1
+             insn = self.instructions[cs_insn.address]
+             if insn.is_terminator:
+@@ -401,8 +408,6 @@ class DisasmEngine:
+             if added >= max_insns:
+                 break
+ 
+-        if added:
+-            self._sorted_addrs = None
+         return added
+ 
+     def block_tail_jump(self, addr: int, max_insns: int = 256):
+@@ -837,6 +842,18 @@ class DisasmEngine:
+         """Build sorted address list if not cached."""
+         if self._sorted_addrs is None:
+             self._sorted_addrs = sorted(self.instructions.keys())
++        elif self._sorted_dirty:
++            self._sorted_addrs.sort()
++        self._sorted_dirty = False
++
++    def _forget_sorted(self, addr: int) -> None:
++        """Drop a deleted instruction's address from the sorted list."""
++        if self._sorted_addrs is None:
++            return
++        self._ensure_sorted_addrs()
++        i = bisect.bisect_left(self._sorted_addrs, addr)
++        if i < len(self._sorted_addrs) and self._sorted_addrs[i] == addr:
++            del self._sorted_addrs[i]
+ 
+     def instruction_covering(self, addr: int) -> Optional[Instruction]:
+         """The decoded instruction whose bytes contain `addr` but do not start
+diff --git a/tools/disasm/loader.py b/tools/disasm/loader.py
+--- a/tools/disasm/loader.py
++++ b/tools/disasm/loader.py
+@@ -118,8 +118,18 @@ class BinaryImage:
+         return struct.unpack_from('<I', data)[0]
+ 
+     def get_section_data(self, section: SectionInfo) -> bytes:
+-        """Get the raw bytes for a section."""
+-        return self.raw_data[section.raw_addr:section.raw_addr + section.raw_size]
++        """Get the raw bytes for a section.
++
++        Cached: the probes ask for a section once per candidate address, and
++        slicing a copy of a multi-megabyte .text each time cost more than all
++        the decoding they do.
++        """
++        key = (section.raw_addr, section.raw_size)
++        cache = self.__dict__.setdefault("_section_data", {})
++        data = cache.get(key)
++        if data is None:
++            data = cache[key] = self.raw_data[section.raw_addr:section.raw_addr + section.raw_size]
++        return data
+ 
+     def get_kernel_import_at_thunk(self, thunk_addr: int) -> Optional[KernelImport]:
+         """Look up a kernel import by its thunk address."""
+diff --git a/tools/recomp/disasm.py b/tools/recomp/disasm.py
+--- a/tools/recomp/disasm.py
++++ b/tools/recomp/disasm.py
+@@ -153,9 +153,31 @@ class Disassembler:
+         self._cs = Cs(CS_ARCH_X86, CS_MODE_32)
+         self._cs.detail = True
+         _init_reg_names(self._cs)
++        # The same instructions are decoded once per function that covers them and again per pass; reading
++        # Capstone's detail is most of a lift's time. Streams are walked without it, and an instruction's
++        # detail is read once per address and encoding. Nothing changes an Instruction once made.
++        self._lite = Cs(CS_ARCH_X86, CS_MODE_32)
++        self._decoded = {}
++
++    def _decode_stream(self, code, address):
++        """the instructions of code placed at address, decoded linearly until one is invalid, as
++        Capstone's disasm does"""
++        for addr, size, _, _ in self._lite.disasm_lite(code, address):
++            encoding = bytes(code[addr - address:addr - address + size])
++            insn = self._decoded.get((addr, encoding))
++            if insn is None:
++                insn = self._decoded[(addr, encoding)] = self._decode_new(next(self._cs.disasm(encoding, addr, 1)))
++            yield insn
+ 
+     def _decode_instruction(self, cs_insn):
+-        """Convert one Capstone instruction into the translator model."""
++        """Convert one Capstone instruction into the translator model (one shared object per encoding)."""
++        key = (cs_insn.address, bytes(cs_insn.bytes))
++        insn = self._decoded.get(key)
++        if insn is None:
++            insn = self._decoded[key] = self._decode_new(cs_insn)
++        return insn
++
++    def _decode_new(self, cs_insn):
+         insn = Instruction(
+             address=cs_insn.address,
+             size=cs_insn.size,
+@@ -220,8 +242,8 @@ class Disassembler:
+             return []
+ 
+         decoded = {}
+-        for cs_insn in self._cs.disasm(raw_bytes[:size], start_va):
+-            decoded[cs_insn.address] = self._decode_instruction(cs_insn)
++        for insn in self._decode_stream(raw_bytes[:size], start_va):
++            decoded[insn.address] = insn
+ 
+         for point in sorted(resync or ()):
+             if not (start_va <= point < end_va) or point in decoded:
+@@ -229,9 +251,9 @@ class Disassembler:
+             for addr in [a for a, i in decoded.items()
+                          if a < point < a + i.size]:
+                 del decoded[addr]
+-            for cs_insn in self._cs.disasm(raw_bytes[point - start_va:size],
+-                                           point):
+-                if cs_insn.address in decoded:
++            for insn in self._decode_stream(raw_bytes[point - start_va:size],
++                                            point):
++                if insn.address in decoded:
+                     break          # rejoined a stream we already have
+                 # The misaligned stream did not only straddle `point`: until
+                 # it rejoins, every instruction it decoded starts *inside* one
+@@ -240,10 +262,9 @@ class Disassembler:
+                 # memcpy the `44` inside `mov [edi+ecx*4-0x1C], eax` survived
+                 # as `inc esp`, so every short copy returned with esp one byte
+                 # off and popped garbage into the caller's esi and edi.
+-                for inner in range(cs_insn.address + 1,
+-                                   cs_insn.address + cs_insn.size):
++                for inner in range(insn.address + 1, insn.address + insn.size):
+                     decoded.pop(inner, None)
+-                decoded[cs_insn.address] = self._decode_instruction(cs_insn)
++                decoded[insn.address] = insn
+ 
+         return [decoded[a] for a in sorted(decoded)]
+ 
+@@ -262,12 +283,11 @@ class Disassembler:
+             if not (start_va <= entry < end_va) or entry in decoded:
+                 continue
+             offset = entry - start_va
+-            for cs_insn in self._cs.disasm(raw_bytes[offset:size], entry):
+-                if cs_insn.address != entry and cs_insn.address in stop_addresses:
++            for insn in self._decode_stream(raw_bytes[offset:size], entry):
++                if insn.address != entry and insn.address in stop_addresses:
+                     break
+-                if cs_insn.address >= end_va or cs_insn.address in decoded:
++                if insn.address >= end_va or insn.address in decoded:
+                     break
+-                insn = self._decode_instruction(cs_insn)
+                 decoded[insn.address] = insn
+ 
+                 if (insn.is_cond_jump and insn.jump_target is not None

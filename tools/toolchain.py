@@ -1,151 +1,157 @@
-"""Find the C/C++ toolchain on this machine: Visual Studio's MSVC (through vswhere) and the Windows SDK,
-or the copy tools/msvc.py downloaded.
+"""The C/C++ toolchain every build uses: llvm-mingw (clang, lld and the mingw-w64 headers and libraries), one
+pinned release, bundled with the release zip.
 
-  python -B tools/toolchain.py            print what it finds
-  python -B tools/toolchain.py <file>     also write it as JSON (the build reads that file)
+  python -B tools/toolchain.py                     print the toolchain a build here would use
+  python -B tools/toolchain.py fetch [<folder>]    developers: download the pinned release, keep what the
+                                                   build uses (default folder: toolchain/ in the repository)
+  python -B tools/toolchain.py trim <zip> <folder> the same from a zip already downloaded
 
-The build needs MSVC x64 (cl, link, dumpbin, the static CRT and C++ library) and a Windows 10/11 SDK
-(headers, import libraries including Direct3D 12 and XAudio2). Both come with Visual Studio or its Build
-Tools under "Desktop development with C++", or from tools/msvc.py without an installer.
+data/llvm-mingw.json pins the release by its SHA-256. Only the x86_64 parts the build uses are kept: the
+compiler and linker with the libraries they load, the headers, the x86_64 import and static libraries and
+clang's builtins. Everything in it may be redistributed (LLVM: Apache-2.0 with LLVM exception; mingw-w64:
+ZPL, public domain and permissive licences; see its LICENSE.TXT), so the release carries it and no build
+needs Visual Studio, the Windows SDK or a download.
 """
 
+import hashlib
+import io
 import json
-import os
 from pathlib import Path
-import subprocess
+import shutil
 import sys
-import winreg
+import urllib.request
+import zipfile
 
-VSWHERE = (
-    Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"))
-    / "Microsoft Visual Studio"
-    / "Installer"
-    / "vswhere.exe"
-)
+REPO = Path(__file__).resolve().parents[1]
+PIN = json.loads((REPO / "data" / "llvm-mingw.json").read_text(encoding="utf-8"))
+NAME = f"llvm-mingw-{PIN['release']}-ucrt-x86_64"
+STAMP = "fci-toolchain.json"
+# what the build runs: the driver (clang.exe is a wrapper that starts clang-<major>.exe with the target's
+# .cfg), the linker, llvm-nm, and the DLLs they load
+BIN = {
+    "clang.exe",
+    "clang++.exe",
+    "clang-target-wrapper.exe",
+    "x86_64-w64-mingw32-clang.exe",
+    "x86_64-w64-mingw32-clang++.exe",
+    "ld.lld.exe",
+    "llvm-nm.exe",
+    "libLLVM-{major}.dll",
+    "libclang-cpp.dll",
+    "libc++.dll",
+    "libunwind.dll",
+    "clang-{major}.exe",
+    "mingw32-common.cfg",
+    "x86_64-w64-windows-gnu.cfg",
+    "x86_64-pc-windows-gnu.cfg",
+}
 
 
 class ToolchainError(Exception):
     pass
 
 
-def find_msvc():
-    """the newest Visual Studio with the x64 C++ tools: (install path, MSVC tools folder)"""
-    if not VSWHERE.exists():
-        raise ToolchainError(
-            "Visual Studio is not installed (no vswhere.exe). Install Visual Studio or its "
-            'Build Tools with "Desktop development with C++".'
-        )
-    found = subprocess.run(
-        [
-            str(VSWHERE),
-            "-latest",
-            "-products",
-            "*",
-            "-requires",
-            "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
-            "-format",
-            "json",
-            "-utf8",
-        ],
-        capture_output=True,
-        encoding="utf-8",
-        check=True,
-    )
-    installs = json.loads(found.stdout or "[]")
-    if not installs:
-        raise ToolchainError(
-            'No Visual Studio with the C++ x64 tools was found. Add "Desktop development with '
-            'C++" in the Visual Studio Installer.'
-        )
-    root = Path(installs[0]["installationPath"])
-    version = (root / "VC" / "Auxiliary" / "Build" / "Microsoft.VCToolsVersion.default.txt").read_text().strip()
-    tools = root / "VC" / "Tools" / "MSVC" / version
-    if not (tools / "bin" / "Hostx64" / "x64" / "cl.exe").exists():
-        raise ToolchainError(f"MSVC {version} in {root} has no x64 compiler")
-    return root, tools
+def major():
+    return PIN["llvm"].split(".")[0]
 
 
-def find_sdk():
-    """the newest Windows 10/11 SDK with the desktop headers and x64 libraries: (root, version)"""
+def keep(path):
+    """whether a file of the release (its path below the top folder) is one the build uses"""
+    parts = path.split("/")
+    if parts[0] == "bin":
+        return len(parts) == 2 and parts[1] in {b.format(major=major()) for b in BIN}
+    if parts[0] == "include":  # the headers shared by all targets
+        return True
+    if parts[0] == "x86_64-w64-mingw32":  # import and static libraries, the C runtime's objects
+        return len(parts) > 1 and parts[1] == "lib"
+    if parts[:4] == ["lib", "clang", major(), "include"]:
+        return True
+    if parts[:5] == ["lib", "clang", major(), "lib", "windows"]:
+        return parts[-1] == "libclang_rt.builtins-x86_64.a"
+    return path == "LICENSE.TXT"
+
+
+def trim(zip_bytes, folder):
+    """the kept files of the release zip in folder/<NAME>, with a stamp that names the release"""
+    if hashlib.sha256(zip_bytes).hexdigest() != PIN["sha256"]:
+        raise ToolchainError(f"the download is not llvm-mingw {PIN['release']} (its SHA-256 differs); not using it")
+    dst = Path(folder) / NAME
+    partial = dst.with_name(dst.name + ".partial")
+    if partial.exists():
+        shutil.rmtree(partial)
+    kept = 0
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as z:
+        for info in z.infolist():
+            path = info.filename.split("/", 1)[1] if "/" in info.filename else ""
+            if info.is_dir() or not path or not keep(path):
+                continue
+            target = partial / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(z.read(info))
+            kept += 1
+    (partial / STAMP).write_text(json.dumps({"release": PIN["release"], "sha256": PIN["sha256"], "files": kept}))
+    if dst.exists():
+        shutil.rmtree(dst)
+    partial.rename(dst)
+    return dst
+
+
+def fetch(folder=REPO / "toolchain"):
+    """developers: the pinned release, downloaded and trimmed into folder (kept when already there)"""
+    found = root(folder)
+    if found:
+        return found
+    print(f"Downloading llvm-mingw {PIN['release']} ({PIN['size'] // 1_000_000} MB)")
+    with urllib.request.urlopen(PIN["url"], timeout=300) as r:
+        data = r.read()
+    return trim(data, folder)
+
+
+def root(folder):
+    """the toolchain in folder, or None when it is missing, incomplete or another release"""
+    dst = Path(folder) / NAME
     try:
-        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows Kits\Installed Roots") as key:
-            root = Path(winreg.QueryValueEx(key, "KitsRoot10")[0])
-    except OSError:
-        root = Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "Windows Kits" / "10"
-    versions = sorted(
-        (
-            p.name
-            for p in (root / "Include").glob("10.*")
-            if (p / "um" / "windows.h").exists() and (root / "Lib" / p.name / "um" / "x64" / "d3d12.lib").exists()
-        ),
-        key=lambda v: tuple(int(x) for x in v.split(".")),
-    )
-    if not versions:
-        raise ToolchainError(
-            "No Windows SDK with desktop x64 libraries was found. Add a Windows 11 SDK in the Visual Studio Installer."
-        )
-    return root, versions[-1]
-
-
-def discover(fallback=None):
-    """the installed Visual Studio and SDK; else the download in fallback (tools/msvc.py's folder)"""
-    try:
-        vs, msvc = find_msvc()
-        sdk, version = find_sdk()
-    except ToolchainError:
-        found = downloaded(fallback) if fallback else None
-        if found:
-            return found
-        raise
-    return describe(vs, msvc, sdk, version)
-
-
-def downloaded(folder):
-    """tools/msvc.py's folder, or None when it holds no finished download"""
-    folder = Path(folder)
-    try:
-        info = json.loads((folder / "msvc.json").read_text(encoding="utf-8"))
+        stamp = json.loads((dst / STAMP).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    import msvc
-
-    if not msvc.current(info):
-        return None
-    sdk = folder / "Windows Kits" / "10"
-    version = next((p.name for p in (sdk / "Include").glob(info["windows_sdk"] + ".*")), None)
-    if not version:
-        return None
-    return describe(folder, folder / "VC" / "Tools" / "MSVC" / info["msvc"], sdk, version)
+    needed = [dst / "bin" / b.format(major=major()) for b in BIN if b.endswith((".exe", ".dll"))]
+    if stamp.get("sha256") != PIN["sha256"] or not all(p.exists() for p in needed):
+        return None  # an antivirus can remove a file after it was unpacked
+    return dst
 
 
-def describe(vs, msvc, sdk, version):
-    bin_dir = msvc / "bin" / "Hostx64" / "x64"
-    include = sdk / "Include" / version
-    lib = sdk / "Lib" / version
+def discover(*folders):
+    """the toolchain a build uses: the release's bundled copy (toolchain/ in the repository) or one in folders"""
+    for folder in (REPO / "toolchain", *folders):
+        found = root(folder)
+        if found:
+            return describe(found)
+    raise ToolchainError(
+        f"the bundled compiler (toolchain/{NAME}) is missing or incomplete. Extract the whole release zip "
+        "again; an antivirus may have removed some of its files."
+    )
+
+
+def describe(found):
     return {
-        "visual_studio": str(vs),
-        "msvc": msvc.name,
-        "windows_sdk": version,
-        "cl": str(bin_dir / "cl.exe"),
-        "link": str(bin_dir / "link.exe"),
-        "dumpbin": str(bin_dir / "dumpbin.exe"),
-        # C headers (the build's order: compiler, then ucrt, shared, um); winrt for wrl/client.h
-        "include": [str(msvc / "include"), str(include / "ucrt"), str(include / "shared"), str(include / "um")],
-        "winrt": str(include / "winrt"),
-        "lib": [str(msvc / "lib" / "x64"), str(lib / "ucrt" / "x64"), str(lib / "um" / "x64")],
+        "release": f"llvm-mingw {PIN['release']} (LLVM {PIN['llvm']})",
+        "sha256": PIN["sha256"],
+        "root": str(found),
+        "bin": str(found / "bin"),
     }
 
 
 def main(argv):
     try:
-        tc = discover()
+        if argv[:1] == ["fetch"]:
+            print(fetch(Path(argv[1]) if len(argv) > 1 else REPO / "toolchain"))
+        elif argv[:1] == ["trim"]:
+            print(trim(Path(argv[1]).read_bytes(), Path(argv[2])))
+        else:
+            print(json.dumps(discover(), indent=2))
     except ToolchainError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
-    text = json.dumps(tc, indent=2)
-    print(text)
-    if argv:
-        Path(argv[0]).write_text(text + "\n", encoding="utf-8")
     return 0
 
 

@@ -9,7 +9,7 @@ import build  # noqa: E402
 import lift  # noqa: E402
 import titles  # noqa: E402
 
-TC = {"msvc": "14.51.1", "windows_sdk": "10.0.26100.0", "cl": "cl.exe"}
+TC = {"release": "llvm-mingw 20261006 (LLVM 23.1.3)", "sha256": "a" * 64, "root": "C:/one", "bin": "C:/one/bin"}
 
 
 def test_lift_is_current_only_with_the_same_inputs(tmp_path):
@@ -33,6 +33,7 @@ def test_build_is_current_only_with_the_same_lift_and_compiler(tmp_path):
     assert not build.current(built, lifted, TC)  # no executable
     (built / "bin" / "fci-whole.exe").write_bytes(b"MZ")
     assert build.current(built, lifted, TC)
-    assert not build.current(built, lifted, dict(TC, msvc="14.52.1"))
+    assert build.current(built, lifted, dict(TC, root="D:/moved", bin="D:/moved/bin"))  # the same compiler
+    assert not build.current(built, lifted, dict(TC, sha256="b" * 64))
     (lifted / "lift.json").write_text(json.dumps({"generated": {"recomp_0000.c": "b" * 64}}))
     assert not build.current(built, lifted, TC)

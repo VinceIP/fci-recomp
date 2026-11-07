@@ -2,7 +2,7 @@
 //!
 //!   <root>/FCI Launcher.exe
 //!   <root>/source/<version>/      a release of fci-recomp, as its zip holds it
-//!   <root>/build/                 the work folder all versions share: Python, compiler, toolkit, lift, build
+//!   <root>/build/                 the work folder all versions share: lift, build, object cache
 //!   <root>/FarCryInstincts/  <root>/FarCryEvolution/    the games (as BuildGame.cmd puts them)
 //!   <root>/logs/                  one log per build
 //!   <root>/launcher.json          the launcher's own state: the discs chosen, settings sync
@@ -20,7 +20,7 @@ use crate::titles::{Title, TITLES};
 pub const SUGGESTED_ROOT: &str = r"C:\Games\fci-recomp";
 
 /// what a release zip holds beside the launcher (tests/test_package.py keeps this in step with the zip)
-pub const RELEASE_ENTRIES: [&str; 13] = [
+pub const RELEASE_ENTRIES: [&str; 16] = [
     "BuildEditor.cmd",
     "BuildGame.cmd",
     "CHANGELOG.md",
@@ -28,11 +28,14 @@ pub const RELEASE_ENTRIES: [&str; 13] = [
     "README.md",
     "THIRD_PARTY.md",
     "data",
+    "deps",
     "fci-recomp.py",
     "patches",
+    "python",
     "re",
     "requirements.txt",
     "src",
+    "toolchain",
     "tools",
 ];
 
@@ -62,12 +65,12 @@ pub fn sources() -> PathBuf {
     root().join("source")
 }
 
-/// Python, as the work folder holds it (tools/bootstrap.ps1 makes the same one)
-pub fn python() -> PathBuf {
+/// the Python a release carries (tools/package.py), which BuildGame.cmd runs too
+pub fn python(source: &Path) -> PathBuf {
     if let Some(p) = std::env::var_os("FCI_PYTHON") {
         return PathBuf::from(p);
     }
-    work().join("python").join("tools").join("python.exe")
+    source.join("python").join("python.exe")
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -112,7 +115,8 @@ pub struct Source {
     pub path: PathBuf,
 }
 
-pub const PROTOCOL: u64 = 1;
+/// 2 from 0.2.3: the release carries Python (python/) and the compiler, and asks for no license
+pub const PROTOCOL: u64 = 2;
 
 /// the version of the fci-recomp.py in dir, when it is one the launcher can drive
 pub fn read_source(dir: &Path) -> Option<Source> {

@@ -38,22 +38,15 @@ def test_explicit_pins_must_match_image():
 
 
 @pytest.fixture(scope="module")
-def launch_dll(msvc, tmp_path_factory):
+def launch_dll(compiler, tmp_path_factory):
     out = tmp_path_factory.mktemp("launch")
     argv = [
-        msvc["cl"],
-        "/nologo",
-        "/O2",
-        "/MT",
-        "/LD",
-        *["/I" + p for p in msvc["include"]],
+        str(Path(compiler["bin"]) / "clang.exe"),
+        "-O2",
+        "-shared",  # lld exports every function of a DLL that marks none
         str(REPO / "src" / "fci_launch.c"),
-        "/Fo:" + str(out / "launch.obj"),
-        "/Fe:" + str(out / "launch.dll"),
-        "/link",
-        *["/LIBPATH:" + p for p in msvc["lib"]],
-        "/EXPORT:fci_launch_target",
-        "/EXPORT:fci_quote_arg",
+        "-o",
+        str(out / "launch.dll"),
     ]
     done = subprocess.run(argv, cwd=out, capture_output=True, text=True, timeout=60)
     assert done.returncode == 0, done.stdout + done.stderr

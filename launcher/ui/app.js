@@ -203,10 +203,7 @@ listen("task", ({ payload: e }) => {
     const label = S.task ? S.task.label : "The build";
     S.task = null;
     S.result = { ...e, label, request: S.lastRequest };
-    if (e.license) {
-      S.result = null;
-      licenseDialog(e.license);
-    } else if (e.cancelled) {
+    if (e.cancelled) {
       S.result = null;
       toast("Stopped. Starting it again resumes where it left off.");
     }
@@ -214,19 +211,6 @@ listen("task", ({ payload: e }) => {
     if (S.tab === "settings") loadCache();
   }
 });
-
-function licenseDialog(url) {
-  modal(
-    h("h3", {}, "Microsoft's compiler is needed"),
-    h("p", {}, "Visual Studio with the C++ tools wasn't found on this PC, so the build downloads Microsoft's C++ compiler and the Windows SDK into the launcher's build folder (about 2 GB, only once). Nothing is installed on the system."),
-    h("p", {}, "They are downloaded from Microsoft under the Visual Studio Build Tools license terms. ",
-      h("button", { class: "link", onclick: () => open("url:" + url) }, "Read the license terms")),
-    h("div", { class: "buttons" },
-      h("button", { class: "btn", onclick: closeModal }, "Cancel"),
-      h("button", { class: "btn primary", onclick: () => { closeModal(); start({ ...S.lastRequest, accept_license: true }); } }, "Accept and build"),
-    ),
-  );
-}
 
 function updateProgress() {
   const t = S.task;

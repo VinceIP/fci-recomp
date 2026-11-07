@@ -1,7 +1,10 @@
-"""Fetch the two upstream projects the build uses, at the commits this project is tested with.
+"""The two upstream projects the build uses, at the commits this project is tested with.
 
   python -B tools/deps.py <dir>                fetch into <dir>/<name> (keeps one already there and verified)
   python -B tools/deps.py <dir> --from <path>  clone from local checkouts in <path>/<name> instead (offline)
+
+The release zip carries both in deps/ (tools/package.py), so a build from it downloads nothing; a git
+checkout fetches them into the work folder once.
 
   xboxrecomp      sp00nz's recompiler toolkit and runtime: the lifter, the Xbox kernel, devices
   xbe-recomp      TGP482's Xbox XBE Recomp: its XDK 5849 signature list (the D3D and DirectSound
@@ -26,6 +29,8 @@ import time
 import urllib.request
 import zipfile
 
+REPO = Path(__file__).resolve().parents[1]
+BUNDLED = REPO / "deps"
 DEPS = {
     "xboxrecomp": {
         "repo": "sp00nznet/xboxrecomp",
@@ -38,6 +43,23 @@ DEPS = {
         "digest": "60ce07b297c7474bb8cdd9922143a4c10120546516b9dd09e4ed31312d06dd94",
     },
 }
+
+
+class DepsError(Exception):
+    pass
+
+
+def bundled():
+    """the release's deps/, verified; None in a git checkout, which has none"""
+    if not BUNDLED.exists():
+        return None
+    for name, dep in DEPS.items():
+        if not (BUNDLED / name).is_dir() or tree_digest(BUNDLED / name) != dep["digest"]:
+            raise DepsError(
+                f"the bundled toolkit (deps/{name}) is missing or changed. Extract the whole release zip again; "
+                "an antivirus may have removed some of its files."
+            )
+    return BUNDLED
 
 
 def tree_digest(root):
