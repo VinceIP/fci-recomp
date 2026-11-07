@@ -45,7 +45,7 @@ Some features are not yet complete or working as intended, but are planned.
 
 - Windows 10 or 11 64-bit, and a GPU that supports Direct3D 12
 - About 10 GB of free space
-- An internet connection, or access to Git, Python, Windows SDK, and MSVC
+- Nothing else to install, as of 0.2.4 - the release includes the compiler and the other build tools
 - A dump of at least one of the following game discs, as an ISO or extracted files:
   - Far Cry Instincts (original Xbox, title ID `55530008`, version 1)
   - Far Cry Instincts: Evolution (original Xbox, title ID `55530060`, version 3)
@@ -63,10 +63,8 @@ Some features are not yet complete or working as intended, but are planned.
 
 1. Download the zip of the [latest release](../../releases/latest) and extract.
 2. Drag your disc image (or the folder with the disc's files) onto `BuildGame.cmd`.
-3. Wait for it to finish: expect 15-25 minutes depending on your hardware, plus downloads for required
-Python and SDK runtimes. You may be prompted to accept terms for Microsoft's compiler if it's not
-already on your system. Consider raising an issue if you have any errors during the recompilation/build
-process.
+3. Wait for it to finish: expect 5-20 minutes depending on your hardware. Nothing is downloaded or
+installed. Consider raising an issue if you have any errors during the recompilation/build process.
 4. (Optional) Drag your disc image onto `BuildEditor.cmd` to recompile and build the game's map editor if you intend to make maps, which you should, because it's pretty cool.
 5. Start `FarCryInstincts\FarCryInstincts.exe`, or `FarCryEvolution\FarCryEvolution.exe`.
 6. Repeat the above steps for each title.
@@ -75,6 +73,9 @@ Save data and log files are stored in `%APPDATA%\fci-recomp` by default. This di
 
 Developers can run the same steps via Python: `python fci-recomp.py setup <disc>`
 (`--help` lists the options).
+
+A git checkout doesn't include the compiler and toolkit; the first build downloads them once
+(`python -B tools/toolchain.py fetch` does it ahead of time).
 
 ## Configuration
 
