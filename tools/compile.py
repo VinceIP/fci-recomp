@@ -687,6 +687,9 @@ def link_args(tools, work, objects, argv):
 
 def main():
     global REPLACE
+    # compiler messages quote source text; a pipe in the console's code page can't hold every character (#49)
+    for stream in (sys.stdout, sys.stderr):
+        stream.reconfigure(errors="backslashreplace")
     inputs = Path(__file__).resolve().parent
     work = inputs.parent / "work"
     obj = work / "obj"
