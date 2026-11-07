@@ -433,7 +433,7 @@ async fn move_launcher(app: AppHandle, tasks: State<'_, Arc<Tasks>>) -> Result<(
 }
 
 /// what in build\ a build makes again by itself: the recompiled C, the builds, the object cache, downloads
-/// left over, and what releases before 0.2.3 kept there (the toolkit, Python, Microsoft's compiler) and no
+/// left over, and what releases before 0.2.4 kept there (the toolkit, Python, Microsoft's compiler) and no
 /// longer use. Only these names: anything else in the folder isn't ours to remove.
 const CACHE_IN_WORK: [&str; 7] = ["lift", "build", "objects", "deps", "downloads", "toolchain", "python"];
 

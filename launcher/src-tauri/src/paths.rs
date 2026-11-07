@@ -115,7 +115,7 @@ pub struct Source {
     pub path: PathBuf,
 }
 
-/// 2 from 0.2.3: the release carries Python (python/) and the compiler, and asks for no license
+/// 2 from 0.2.4: the release carries Python (python/) and the compiler, and asks for no license
 pub const PROTOCOL: u64 = 2;
 
 /// the version of the fci-recomp.py in dir, when it is one the launcher can drive
