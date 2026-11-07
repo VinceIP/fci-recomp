@@ -1,0 +1,260 @@
+Subject: The guest's host base leaves every fixed window free; the tiled aperture is mapped first
+
+Wine (Proton) places thread stacks bottom-up from host 4 GB. With the guest at host 0x10000000 that is
+guest 0xF0000000, so the tiled aperture failed with ERROR_INVALID_ADDRESS and the map editor faulted on
+its first surface write. A base is now kept only when the contiguous, tiled, NV2A, MCPX and flash windows
+are all free at it, with two candidates above 4 GB; and the tiled aperture is mapped straight after the
+contiguous window, before the device threads start. On Windows the first base still passes.
+
+---
+diff --git a/src/kernel/xbox_memory_layout.c b/src/kernel/xbox_memory_layout.c
+index c831d65..0a26aa8 100644
+--- a/src/kernel/xbox_memory_layout.c
++++ b/src/kernel/xbox_memory_layout.c
+@@ -152,6 +152,35 @@ static size_t xbox_TiledApertureSize(void)
+     return g_memory_size < max ? g_memory_size : max;
+ }
+ 
++/* Whether the fixed guest windows would find their host addresses free with
++ * the guest's address 0 at host base. Wine (Proton) puts thread stacks
++ * bottom-up from host 4 GB, so a base of 0x10000000 left the tiled aperture
++ * (guest 0xF0000000) already taken and the map editor's first surface write
++ * faulted. A base that fails this is passed over for the next one. */
++static BOOL xbox_FixedWindowsFree(uintptr_t base)
++{
++    const struct { uint32_t va; size_t size; } w[] = {
++        { XBOX_CONTIG_BASE, XBOX_CONTIG_SIZE },
++        { XBOX_TILED_BASE, 0 },
++        { XBOX_NV2A_BASE, XBOX_NV2A_SIZE },
++        { XBOX_MCPX_BASE, XBOX_MCPX_SIZE },
++        { XBOX_FLASH_BASE, XBOX_FLASH_SIZE },
++    };
++    for (size_t i = 0; i < sizeof(w) / sizeof(w[0]); i++) {
++        size_t size = w[i].size ? w[i].size : xbox_TiledApertureSize();
++        if (size > XBOX_CONTIG_SIZE && w[i].va == XBOX_TILED_BASE)
++            size = XBOX_CONTIG_SIZE;
++        uintptr_t lo = base + w[i].va, hi = lo + size;
++        for (uintptr_t a = lo; a < hi;) {
++            MEMORY_BASIC_INFORMATION mbi;
++            if (!VirtualQuery((LPCVOID)a, &mbi, sizeof mbi) || mbi.State != MEM_FREE)
++                return FALSE;
++            a = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
++        }
++    }
++    return TRUE;
++}
++
+ static HANDLE g_nv2a_ack_thread = NULL;
+ static volatile LONG g_nv2a_ack_stop = 0;
+ 
+@@ -1766,6 +1795,11 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+             0x01000000,             /* 16 MB */
+             0x02000000,             /* 32 MB */
+             0x10000000,             /* 256 MB */
++#if UINTPTR_MAX > 0xFFFFFFFFu
++            /* above Wine's bottom-up allocations from 4 GB */
++            (uintptr_t)0x200000000ull,
++            (uintptr_t)0x800000000ull,
++#endif
+             0,                      /* sentinel - let OS choose */
+         };
+ 
+@@ -1821,6 +1855,13 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+                     g_memory_base = NULL;
+                     continue;
+                 }
++                if (!xbox_FixedWindowsFree((uintptr_t)g_memory_base - XBOX_MAP_START)) {
++                    fprintf(stderr, "  base %p: a fixed window's host range is taken, trying the next\n",
++                            g_memory_base);
++                    UnmapViewOfFile(g_memory_base);
++                    g_memory_base = NULL;
++                    continue;
++                }
+                 break;
+             }
+         }
+@@ -2298,6 +2339,93 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+         }
+     }
+ 
++    /*
++     * Tiled / write-combined aperture at 0xF0000000.
++     *
++     * Mapped before the device threads below start: Wine (Proton) places thread
++     * stacks bottom-up from host 4 GB, which is where this lands.
++     *
++     * The NV2A exposes physical RAM a second time here and titles render
++     * through it. Wreckless's first surface write goes to guest 0xF1954000 --
++     * the tiled alias of physical 0x01954000, already inside our RAM -- and
++     * faulted because nothing was mapped there.
++     *
++     * A view of the same section rather than fresh storage: the title writes a
++     * surface through the tiled address and reads it back through the normal
++     * one, so the two have to be the same bytes. That is the whole reason the
++     * RAM lives in a file mapping.
++     */
++    {
++        uintptr_t tiled_native = XBOX_TILED_BASE + g_memory_offset;
++        size_t tiled_size = xbox_TiledApertureSize();
++        /* A view of the CONTIGUOUS window, not of RAM.
++         *
++         * On hardware all three -- physical P, 0x80000000+P and 0xF0000000+P
++         * -- are one and the same memory. Here they cannot be: the XBE image
++         * is loaded at its own VA in the RAM mapping, so aliasing the
++         * contiguous window onto RAM would drop a title's pinned physical
++         * pools on top of its own code (Halo pins 3.4 MB at 0x61000, which is
++         * inside its image). The contiguous window therefore has separate
++         * storage, and the question becomes which of the two the tiled
++         * aperture should be a view of.
++         *
++         * It is the contiguous one. A tiled address is a GPU surface address
++         * by construction, and GPU surfaces come from
++         * MmAllocateContiguousMemory -- so the pairing that has to hold is
++         * tiled to contiguous. Against RAM instead, Half-Life 2's loader wrote
++         * every decoded video frame through 0xF1C63000 while D3D sampled the
++         * texture at 0x81C63000, and the sampler read zeros: 1.8 billion black
++         * pixels rasterised, perfectly, from an empty texture.
++         */
++        if (tiled_size > XBOX_CONTIG_SIZE)
++            tiled_size = XBOX_CONTIG_SIZE;
++        g_tiled_view = g_contig_mapping
++            ? MapViewOfFileEx(
++                g_contig_mapping,
++                FILE_MAP_ALL_ACCESS,
++                0, 0,
++                tiled_size,
++                (LPVOID)tiled_native)
++            : NULL;
++        if (g_tiled_view) {
++            /* Prove the alias rather than assert it. Everything the title
++             * renders goes through this window and is read back through the
++             * physical address, so if the two are not the same bytes the GPU
++             * sees empty buffers and the screen stays black -- with nothing
++             * anywhere to say why. One write and one read turns that into a
++             * startup line. */
++            {
++                volatile uint32_t *via_tiled =
++                    (volatile uint32_t *)((uintptr_t)(XBOX_TILED_BASE + 0x1000)
++                                          + g_memory_offset);
++                volatile uint32_t *via_contig =
++                    (volatile uint32_t *)((uintptr_t)(XBOX_CONTIG_BASE + 0x1000)
++                                          + g_memory_offset);
++                uint32_t saved = *via_contig;
++
++                *via_tiled = 0xA5C30F17u;
++                if (*via_contig != 0xA5C30F17u)
++                    fprintf(stderr, "  WARNING: tiled aperture does NOT alias"
++                            " the contiguous window (wrote A5C30F17, read"
++                            " %08X) -- the GPU will sample empty textures\n",
++                            *via_contig);
++                else
++                    fprintf(stderr, "  Tiled aperture alias verified"
++                            " (tiled 0x%08X == contiguous 0x%08X)\n",
++                            XBOX_TILED_BASE, XBOX_CONTIG_BASE);
++                *via_contig = saved;
++            }
++            fprintf(stderr, "  Tiled aperture: %u MB at Xbox VA 0x%08X"
++                    " (aliases the contiguous window)\n",
++                    (unsigned)(g_memory_size / (1024 * 1024)),
++                    XBOX_TILED_BASE);
++        } else {
++            fprintf(stderr, "  WARNING: tiled aperture at 0x%08X failed"
++                    " (error %lu); rendering writes will fault\n",
++                    XBOX_TILED_BASE, GetLastError());
++        }
++    }
++
+     /*
+      * NV2A hardware register aperture at 0xFD000000 (16 MB).
+      *
+@@ -2591,90 +2719,6 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+     guest_vmem_init(g_memory_offset, g_memory_size,
+                     (uint64_t)g_memory_size * (1u + XBOX_NUM_MIRRORS));
+ 
+-    /*
+-     * Tiled / write-combined aperture at 0xF0000000.
+-     *
+-     * The NV2A exposes physical RAM a second time here and titles render
+-     * through it. Wreckless's first surface write goes to guest 0xF1954000 --
+-     * the tiled alias of physical 0x01954000, already inside our RAM -- and
+-     * faulted because nothing was mapped there.
+-     *
+-     * A view of the same section rather than fresh storage: the title writes a
+-     * surface through the tiled address and reads it back through the normal
+-     * one, so the two have to be the same bytes. That is the whole reason the
+-     * RAM lives in a file mapping.
+-     */
+-    {
+-        uintptr_t tiled_native = XBOX_TILED_BASE + g_memory_offset;
+-        size_t tiled_size = xbox_TiledApertureSize();
+-        /* A view of the CONTIGUOUS window, not of RAM.
+-         *
+-         * On hardware all three -- physical P, 0x80000000+P and 0xF0000000+P
+-         * -- are one and the same memory. Here they cannot be: the XBE image
+-         * is loaded at its own VA in the RAM mapping, so aliasing the
+-         * contiguous window onto RAM would drop a title's pinned physical
+-         * pools on top of its own code (Halo pins 3.4 MB at 0x61000, which is
+-         * inside its image). The contiguous window therefore has separate
+-         * storage, and the question becomes which of the two the tiled
+-         * aperture should be a view of.
+-         *
+-         * It is the contiguous one. A tiled address is a GPU surface address
+-         * by construction, and GPU surfaces come from
+-         * MmAllocateContiguousMemory -- so the pairing that has to hold is
+-         * tiled to contiguous. Against RAM instead, Half-Life 2's loader wrote
+-         * every decoded video frame through 0xF1C63000 while D3D sampled the
+-         * texture at 0x81C63000, and the sampler read zeros: 1.8 billion black
+-         * pixels rasterised, perfectly, from an empty texture.
+-         */
+-        if (tiled_size > XBOX_CONTIG_SIZE)
+-            tiled_size = XBOX_CONTIG_SIZE;
+-        g_tiled_view = g_contig_mapping
+-            ? MapViewOfFileEx(
+-                g_contig_mapping,
+-                FILE_MAP_ALL_ACCESS,
+-                0, 0,
+-                tiled_size,
+-                (LPVOID)tiled_native)
+-            : NULL;
+-        if (g_tiled_view) {
+-            /* Prove the alias rather than assert it. Everything the title
+-             * renders goes through this window and is read back through the
+-             * physical address, so if the two are not the same bytes the GPU
+-             * sees empty buffers and the screen stays black -- with nothing
+-             * anywhere to say why. One write and one read turns that into a
+-             * startup line. */
+-            {
+-                volatile uint32_t *via_tiled =
+-                    (volatile uint32_t *)((uintptr_t)(XBOX_TILED_BASE + 0x1000)
+-                                          + g_memory_offset);
+-                volatile uint32_t *via_contig =
+-                    (volatile uint32_t *)((uintptr_t)(XBOX_CONTIG_BASE + 0x1000)
+-                                          + g_memory_offset);
+-                uint32_t saved = *via_contig;
+-
+-                *via_tiled = 0xA5C30F17u;
+-                if (*via_contig != 0xA5C30F17u)
+-                    fprintf(stderr, "  WARNING: tiled aperture does NOT alias"
+-                            " the contiguous window (wrote A5C30F17, read"
+-                            " %08X) -- the GPU will sample empty textures\n",
+-                            *via_contig);
+-                else
+-                    fprintf(stderr, "  Tiled aperture alias verified"
+-                            " (tiled 0x%08X == contiguous 0x%08X)\n",
+-                            XBOX_TILED_BASE, XBOX_CONTIG_BASE);
+-                *via_contig = saved;
+-            }
+-            fprintf(stderr, "  Tiled aperture: %u MB at Xbox VA 0x%08X"
+-                    " (aliases the contiguous window)\n",
+-                    (unsigned)(g_memory_size / (1024 * 1024)),
+-                    XBOX_TILED_BASE);
+-        } else {
+-            fprintf(stderr, "  WARNING: tiled aperture at 0x%08X failed"
+-                    " (error %lu); rendering writes will fault\n",
+-                    XBOX_TILED_BASE, GetLastError());
+-        }
+-    }
+-
+     xbox_WatchInit();
+     fprintf(stderr, "xbox_MemoryLayoutInit: complete\n");
+     return TRUE;
