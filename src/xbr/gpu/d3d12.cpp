@@ -595,8 +595,21 @@ private:
         std::unordered_map<uint64_t, Target>::iterator it;
         bool sized;  // the entry is there at the surface's size
     };
-    Target* FindTarget(const Surface& s, bool depth);
-    Target* EnsureTarget(const Surface& s, bool depth);
+    // FCI: a colour surface laid inside a bigger target's memory at its pitch (a splitscreen player's part of
+    // the back buffer) is that rect of the target, as on the console, not a target of its own
+    struct Window {
+        Target* parent = nullptr;
+        uint32_t gx = 0, gy = 0, gw = 0, gh = 0;  // console pixels in the parent
+    };
+    bool FindWindow(uint32_t data, uint32_t pitch, uint32_t bits, uint32_t gw, uint32_t gh, Window& w);
+    bool SurfaceWindow(const Surface& s, Window& w);
+    // the window's pixels as a texture of its own, copied from the parent when sampled
+    Target* WindowCopy(uint32_t data, const Window& w);
+    // a new target takes in the smaller targets inside its memory, which are windows of it from now on
+    void AbsorbWindows(Target& p);
+    D3D12_RECT WindowRect(const Window& w) const;  // host pixels of the parent
+    Target* FindTarget(const Surface& s, bool depth, Window* win = nullptr);
+    Target* EnsureTarget(const Surface& s, bool depth, Window* win = nullptr);
     // EnsureTarget's steps, in call order
     TargetSlot FindTargetSlot(const Surface& s, bool depth, uint64_t alt);
     uint64_t SizedTargetKey(uint32_t data, bool depth, uint32_t gw, uint32_t gh) const;
@@ -605,7 +618,7 @@ private:
     bool CreateTargetResource(Target& t, const Surface& s);
     bool CreateTargetView(Target& t);
     // UploadTarget, then its step
-    void UploadTarget(Target& t, const Surface& s);
+    void UploadTarget(Target& t, const Surface& s, const Window& win = {});
     ComPtr<ID3D12Resource> CreatePixelTexture(const std::vector<uint8_t>& px, uint32_t pitch, uint32_t w, uint32_t h);
     // Clear's arguments past the state
     struct ClearArgs {
@@ -616,12 +629,13 @@ private:
         float z;
         uint32_t stencil;
     };
-    void ClearTarget(Target& t, const State& s, const ClearArgs& c, std::vector<D3D12_RECT>& rs);
+    void ClearTarget(Target& t, const State& s, const ClearArgs& c, std::vector<D3D12_RECT>& rs, const Window& win);
     // Copy's guest lists: count src_rects, dst_points 0 or one per rect
     struct CopyList {
         uint32_t count;
         uint32_t src_rects;
         uint32_t dst_points;
+        Window dst{};  // FCI: the destination is this rect of dst_t
     };
     void CopyByDraw(const Target& src_t, ID3D12Resource* src_res, D3D12_RESOURCE_STATES& src_state, Target& dst_t,
                     const CopyList& l);
@@ -694,6 +708,8 @@ private:
     uint32_t smp_used_ = 0;
     std::unordered_map<uint64_t, Target> targets_;
     std::unordered_map<uint32_t, uint64_t> target_used_;  // target address to the frame it was last used
+    std::unordered_map<uint64_t, Target> window_copies_;  // FCI: WindowCopy's, by window address and size
+    Window bound_win_;                                    // FCI: the colour target drawn is this rect of bound_rt_
     std::unordered_map<uint64_t, Tex> textures_;  // by data address, a P8 texture's with its palette's above
     std::unordered_map<uint64_t, ComPtr<ID3D12PipelineState>> blit_psos_;
     Extension* ext_ = nullptr;
@@ -1279,6 +1295,7 @@ void D3D12Backend::Transition(ID3D12Resource* r, D3D12_RESOURCE_STATES& cur, D3D
 // a resized target gives back its view and its resources
 void D3D12Backend::ReleaseTarget(std::unordered_map<uint64_t, Target>::iterator it) {
     if (bound_rt_ == &it->second || bound_ds_ == &it->second) bound_rt_ = bound_ds_ = nullptr;
+    if (bound_win_.parent == &it->second) bound_win_ = {};
     (it->second.depth ? free_dsv_ : free_rtv_).push_back(it->second.view);
     CurrentFrame().garbage.push_back(it->second.res);
     if (it->second.fb) CurrentFrame().garbage.push_back(it->second.fb);
@@ -1358,26 +1375,139 @@ D3D12Backend::TargetSlot D3D12Backend::FindTargetSlot(const Surface& s, bool dep
     return slot;
 }
 
-// the surface's target at its size, null when there is none
-Target* D3D12Backend::FindTarget(const Surface& s, bool depth) {
+// FCI: the target whose memory holds a gw x gh surface at data with this pitch, at a bigger size; the biggest
+bool D3D12Backend::FindWindow(uint32_t data, uint32_t pitch, uint32_t bits, uint32_t gw, uint32_t gh, Window& w) {
+    w = {};
+    if (bits != 32) return false;
+    for (auto& [key, t] : targets_) {
+        if (t.depth || key != TargetMapKey(t.data, false) || data < t.data || data - t.data >= t.bytes) continue;
+        if (pitch != GuestPitch(t.gw) || TargetStale(t.data)) continue;
+        uint32_t off = data - t.data, gx = off % pitch / 4, gy = off / pitch;
+        if (off % 4 || gx + gw > t.gw || gy + gh > t.gh || (gw == t.gw && gh == t.gh)) continue;
+        if (!w.parent || t.gw * t.gh > w.parent->gw * w.parent->gh) w = {&t, gx, gy, gw, gh};
+    }
+    return w.parent != nullptr;
+}
+
+// FCI: a linear colour surface with no target of its size is a window when a bigger target holds it
+bool D3D12Backend::SurfaceWindow(const Surface& s, Window& w) {
+    w = {};
+    TextureDesc d;
+    if (!DescribeSurface(s, d) || !d.linear) return false;
+    uint32_t data = mem::VirtualFromPhysical(s.data);
+    auto it = targets_.find(TargetMapKey(data, false));
+    if (it != targets_.end() && it->second.gw == d.width && it->second.gh == d.height) return false;
+    return FindWindow(data, d.pitch, Format(d.format).bits, d.width, d.height, w);
+}
+
+D3D12_RECT D3D12Backend::WindowRect(const Window& w) const {
+    const Target& p = *w.parent;
+    float sx = float(p.w) / p.gw, sy = float(p.h) / p.gh;
+    return {LONG(std::lround(w.gx * sx)), LONG(std::lround(w.gy * sy)), LONG(std::lround((w.gx + w.gw) * sx)),
+            LONG(std::lround((w.gy + w.gh) * sy))};
+}
+
+// FCI: sampled as a texture, a window is a copy of its rect: the parent may be the target drawn meanwhile
+Target* D3D12Backend::WindowCopy(uint32_t data, const Window& w) {
+    Target& p = *w.parent;
+    Resolve(p);
+    D3D12_RECT r = WindowRect(w);
+    UINT cw = UINT(r.right - r.left), ch = UINT(r.bottom - r.top);
+    if (!cw || !ch) return nullptr;
+    Target& c = window_copies_[uint64_t(data) | uint64_t(w.gw) << kKeyWidthShift | uint64_t(w.gh) << kKeyHeightShift];
+    if (!c.res || c.w != cw || c.h != ch || c.fmt != p.fmt) {
+        if (c.res) CurrentFrame().garbage.push_back(c.res);
+        c = Target{};
+        c.fmt = p.fmt;
+        c.w = cw;
+        c.h = ch;
+        c.gw = w.gw;
+        c.gh = w.gh;
+        c.data = data;
+        c.bytes = GuestPitch(p.gw) * (w.gh - 1) + w.gw * 4;
+        c.epoch = DirtyEpoch(data);
+        c.sig = MemSig(data, c.bytes);
+        c.state = D3D12_RESOURCE_STATE_COPY_DEST;
+        D3D12_HEAP_PROPERTIES hp{D3D12_HEAP_TYPE_DEFAULT};
+        D3D12_RESOURCE_DESC td = Texture2DDesc(c.fmt, cw, ch);
+        if (FAILED(dev_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &td, c.state, nullptr,
+                                                 IID_PPV_ARGS(&c.res)))) {
+            window_copies_.erase(uint64_t(data) | uint64_t(w.gw) << kKeyWidthShift | uint64_t(w.gh) << kKeyHeightShift);
+            return nullptr;
+        }
+    }
+    c.range = p.range;
+    Transition(p.res.Get(), p.state, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    Transition(c.res.Get(), c.state, D3D12_RESOURCE_STATE_COPY_DEST);
+    D3D12_TEXTURE_COPY_LOCATION dl{c.res.Get(), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
+    D3D12_TEXTURE_COPY_LOCATION sl{p.res.Get(), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
+    D3D12_BOX b{UINT(r.left), UINT(r.top), 0, UINT(r.right), UINT(r.bottom), 1};
+    cl_->CopyTextureRegion(&dl, 0, 0, 0, &sl, &b);
+    c.drawn = true;
+    return &c;
+}
+
+// FCI: the targets inside p's memory at its pitch keep their pixels as p's rects, then go
+void D3D12Backend::AbsorbWindows(Target& p) {
+    if (p.depth) return;
+    uint32_t pitch = GuestPitch(p.gw);
+    float sx = float(p.w) / p.gw, sy = float(p.h) / p.gh;
+    std::vector<uint64_t> gone;
+    for (auto& [key, c] : targets_) {
+        if (c.depth || key != TargetMapKey(c.data, false) || c.data < p.data || c.data - p.data >= p.bytes) continue;
+        uint32_t off = c.data - p.data, gx = off % pitch / 4, gy = off / pitch;
+        if (GuestPitch(c.gw) != pitch || off % 4 || gx + c.gw > p.gw || gy + c.gh > p.gh) continue;
+        gone.push_back(key);
+        if (TargetStale(c.data)) continue;
+        bool same_scale = c.w == uint32_t(std::lround(c.gw * sx)) && c.h == uint32_t(std::lround(c.gh * sy));
+        if (c.fmt != p.fmt || !same_scale) {
+            LOG_FIRST(4, "d3d12: target %08X (%ux%u) dropped inside %08X: another format or scale", c.data, c.gw,
+                      c.gh, p.data);
+            continue;
+        }
+        Resolve(c);
+        Transition(c.res.Get(), c.state, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        Transition(p.res.Get(), p.state, D3D12_RESOURCE_STATE_COPY_DEST);
+        D3D12_TEXTURE_COPY_LOCATION dl{p.res.Get(), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
+        D3D12_TEXTURE_COPY_LOCATION sl{c.res.Get(), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
+        D3D12_BOX b{0, 0, 0, c.w, c.h, 1};
+        cl_->CopyTextureRegion(&dl, UINT(std::lround(gx * sx)), UINT(std::lround(gy * sy)), 0, &sl, &b);
+        p.drawn = true;
+    }
+    for (uint64_t k : gone) ReleaseTarget(targets_.find(k));
+}
+
+// the surface's target at its size, null when there is none; a window's parent with win set
+Target* D3D12Backend::FindTarget(const Surface& s, bool depth, Window* win) {
+    if (win) *win = {};
     if (!s.header) return nullptr;
     uint64_t alt = 0;
     if (ext_ && !ext_->TargetKey(s, depth, alt)) return nullptr;
+    if (Window w; !depth && !alt && SurfaceWindow(s, w)) {
+        target_used_[w.parent->data] = frame_;
+        if (win) *win = w;
+        return w.parent;
+    }
     TargetSlot slot = FindTargetSlot(s, depth, alt);
     if (!slot.sized) return nullptr;
     target_used_[slot.data] = frame_;
     return &slot.it->second;
 }
 
-// the surface's target, made again at its size when that changed
-Target* D3D12Backend::EnsureTarget(const Surface& s, bool depth) {
+// the surface's target, made again at its size when that changed; a window's parent with win set
+Target* D3D12Backend::EnsureTarget(const Surface& s, bool depth, Window* win) {
+    if (win) *win = {};
     if (!s.header) return nullptr;
     uint64_t alt = 0;
     if (ext_ && !ext_->TargetKey(s, depth, alt)) return nullptr;
+    if (Window w; !depth && !alt && SurfaceWindow(s, w)) {
+        target_used_[w.parent->data] = frame_;
+        if (win) *win = w;
+        return w.parent;
+    }
     TargetSlot slot = FindTargetSlot(s, depth, alt);
     target_used_[slot.data] = frame_;
     if (slot.sized) return &slot.it->second;
-    if (slot.it != targets_.end()) ReleaseTarget(slot.it);
     Target t;
     t.depth = depth;
     t.gw = slot.gw;
@@ -1391,17 +1521,21 @@ Target* D3D12Backend::EnsureTarget(const Surface& s, bool depth) {
     if (depth) t.bytes = slot.gw * slot.gh * 4;
     t.epoch = DirtyEpoch(slot.data);
     t.sig = MemSig(slot.data, t.bytes);
+    if (!depth && !alt) AbsorbWindows(t);  // FCI: the old target at this address too, when it fits
+    if (auto old = targets_.find(slot.key); old != targets_.end()) ReleaseTarget(old);
     auto& ref = targets_[slot.key] = std::move(t);
     return &ref;
 }
 
 bool D3D12Backend::BindTargets(const State& s) {
-    Target* rt = EnsureTarget(s.rt, false);
+    Window win;
+    Target* rt = EnsureTarget(s.rt, false, &win);
+    bound_win_ = win;
     Target* ds = s.rs[kRsZEnable] || s.rs[kRsStencilEnable] ? EnsureTarget(s.zs, true) : nullptr;
     if (rt && ds && (rt->w != ds->w || rt->h != ds->h)) ds = nullptr;
     if (!rt && !ds) return false;
     if (rt) {
-        if (LatchCpuWrite(*rt)) UploadTarget(*rt, s.rt);
+        if (LatchCpuWrite(*rt)) UploadTarget(*rt, s.rt, win);
         Transition(rt->res.Get(), rt->state, D3D12_RESOURCE_STATE_RENDER_TARGET);
         rt->drawn = true;
     }
@@ -1529,14 +1663,16 @@ ComPtr<ID3D12Resource> D3D12Backend::CreatePixelTexture(const std::vector<uint8_
 }
 
 // CPU pixels of a color surface into its host target, scaled
-void D3D12Backend::UploadTarget(Target& t, const Surface& s) {
+// win (FCI): s is that window of t, its pixels go to its rect
+void D3D12Backend::UploadTarget(Target& t, const Surface& s, const Window& win) {
     g_perf.rtups++;
     TextureDesc d;
     if (!Describe(s.header, d) || Format(d.format).depth) return;
     std::vector<uint8_t> px;
     uint32_t pitch;
     // after a Sync only the pixels the CPU changed go over the picture, which stays at render scale
-    bool over = !t.drawn && d.width == t.gw && d.height == t.gh && t.read.size() == size_t(t.gw) * t.gh * 4;
+    bool over = !win.parent && !t.drawn && d.width == t.gw && d.height == t.gh &&
+                t.read.size() == size_t(t.gw) * t.gh * 4;
     if (over) {
         LOG_FIRST(4, "d3d12: CPU pixels drawn over target %08X", t.data);
         pitch = t.gw * 4;
@@ -1547,6 +1683,12 @@ void D3D12Backend::UploadTarget(Target& t, const Surface& s) {
     ComPtr<ID3D12Resource> tex = CreatePixelTexture(px, pitch, d.width, d.height);
     Transition(t.res.Get(), t.state, D3D12_RESOURCE_STATE_RENDER_TARGET);
     SetBlitTarget(Cpu(rtv_heap_.Get(), t.view, rtv_inc_), t.w, t.h);
+    if (win.parent) {
+        D3D12_RECT r = WindowRect(win);
+        D3D12_VIEWPORT vp{float(r.left), float(r.top), float(r.right - r.left), float(r.bottom - r.top), 0, 1};
+        cl_->RSSetViewports(1, &vp);
+        cl_->RSSetScissorRects(1, &r);
+    }
     float uv[4] = {0, 0, 1, 1};
     float mul = 1 / t.range;
     Blit(tex.Get(), kBgra, uv, {.alpha = true, .mul = mul, .rtv = t.fmt, .over = over});
@@ -2127,6 +2269,13 @@ ID3D12Resource* D3D12Backend::BindTexture(const State& s, int stage, DrawTexture
     bool box = true;
     if (ext_) ext_->Sample(d.data, fi.depth, stage, alt, stages.k[stage], box);
     auto tit = targets_.find(SizedTargetKey(d.data, fi.depth, d.width, d.height) | alt);
+    // FCI: part of a bigger target (a splitscreen player's view): that rect of it
+    bool sized = tit != targets_.end() && tit->second.gw == d.width && tit->second.gh == d.height;
+    if (Window w; !sized && !alt && !fi.depth && d.linear && !d.cube && d.depth == 1 &&
+                  FindWindow(d.data, d.pitch, fi.bits, d.width, d.height, w)) {
+        target_used_[w.parent->data] = frame_;
+        if (Target* c = WindowCopy(d.data, w)) return BindTargetTexture(s, stage, d, *c, box, stages);
+    }
     if (tit != targets_.end() && !d.cube && d.depth == 1 && !fi.compressed) {
         return BindTargetTexture(s, stage, d, tit->second, box, stages);
     }
@@ -2565,10 +2714,14 @@ void D3D12Backend::CaptureTextures(const State& s, const DrawTextures& stages) {
         ID3D12Resource* res = stages.res[i];
         TextureDesc d;
         if (!s.textures[size_t(i)] || !Describe(s.textures[size_t(i)], d)) continue;
-        bool tg = targets_.count(SizedTargetKey(d.data, Format(d.format).depth, d.width, d.height));
-        fprintf(cap_, " | t%d %08X fmt %X %ux%u%s%s", i, d.data, d.format, d.width, d.height, tg ? " target" : "",
-                res ? "" : " unbound");
-        if (res && !tg && stages.info[i].kind == kTex2D && cap_seen_.insert(d.data).second) {
+        auto ti = targets_.find(SizedTargetKey(d.data, Format(d.format).depth, d.width, d.height));
+        bool tg = ti != targets_.end() && ti->second.gw == d.width && ti->second.gh == d.height;
+        // colour keys are address-only, so a window at its parent's address also finds the parent
+        bool win = !tg && window_copies_.count(uint64_t(d.data) | uint64_t(d.width) << kKeyWidthShift |
+                                               uint64_t(d.height) << kKeyHeightShift);
+        fprintf(cap_, " | t%d %08X fmt %X %ux%u%s%s", i, d.data, d.format, d.width, d.height,
+                tg ? " target" : win ? " window" : "", res ? "" : " unbound");
+        if (res && !tg && !win && stages.info[i].kind == kTex2D && cap_seen_.insert(d.data).second) {
             cap_tex_.push_back({res, stages.sv[i].Format, d.data, d.width, d.height});
         }
     }
@@ -2725,11 +2878,19 @@ void D3D12Backend::SetTextureViewsAndSamplers(const State& s, const Assembled& a
     cl_->SetGraphicsRootDescriptorTable(3, Gpu(smp_heap_.Get(), samplers, smp_inc_));
 }
 
-// viewport covers the target, the guest viewport is in the shader; scissor clips to it
+// viewport covers the target (FCI: or the window drawn), the guest viewport is in the shader; scissor clips to it
 void D3D12Backend::SetViewportScissor(const State& s, GuestExtent size) {
     float W = float(bound_rt_ ? bound_rt_->w : bound_ds_->w);
     float H = float(bound_rt_ ? bound_rt_->h : bound_ds_->h);
-    D3D12_VIEWPORT vp{0, 0, W, H, 0, 1};
+    LONG ox = 0, oy = 0;
+    if (bound_rt_ && bound_win_.parent == bound_rt_) {
+        D3D12_RECT r = WindowRect(bound_win_);
+        ox = r.left;
+        oy = r.top;
+        W = float(r.right - r.left);
+        H = float(r.bottom - r.top);
+    }
+    D3D12_VIEWPORT vp{float(ox), float(oy), W, H, 0, 1};
     cl_->RSSetViewports(1, &vp);
     float sx = W / size.w, sy = H / size.h;  // FCI: per axis (render scale)
     LONG x0 = LONG(s.viewport.x * sx);
@@ -2742,8 +2903,8 @@ void D3D12Backend::SetViewportScissor(const State& s, GuestExtent size) {
         x1 = std::min(x1, LONG(s.scissors[2] * sx));
         y1 = std::min(y1, LONG(s.scissors[3] * sy));
     }
-    D3D12_RECT rect{std::clamp<LONG>(x0, 0, LONG(W)), std::clamp<LONG>(y0, 0, LONG(H)),
-                    std::clamp<LONG>(x1, 0, LONG(W)), std::clamp<LONG>(y1, 0, LONG(H))};
+    D3D12_RECT rect{ox + std::clamp<LONG>(x0, 0, LONG(W)), oy + std::clamp<LONG>(y0, 0, LONG(H)),
+                    ox + std::clamp<LONG>(x1, 0, LONG(W)), oy + std::clamp<LONG>(y1, 0, LONG(H))};
     cl_->RSSetScissorRects(1, &rect);
 }
 
@@ -2914,18 +3075,30 @@ D3D12_RECT ScaledRect(const Target& t, int x0, int y0, int x1, int y1) {
             std::clamp<LONG>(LONG(x1 * sx), 0, t.w), std::clamp<LONG>(LONG(y1 * sy), 0, t.h)};
 }
 
-// rs: the rects buffer, reused across targets
-void D3D12Backend::ClearTarget(Target& t, const State& s, const ClearArgs& c, std::vector<D3D12_RECT>& rs) {
+// rs: the rects buffer, reused across targets; win: t is drawn as that rect of it (FCI)
+void D3D12Backend::ClearTarget(Target& t, const State& s, const ClearArgs& c, std::vector<D3D12_RECT>& rs,
+                               const Window& win) {
     rs.clear();
+    // guest rect of the surface cleared, clipped to the window and placed in it
+    auto add = [&](int x0, int y0, int x1, int y1) {
+        if (win.parent) {
+            int ww = int(win.gw), wh = int(win.gh);
+            x0 = std::clamp(x0, 0, ww) + int(win.gx);
+            x1 = std::clamp(x1, 0, ww) + int(win.gx);
+            y0 = std::clamp(y0, 0, wh) + int(win.gy);
+            y1 = std::clamp(y1, 0, wh) + int(win.gy);
+        }
+        rs.push_back(ScaledRect(t, x0, y0, x1, y1));
+    };
     if (c.count && c.rects) {
         for (uint32_t i = 0; i < c.count; i++) {
             int32_t r[4];
             std::memcpy(r, c.rects + size_t(i) * sizeof(r), sizeof(r));
-            rs.push_back(ScaledRect(t, r[0], r[1], r[2], r[3]));
+            add(r[0], r[1], r[2], r[3]);
         }
     } else {
         const auto& v = s.viewport;
-        rs.push_back(ScaledRect(t, int(v.x), int(v.y), int(v.x + v.w), int(v.y + v.h)));
+        add(int(v.x), int(v.y), int(v.x + v.w), int(v.y + v.h));
     }
     if (t.depth) {
         Transition(t.res.Get(), t.state, D3D12_RESOURCE_STATE_DEPTH_WRITE);
@@ -2935,7 +3108,7 @@ void D3D12Backend::ClearTarget(Target& t, const State& s, const ClearArgs& c, st
                                    UINT8(c.stencil), UINT(rs.size()), rs.data());
     } else {
         // pixels the CPU wrote before this clear go in first, a later upload would paint over the clear
-        if (LatchCpuWrite(t)) UploadTarget(t, s.rt);
+        if (LatchCpuWrite(t)) UploadTarget(t, s.rt, win);
         Transition(t.res.Get(), t.state, D3D12_RESOURCE_STATE_RENDER_TARGET);
         float col[4];
         Color(c.color, col);
@@ -2953,16 +3126,13 @@ void D3D12Backend::Clear(const State& s, uint32_t count, const uint8_t* rects, u
         fprintf(cap_, "%04u clear rt %08X ds %08X flags %X color %08X z %.3f\n", cap_i_++, s.rt.data, s.zs.data, flags,
                 color, z);
     }
-    Target* rt = (flags & kClearTarget) ? EnsureTarget(s.rt, false) : nullptr;
+    Window win;
+    Target* rt = (flags & kClearTarget) ? EnsureTarget(s.rt, false, &win) : nullptr;
     Target* ds = (flags & (kClearZ | kClearStencil)) ? EnsureTarget(s.zs, true) : nullptr;
-    uint32_t gw;
-    uint32_t gh;
-    SurfaceSize(rt ? s.rt : s.zs, gw, gh);
     std::vector<D3D12_RECT> rs;
     ClearArgs c{.count = count, .rects = rects, .flags = flags, .color = color, .z = z, .stencil = stencil};
-    for (Target* t : {rt, ds}) {
-        if (t) ClearTarget(*t, s, c, rs);
-    }
+    if (rt) ClearTarget(*rt, s, c, rs, win);
+    if (ds) ClearTarget(*ds, s, c, rs, Window{});
 }
 
 // CopyRects' guest lists: src_rects RECTs, dst_points POINTs, all int32
@@ -3048,17 +3218,21 @@ void D3D12Backend::CopyByDraw(const Target& src_t, ID3D12Resource* src_res, D3D1
     cl_->OMSetRenderTargets(1, &rh, FALSE, nullptr);
     float src_sx = float(src_t.w) / src_t.gw, src_sy = float(src_t.h) / src_t.gh;
     float dst_sx = float(dst_t.w) / dst_t.gw, dst_sy = float(dst_t.h) / dst_t.gh;
+    // FCI: a window destination is its rect of dst_t
+    D3D12_RECT wr = l.dst.parent ? WindowRect(l.dst) : D3D12_RECT{0, 0, LONG(dst_t.w), LONG(dst_t.h)};
+    uint32_t dgw = l.dst.parent ? l.dst.gw : dst_t.gw, dgh = l.dst.parent ? l.dst.gh : dst_t.gh;
     bool listed = l.count && l.src_rects;
     uint32_t n = listed ? l.count : 1;
     for (uint32_t i = 0; i < n; i++) {
-        float whole_w = float(std::min(src_t.gw, dst_t.gw));
-        float whole_h = float(std::min(src_t.gh, dst_t.gh));
+        float whole_w = float(std::min(src_t.gw, dgw));
+        float whole_h = float(std::min(src_t.gh, dgh));
         DrawnRect r{.x0 = 0, .y0 = 0, .x1 = whole_w, .y1 = whole_h};
         if (listed) r = ReadDrawnRect(l.src_rects, l.dst_points, i);
         if (r.x1 <= r.x0 || r.y1 <= r.y0) continue;
-        D3D12_VIEWPORT vp{r.dx * dst_sx, r.dy * dst_sy, (r.x1 - r.x0) * dst_sx, (r.y1 - r.y0) * dst_sy, 0, 1};
-        LONG right = std::min(LONG(vp.TopLeftX + vp.Width), LONG(dst_t.w));
-        LONG bottom = std::min(LONG(vp.TopLeftY + vp.Height), LONG(dst_t.h));
+        D3D12_VIEWPORT vp{float(wr.left) + r.dx * dst_sx, float(wr.top) + r.dy * dst_sy, (r.x1 - r.x0) * dst_sx,
+                          (r.y1 - r.y0) * dst_sy, 0, 1};
+        LONG right = std::min(LONG(vp.TopLeftX + vp.Width), wr.right);
+        LONG bottom = std::min(LONG(vp.TopLeftY + vp.Height), wr.bottom);
         D3D12_RECT scissor{LONG(vp.TopLeftX), LONG(vp.TopLeftY), right, bottom};
         if (scissor.right <= scissor.left || scissor.bottom <= scissor.top) continue;
         cl_->RSSetViewports(1, &vp);
@@ -3081,10 +3255,13 @@ void D3D12Backend::CopyByRegion(const Target& src_t, ID3D12Resource* src_res, D3
     D3D12_TEXTURE_COPY_LOCATION dl{dst_t.res.Get(), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
     D3D12_TEXTURE_COPY_LOCATION sl{src_res, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
     float dst_sx = float(dst_t.w) / dst_t.gw, dst_sy = float(dst_t.h) / dst_t.gh;
+    // FCI: a window destination is its rect of dst_t
+    D3D12_RECT wr = l.dst.parent ? WindowRect(l.dst) : D3D12_RECT{0, 0, LONG(dst_t.w), LONG(dst_t.h)};
+    UINT ww = UINT(wr.right - wr.left), wh = UINT(wr.bottom - wr.top);
     bool listed = l.count && l.src_rects;
     uint32_t n = listed ? l.count : 1;
     for (uint32_t i = 0; i < n; i++) {
-        D3D12_BOX b{0, 0, 0, std::min(src_t.w, dst_t.w), std::min(src_t.h, dst_t.h), 1};
+        D3D12_BOX b{0, 0, 0, std::min(src_t.w, ww), std::min(src_t.h, wh), 1};
         uint32_t dx = 0;
         uint32_t dy = 0;
         if (listed) {
@@ -3101,10 +3278,10 @@ void D3D12Backend::CopyByRegion(const Target& src_t, ID3D12Resource* src_res, D3
                 dy = ScaleUnsigned(p.y, dst_sy);
             }
         }
-        if (b.right <= b.left || b.bottom <= b.top || dx >= dst_t.w || dy >= dst_t.h) continue;
-        b.right = std::min<UINT>(b.right, b.left + dst_t.w - dx);
-        b.bottom = std::min<UINT>(b.bottom, b.top + dst_t.h - dy);
-        cl_->CopyTextureRegion(&dl, dx, dy, 0, &sl, &b);
+        if (b.right <= b.left || b.bottom <= b.top || dx >= ww || dy >= wh) continue;
+        b.right = std::min<UINT>(b.right, b.left + ww - dx);
+        b.bottom = std::min<UINT>(b.bottom, b.top + wh - dy);
+        cl_->CopyTextureRegion(&dl, UINT(wr.left) + dx, UINT(wr.top) + dy, 0, &sl, &b);
     }
     dst_t.drawn = true;
     bound_rt_ = bound_ds_ = nullptr;
@@ -3113,7 +3290,8 @@ void D3D12Backend::CopyByRegion(const Target& src_t, ID3D12Resource* src_res, D3
 void D3D12Backend::Copy(const Surface& src, const Surface& dst, uint32_t count, uint32_t src_rects,
                         uint32_t dst_points) {
     PerfScope perf_copy{g_perf.copy};
-    Target* src_t = FindTarget(src, false);
+    Window src_win;
+    Target* src_t = FindTarget(src, false, &src_win);
     if (cap_) {
         const char* from = "memory";
         if (src_t) from = src_t->drawn ? "target" : "idle target";
@@ -3121,17 +3299,21 @@ void D3D12Backend::Copy(const Surface& src, const Surface& dst, uint32_t count, 
     }
     // pixels the CPU made: the copy happens in memory, textures and targets pick it up from there
     if (!src_t || !src_t->drawn) {
+        Window dst_win;
         if (!CopySurfaceMemory(src, dst, count, src_rects, dst_points)) {
             LOG_FIRST(8, "d3d12: CopyRects %08X to %08X skipped", src.data, dst.data);
-        } else if (Target* dst_t = FindTarget(dst, false)) {
-            UploadTarget(*dst_t, dst);
+        } else if (Target* dst_t = FindTarget(dst, false, &dst_win)) {
+            UploadTarget(*dst_t, dst, dst_win);
         }
         return;
     }
+    // FCI: a window source is read from a copy of its rect, which may also be where it goes
+    if (src_win.parent && !(src_t = WindowCopy(mem::VirtualFromPhysical(src.data), src_win))) return;
     Resolve(*src_t);
-    Target* dst_t = EnsureTarget(dst, false);
+    Window dst_win;
+    Target* dst_t = EnsureTarget(dst, false, &dst_win);
     if (!dst_t || src_t == dst_t) return;
-    CopyList l{.count = count, .src_rects = src_rects, .dst_points = dst_points};
+    CopyList l{.count = count, .src_rects = src_rects, .dst_points = dst_points, .dst = dst_win};
     if (src_t->fmt != dst_t->fmt) {
         // formats differ: drawn across
         CopyByDraw(*src_t, src_t->res.Get(), src_t->state, *dst_t, l);
@@ -4103,6 +4285,8 @@ void D3D12Backend::ApplySettings() {
         Flush();
         for (auto& [key, tg] : targets_) (tg.depth ? free_dsv_ : free_rtv_).push_back(tg.view);
         targets_.clear();
+        window_copies_.clear();
+        bound_win_ = {};
         scale_x_ = want_x;
         scale_y_ = want_y;
         LOGI("d3d12: render scale %.3f x %.3f", scale_x_, scale_y_);
