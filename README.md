@@ -77,6 +77,19 @@ Developers can run the same steps via Python: `python fci-recomp.py setup <disc>
 A git checkout doesn't include the compiler and toolkit; the first build downloads them once
 (`python -B tools/toolchain.py fetch` does it ahead of time).
 
+## Steam Deck (experimental)
+
+Both Instincts and Evolution run on the Steam deck via Proton, but this is experimental. Expect some issues here and there.
+
+1. Build the game (and the map editor, if you want it) on a Windows PC as above.
+2. Copy the whole game folder (`FarCryInstincts` or `FarCryEvolution`, with its `game` folder inside) to the Deck.
+3. In Desktop Mode, add `FarCryInstincts.exe` or `FarCryEvolution.exe` to Steam as a non-Steam game.
+4. In the game's Properties > Compatibility, force Proton 10, Proton stable, or newer.
+5. Launch it from Steam.
+
+The launcher (`FCI Launcher.exe`) doesn't run on the Deck yet, but it will be ported to work on Linux soon. You'll need to manually adjust your fci.ini to customize settings on the Steam Deck for now.
+Remember to remove semi-colons from the setting you want to adjust in the file.
+
 ## Configuration
 
 Directories, display, graphics, keybinds, and other settings are configured by editing `fci.ini`,
