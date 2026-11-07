@@ -7,7 +7,7 @@ and errors are also printed as single lines of JSON after "@fci ". Without it no
   {"event": "warning" | "error", "text": "..."}
   {"event": "done", "minutes": 12}
 
-PROTOCOL 2 (0.2.3): the release carries Python in python/ and the compiler; there is no "license" event.
+PROTOCOL 2 (0.2.4): the release carries Python in python/ and the compiler; there is no "license" event.
 """
 
 import json
