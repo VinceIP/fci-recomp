@@ -28,7 +28,7 @@
 
 // ---- this runtime (C) -----------------------------------------------------------------------
 extern "C" {
-extern __declspec(thread) uint32_t g_eax, g_ecx, g_edx, g_ebx, g_esp, g_ebp, g_esi, g_edi;
+extern thread_local uint32_t g_eax, g_ecx, g_edx, g_ebx, g_esp, g_ebp, g_esi, g_edi;
 typedef void (*recomp_func_t)(void);
 recomp_func_t recomp_lookup(uint32_t xbox_va);
 recomp_func_t recomp_lookup_manual(uint32_t xbox_va);

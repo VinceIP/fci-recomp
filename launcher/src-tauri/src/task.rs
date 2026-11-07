@@ -25,8 +25,6 @@ pub struct Request {
     /// with "game": build the map editor too
     #[serde(default)]
     pub editor: bool,
-    #[serde(default)]
-    pub accept_license: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -42,8 +40,6 @@ pub enum Event {
 pub struct Outcome {
     pub ok: bool,
     pub cancelled: bool,
-    /// Microsoft's terms must be accepted before the compiler is downloaded: the URL of the terms
-    pub license: Option<String>,
     pub error: Option<String>,
     pub log: String,
     pub minutes: u64,
@@ -200,7 +196,6 @@ pub fn start(app: AppHandle, tasks: Arc<Tasks>, request: Request) -> Result<(), 
         match result {
             Ok(()) => outcome.ok = true,
             Err(Stop::Cancelled) => outcome.cancelled = true,
-            Err(Stop::License(url)) => outcome.license = Some(url),
             Err(Stop::Failed(e)) => outcome.error = Some(e),
         }
         job.log(&format!(
@@ -227,7 +222,6 @@ pub fn start(app: AppHandle, tasks: Arc<Tasks>, request: Request) -> Result<(), 
 
 enum Stop {
     Cancelled,
-    License(String),
     Failed(String),
 }
 
@@ -375,22 +369,16 @@ impl Job {
         self.log(&format!("source: {} in {}", source.version, source.path.display()));
         self.check_cancel()?;
 
-        self.stage(0.03, 0.03, "Getting Python ready");
-        let python = {
-            let (tx, rx) = mpsc::channel::<(String, u64, u64)>();
-            let path = source.path.clone();
-            let worker = std::thread::spawn(move || {
-                net::ensure_python(&path, &mut |what, done, total| {
-                    let _ = tx.send((what.to_string(), done, total));
-                })
-            });
-            for (what, done, total) in rx {
-                self.detail = format!("{what}: {} of {} MB", done >> 20, (total >> 20).max(1));
-                self.show(done as f64 / total.max(1) as f64, false);
-            }
-            worker.join().map_err(|_| Stop::Failed("the Python download stopped".into()))??
-        };
-        self.check_cancel()?;
+        // the release carries Python; an antivirus can still have removed it after the unzip
+        let python = paths::python(&source.path);
+        if !python.exists() {
+            return Err(Stop::Failed(format!(
+                "{} is missing from fci-recomp {}. Remove the folder {} and start the build again; an antivirus                  may have removed the file.",
+                python.display(),
+                source.version,
+                source.path.display()
+            )));
+        }
 
         let work = paths::work();
         let mut runs: Vec<(Vec<String>, usize, String)> = Vec::new();
@@ -422,9 +410,6 @@ impl Job {
                 }
             };
             args.extend(common(&install));
-            if self.request.accept_license {
-                args.push("--accept-msvc-license".into());
-            }
             let parts = match self.request.kind.as_str() {
                 "game" => 1 + self.request.editor as usize,
                 "editor" => 1,
@@ -569,7 +554,6 @@ impl Job {
         });
         let mut run = Run { plan: Vec::new(), current: 0, parts: HashMap::new(), expected_parts: parts };
         let mut error: Option<String> = None;
-        let mut license: Option<String> = None;
         let mut stderr_tail: Vec<String> = Vec::new();
         for (is_err, line) in rx {
             let Some(json) = line.strip_prefix("@fci ") else {
@@ -619,7 +603,6 @@ impl Job {
                     self.log(&format!("Error: {}", s("text")));
                     error = Some(s("text"));
                 }
-                "license" => license = Some(s("url")),
                 "done" => {
                     run.current = run.plan.len();
                     self.show(1.0, true);
@@ -637,9 +620,6 @@ impl Job {
         let code = status.and_then(|s| s.ok()).and_then(|s| s.code()).unwrap_or(-1);
         if code == 0 {
             return Ok(());
-        }
-        if let Some(url) = license {
-            return Err(Stop::License(url));
         }
         Err(Stop::Failed(error.unwrap_or_else(|| {
             let tail = stderr_tail.iter().rev().find(|l| !l.trim().is_empty()).cloned().unwrap_or_default();

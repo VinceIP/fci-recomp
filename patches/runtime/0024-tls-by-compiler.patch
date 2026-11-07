@@ -1,0 +1,20 @@
+Subject: The push-buffer thread's state is thread-local under every compiler
+
+nv2a_pb_exec.c chose __declspec(thread) for any Windows target. clang and GCC targeting mingw ignore
+that attribute with a warning, so its per-thread state became one variable shared by every thread. The
+qualifier is now chosen by the compiler, as recomp_types.h and xbox_winnt.h already do.
+
+---
+diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
+--- a/src/kernel/nv2a_pb_exec.c
++++ b/src/kernel/nv2a_pb_exec.c
+@@ -39,6 +39,9 @@
+ #include "nv2a_combiner.h"
+ #if defined(_WIN32)
+ #include <windows.h>
++#endif
++/* Keyed on the compiler: clang and GCC targeting Windows ignore __declspec(thread). */
++#if defined(_MSC_VER)
+ #define NV_TLS __declspec(thread)
+ #else
+ #define NV_TLS __thread

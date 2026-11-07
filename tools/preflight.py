@@ -14,14 +14,12 @@ import platform
 import shutil
 import sys
 
-GIT_URL = "https://git-scm.com/download/win"
-VS_URL = "https://visualstudio.microsoft.com/downloads/"
+REPO = Path(__file__).resolve().parents[1]
 GB = 2**30
-# measured: the game's files 2.5 GB; per part (game, editor) about 1 GB of lift and build; a downloaded
-# compiler and SDK about 2 GB while it unpacks
-GAME_FILES, PER_PART, COMPILER = 2.5 * GB, 1.0 * GB, 2.0 * GB
-# the deepest file a build writes is about 135 characters below the work folder's parent (the
-# downloaded SDK's headers); compilers and msiexec do not all take paths past 260 characters
+# measured: the game's files 2.5 GB; per part (game, editor) about 1 GB of lift and build
+GAME_FILES, PER_PART = 2.5 * GB, 1.0 * GB
+# the deepest file is the bundled compiler's, about 125 characters below the release folder; Explorer and
+# other unzip tools do not all take paths past 260 characters
 LONG_PATH = 100
 
 
@@ -45,39 +43,19 @@ def memory_gb():
     return st.total / GB if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(st)) else 8
 
 
-def check_git():
-    if shutil.which("git"):
-        return []
-    return [
-        (
-            "Warning",
-            "git not found on this machine. The recompiler toolkit will be downloaded as source zips "
-            f"from GitHub instead. Consider installing Git if errors occur: {GIT_URL}",
-        )
-    ]
-
-
-def check_compiler(work, download=False):
-    """the installed Visual Studio, or why it is not used (a finished download needs nothing said)"""
+def check_bundle():
+    """the compiler and toolkit the release carries; a git checkout downloads them once instead"""
+    import deps
     import toolchain
 
-    if download:
-        return []
+    if not (REPO / "toolchain").exists() and not (REPO / "deps").exists():
+        return [("Warning", "this is a git checkout: the compiler and the toolkit are downloaded once (about 200 MB)")]
     try:
-        toolchain.find_msvc()
-        toolchain.find_sdk()
-        return []
-    except toolchain.ToolchainError as e:
-        if toolchain.downloaded(Path(work) / "toolchain"):
-            return []
-        return [
-            (
-                "Warning",
-                f"Visual Studio is not used: {e} Microsoft's compiler and the Windows SDK will be "
-                f'downloaded instead (about 400 MB). Visual Studio with "Desktop development with C++" '
-                f"avoids that: {VS_URL}",
-            )
-        ]
+        toolchain.discover()
+        deps.bundled()
+    except (toolchain.ToolchainError, deps.DepsError) as e:
+        return [("Error", str(e))]
+    return []
 
 
 def existing(path):
@@ -88,12 +66,11 @@ def existing(path):
     return path
 
 
-def check_space(work, install, parts, download_compiler):
+def check_space(work, install, parts):
     need = {}
     if not (Path(install) / "game" / "default.xbe").exists():
         need[existing(install).anchor] = need.get(existing(install).anchor, 0) + GAME_FILES
-    work_need = PER_PART * parts + (COMPILER if download_compiler else 0)
-    need[existing(work).anchor] = need.get(existing(work).anchor, 0) + work_need
+    need[existing(work).anchor] = need.get(existing(work).anchor, 0) + PER_PART * parts
     found = []
     for drive, n in need.items():
         free = shutil.disk_usage(drive).free
@@ -102,7 +79,7 @@ def check_space(work, install, parts, download_compiler):
     return found
 
 
-def check_folder(path, what):
+def check_folder(path, what, write=True):
     found = []
     path = Path(path).resolve()
     if len(str(path)) > LONG_PATH:
@@ -124,6 +101,8 @@ def check_folder(path, what):
                 )
             )
             break
+    if not write:
+        return found
     # the folder itself, made now (the build makes it anyway): a new folder at a drive root is writable
     # where the root itself is not (#40)
     try:
@@ -156,12 +135,12 @@ def check_system():
     return found
 
 
-def checks(work, install, parts=1, download_compiler=False):
-    found = check_system() + check_git()
-    compiler = check_compiler(work, download_compiler)
-    found += compiler
-    found += check_space(work, install, parts, bool(compiler) or download_compiler)
-    found += check_folder(work, "build")
+def checks(work, install, parts=1):
+    found = check_system() + check_bundle()
+    found += check_space(work, install, parts)
+    found += check_folder(REPO, "fci-recomp", write=False)
+    if Path(work).resolve() != REPO:
+        found += check_folder(work, "build")
     if Path(install).resolve() != Path(work).resolve():
         found += check_folder(install, "install")
     return found
@@ -178,10 +157,9 @@ def report(found):
 
 
 def main():
-    repo = Path(__file__).resolve().parents[1]
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--work", default=str(repo / "build"))
-    ap.add_argument("--install", default=str(repo / "FarCryInstincts"))
+    ap.add_argument("--work", default=str(REPO / "build"))
+    ap.add_argument("--install", default=str(REPO / "FarCryInstincts"))
     a = ap.parse_args()
     found = checks(a.work, a.install)
     if not found:

@@ -18,39 +18,48 @@ def levels(found):
     return [level for level, _ in found]
 
 
-def test_git_missing_is_a_warning_with_the_link(monkeypatch):
-    monkeypatch.setattr(preflight.shutil, "which", lambda name: None)
-    [(level, text)] = preflight.check_git()
-    assert level == "Warning" and "git not found" in text and preflight.GIT_URL in text
-    monkeypatch.setattr(preflight.shutil, "which", lambda name: "C:/git.exe")
-    assert preflight.check_git() == []
+def test_bundle_missing_is_a_git_checkout_and_incomplete_is_an_error(monkeypatch, tmp_path):
+    monkeypatch.setattr(preflight, "REPO", tmp_path)
+    [(level, text)] = preflight.check_bundle()  # neither toolchain/ nor deps/: a git checkout
+    assert level == "Warning" and "downloaded once" in text
+    (tmp_path / "toolchain").mkdir()
+
+    def missing():
+        raise toolchain.ToolchainError("the bundled compiler is missing")
+
+    monkeypatch.setattr(toolchain, "discover", missing)
+    [(level, text)] = preflight.check_bundle()
+    assert level == "Error" and "bundled compiler" in text
+    monkeypatch.setattr(toolchain, "discover", lambda: {})
+    monkeypatch.setattr(deps, "bundled", lambda: tmp_path / "deps")
+    assert preflight.check_bundle() == []
 
 
-def test_compiler_says_why_visual_studio_is_not_used(monkeypatch, tmp_path):
-    def no_vs():
-        raise toolchain.ToolchainError("No Visual Studio with the C++ x64 tools was found.")
-
-    monkeypatch.setattr(toolchain, "find_msvc", no_vs)
-    [(level, text)] = preflight.check_compiler(tmp_path)
-    assert level == "Warning" and "No Visual Studio" in text and preflight.VS_URL in text
-    # a finished download, or asking for one, needs nothing said
-    monkeypatch.setattr(toolchain, "downloaded", lambda folder: {"msvc": "14.51"})
-    assert preflight.check_compiler(tmp_path) == []
-    assert preflight.check_compiler(tmp_path, download=True) == []
+def test_bundled_deps_must_match_their_digests(monkeypatch, tmp_path):
+    monkeypatch.setattr(deps, "BUNDLED", tmp_path / "deps")
+    assert deps.bundled() is None  # a git checkout
+    (tmp_path / "deps" / "dep").mkdir(parents=True)
+    (tmp_path / "deps" / "dep" / "a.txt").write_bytes(b"one\n")
+    digest = deps.tree_digest(tmp_path / "deps" / "dep")
+    monkeypatch.setattr(deps, "DEPS", {"dep": {"repo": "x/dep", "commit": "0" * 40, "digest": digest}})
+    assert deps.bundled() == tmp_path / "deps"
+    (tmp_path / "deps" / "dep" / "a.txt").unlink()  # an antivirus took it
+    with pytest.raises(deps.DepsError, match="Extract the whole release zip again"):
+        deps.bundled()
 
 
 def test_space_counts_what_each_drive_needs(monkeypatch, tmp_path):
     free = {"value": 100 * preflight.GB}
     monkeypatch.setattr(preflight.shutil, "disk_usage", lambda drive: SimpleNamespace(free=free["value"]))
-    assert preflight.check_space(tmp_path / "work", tmp_path / "install", 2, True) == []
+    assert preflight.check_space(tmp_path / "work", tmp_path / "install", 2) == []
     free["value"] = 3 * preflight.GB
-    [(level, text)] = preflight.check_space(tmp_path / "work", tmp_path / "install", 2, True)
-    # one drive for both: game files, two parts and the compiler
-    assert level == "Warning" and "3.0 GB free" in text and "at least 6 GB" in text
+    [(level, text)] = preflight.check_space(tmp_path / "work", tmp_path / "install", 2)
+    # one drive for both: game files and two parts
+    assert level == "Warning" and "3.0 GB free" in text and "at least 4 GB" in text
     (tmp_path / "install" / "game").mkdir(parents=True)
     (tmp_path / "install" / "game" / "default.xbe").write_bytes(b"")
     free["value"] = 1.5 * preflight.GB
-    [(_, text)] = preflight.check_space(tmp_path / "work", tmp_path / "install", 1, False)
+    [(_, text)] = preflight.check_space(tmp_path / "work", tmp_path / "install", 1)
     assert "at least 1 GB" in text  # the game's files are there already
 
 

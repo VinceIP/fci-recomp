@@ -1,9 +1,8 @@
-//! Downloads: the release list from GitHub, release zips and the private Python, each checked against its
-//! published digest before it is used.
+//! Downloads: the release list from GitHub and release zips, each checked against its published digest
+//! before it is used. A release carries everything a build needs, so nothing else is downloaded.
 
-use base64::Engine;
 use serde::Serialize;
-use sha2::{Digest, Sha256, Sha512};
+use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -73,26 +72,18 @@ pub fn latest_release() -> Result<Release, String> {
     })
 }
 
-pub enum Expect<'a> {
-    Sha256Hex(&'a str),
-    Sha512Base64(&'a str),
-    /// GitHub's "sha256:<hex>"; a release asset without one is refused (every asset of ours has one)
-    GitHub(Option<&'a str>),
-}
-
-/// url into file, checked; progress(bytes so far, bytes in all)
-pub fn download(url: &str, file: &Path, expect: Expect, progress: &mut dyn FnMut(u64, u64)) -> Result<(), String> {
-    if let Expect::GitHub(d) = &expect {
-        if !d.is_some_and(|d| d.starts_with("sha256:")) {
-            return Err(format!("{url} has no published SHA-256 to check it against; nothing was downloaded."));
-        }
-    }
+/// url into file, checked against digest, GitHub's "sha256:<hex>" (a release asset without one is refused;
+/// every asset of ours has one); progress(bytes so far, bytes in all)
+pub fn download(url: &str, file: &Path, digest: Option<&str>, progress: &mut dyn FnMut(u64, u64)) -> Result<(), String> {
+    let Some(expected) = digest.and_then(|d| d.strip_prefix("sha256:")) else {
+        return Err(format!("{url} has no published SHA-256 to check it against; nothing was downloaded."));
+    };
     let response = agent().get(url).call().map_err(|e| format!("downloading {url} failed ({e}). {NETWORK_HINT}"))?;
     let total: u64 = response.header("Content-Length").and_then(|s| s.parse().ok()).unwrap_or(0);
     let mut reader = response.into_reader();
     let partial = file.with_extension("partial");
     let mut out = std::fs::File::create(&partial).map_err(|e| format!("{}: {e}", partial.display()))?;
-    let (mut sha256, mut sha512) = (Sha256::new(), Sha512::new());
+    let mut sha256 = Sha256::new();
     let mut buf = vec![0u8; 1 << 16];
     let mut done = 0u64;
     loop {
@@ -101,18 +92,12 @@ pub fn download(url: &str, file: &Path, expect: Expect, progress: &mut dyn FnMut
             break;
         }
         sha256.update(&buf[..n]);
-        sha512.update(&buf[..n]);
         out.write_all(&buf[..n]).map_err(|e| format!("{}: {e}", partial.display()))?;
         done += n as u64;
         progress(done, total.max(done));
     }
     drop(out);
-    let ok = match expect {
-        Expect::Sha256Hex(hex) => format!("{:x}", sha256.finalize()) == hex.to_lowercase(),
-        Expect::Sha512Base64(b64) => base64::engine::general_purpose::STANDARD.encode(sha512.finalize()) == b64,
-        Expect::GitHub(d) => d.and_then(|d| d.strip_prefix("sha256:")).is_some_and(|h| format!("{:x}", sha256.finalize()) == h),
-    };
-    if !ok {
+    if format!("{:x}", sha256.finalize()) != expected.to_lowercase() {
         let _ = std::fs::remove_file(&partial);
         return Err(format!("{url} does not match its published digest; nothing was used. Try again; if it keeps failing, something between this PC and the server changes downloads."));
     }
@@ -134,7 +119,7 @@ pub fn fetch_source(release: &Release, progress: &mut dyn FnMut(u64, u64)) -> Re
     let downloads = paths::work().join("downloads");
     std::fs::create_dir_all(&downloads).map_err(|e| e.to_string())?;
     let zip = downloads.join(&asset.name);
-    download(&asset.url, &zip, Expect::GitHub(asset.digest.as_deref()), progress)?;
+    download(&asset.url, &zip, asset.digest.as_deref(), progress)?;
     let installed = install_source(&zip);
     let _ = std::fs::remove_file(&zip);
     installed
@@ -203,52 +188,4 @@ pub fn bundled_source() -> Option<PathBuf> {
             current.is_empty() || paths::newer(stem.trim_start_matches("fci-recomp-"), &current)
         })
         .max()
-}
-
-/// the private Python from source's data/python.json into build/python, unless it is there already
-pub fn ensure_python(source: &Path, progress: &mut dyn FnMut(&str, u64, u64)) -> Result<PathBuf, String> {
-    let python = paths::python();
-    if std::env::var_os("FCI_PYTHON").is_some() {
-        return Ok(python);
-    }
-    let pins: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(source.join("data").join("python.json")).map_err(|e| format!("data/python.json: {e}"))?,
-    )
-    .map_err(|e| e.to_string())?;
-    let ready = format!(
-        "python {}, capstone {}",
-        pins["python"]["version"].as_str().unwrap_or("?"),
-        pins["capstone"]["version"].as_str().unwrap_or("?")
-    );
-    let root = paths::work().join("python");
-    let marker = root.join("ready");
-    if python.exists() && std::fs::read_to_string(&marker).map(|t| t.trim() == ready).unwrap_or(false) {
-        return Ok(python);
-    }
-    if root.exists() {
-        std::fs::remove_dir_all(&root).map_err(|e| format!("removing the old Python in {}: {e}", root.display()))?;
-    }
-    std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
-    let s = |v: &serde_json::Value| v.as_str().unwrap_or_default().to_string();
-    let package = root.join("python.zip");
-    download(&s(&pins["python"]["url"]), &package, Expect::Sha512Base64(&s(&pins["python"]["sha512"])), &mut |d, t| {
-        progress("Downloading Python", d, t)
-    })?;
-    unzip(&package, &root)?;
-    let _ = std::fs::remove_file(&package);
-    let wheel = root.join("capstone.zip");
-    download(&s(&pins["capstone"]["url"]), &wheel, Expect::Sha256Hex(&s(&pins["capstone"]["sha256"])), &mut |d, t| {
-        progress("Downloading capstone", d, t)
-    })?;
-    unzip(&wheel, &root.join("tools").join("Lib").join("site-packages"))?;
-    let _ = std::fs::remove_file(&wheel);
-    let mut check = std::process::Command::new(&python);
-    check.args(["-c", "import capstone, ssl, ctypes, winreg"]);
-    crate::task::no_window(&mut check);
-    let ok = check.status().map(|s| s.success()).unwrap_or(false);
-    if !ok {
-        return Err("the downloaded Python couldn't start. An antivirus may have blocked or removed it; allow the launcher's folder and try again.".into());
-    }
-    std::fs::write(&marker, format!("{ready}\r\n")).map_err(|e| e.to_string())?;
-    Ok(python)
 }

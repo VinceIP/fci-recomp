@@ -7,6 +7,7 @@
 #include <condition_variable>
 #include <deque>
 #include <map>
+#include <mutex>
 #include <vector>
 
 #include "audio/audio.h"

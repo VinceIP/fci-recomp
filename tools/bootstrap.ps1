@@ -3,16 +3,27 @@
 #   bootstrap.ps1 setup <disc> [more fci-recomp.py options]
 #   bootstrap.ps1 editor [options]
 #
-# Python comes from the Python Software Foundation's NuGet package (a plain copy of Python, no
-# installer) and capstone from PyPI; both are checked against the digests in data\python.json (the
-# launcher makes the same Python from it) and kept in build\python, so nothing is installed on the
-# system and the next run starts at once.
+# The release carries Python with capstone in python\ (tools/package.py), so nothing is downloaded or
+# installed. A git checkout has none: there Python comes from the Python Software Foundation's NuGet
+# package (a plain copy of Python, no installer) and capstone from PyPI, both checked against the
+# digests in data\python.json, and is kept in build\python.
 param([Parameter(ValueFromRemainingArguments = $true)] [string[]] $Rest)
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'   # Invoke-WebRequest is many times slower with its progress bar
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 $Repo = Split-Path -Parent $PSScriptRoot
+$Bundled = Join-Path $Repo 'python'
+if (Test-Path $Bundled) {
+    $BundledPython = Join-Path $Bundled 'python.exe'
+    if (-not (Test-Path $BundledPython)) {
+        Write-Host 'error: the bundled Python (python\python.exe) is missing. Extract the whole release zip again;'
+        Write-Host 'an antivirus may have removed some of its files.'
+        exit 1
+    }
+    & $BundledPython -B (Join-Path $Repo 'fci-recomp.py') @Rest
+    exit $LASTEXITCODE
+}
 $Root = Join-Path $Repo 'build\python'
 $Python = Join-Path $Root 'tools\python.exe'
 

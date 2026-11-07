@@ -1,7 +1,8 @@
 """Shared fixtures. Tests that need the toolkit or a compiler are skipped when there is none.
 
-FCI_TOOLKIT    an xboxrecomp checkout at the pinned commit (default: build/deps/xboxrecomp, which
-               BuildGame.cmd or tools/deps.py fetches)
+FCI_TOOLKIT    an xboxrecomp checkout at the pinned commit (default: the release's deps/xboxrecomp, else
+               build/deps/xboxrecomp, which tools/deps.py fetches)
+The compiler is the pinned llvm-mingw in toolchain/ (python -B tools/toolchain.py fetch).
 """
 
 import os
@@ -19,7 +20,7 @@ def lifter_toolkit(tmp_path_factory):
     """a copy of the toolkit with the lifter patches, importable as `tools.recomp`"""
     import lift
 
-    source = Path(os.environ.get("FCI_TOOLKIT", REPO / "build" / "deps" / "xboxrecomp"))
+    source = toolkit_dir()
     if not (source / "tools" / "recomp").is_dir():
         pytest.skip(f"no xboxrecomp toolkit at {source} (set FCI_TOOLKIT or run tools/deps.py build/deps)")
     dst = tmp_path_factory.mktemp("toolkit") / "xboxrecomp"
@@ -28,12 +29,19 @@ def lifter_toolkit(tmp_path_factory):
     return dst
 
 
+def toolkit_dir():
+    if "FCI_TOOLKIT" in os.environ:
+        return Path(os.environ["FCI_TOOLKIT"])
+    bundled = REPO / "deps" / "xboxrecomp"
+    return bundled if bundled.is_dir() else REPO / "build" / "deps" / "xboxrecomp"
+
+
 @pytest.fixture(scope="session")
-def msvc():
-    """the toolchain description from tools/toolchain.py (Visual Studio, or build/toolchain)"""
+def compiler():
+    """the pinned llvm-mingw (tools/toolchain.py)"""
     import toolchain
 
     try:
-        return toolchain.discover(REPO / "build" / "toolchain")
+        return toolchain.discover()
     except toolchain.ToolchainError as e:
         pytest.skip(str(e))

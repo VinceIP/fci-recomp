@@ -58,12 +58,11 @@ def recover_direct(translator, start, end, instructions, blocks):
             continue
         stream = []
         valid = False
-        for cs in translator.disasm._cs.disasm(raw, target):
-            a = cs.address
+        for insn in translator.disasm._decode_stream(raw, target):
+            a = insn.address
             if a in decoded or a in translator.func_db:
                 valid = bool(stream)
                 break
-            insn = translator.disasm._decode_instruction(cs)
             if (
                 insn.end_address > hi
                 or added + len(stream) >= 4096

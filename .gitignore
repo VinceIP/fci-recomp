@@ -12,6 +12,8 @@
 
 # What the build makes: the toolkit, the compiler, the generated C, the build and the install
 /build/
+# the bundled compiler: the release zip carries it, developers fetch it (tools/toolchain.py fetch)
+/toolchain/
 /FarCryInstincts/
 /FarCryEvolution/
 # the install folders' names before 0.2.0

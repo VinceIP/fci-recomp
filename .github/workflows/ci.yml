@@ -35,7 +35,15 @@ jobs:
       - name: Fetch the pinned toolkit
         run: python -B tools/deps.py build/deps
 
-      # the patches apply, the lifter tests pass, and the patched runtime compiles with MSVC
+      - uses: actions/cache@v4
+        with:
+          path: toolchain
+          key: llvm-mingw-${{ hashFiles('data/llvm-mingw.json', 'tools/toolchain.py') }}
+
+      - name: Fetch the pinned compiler
+        run: python -B tools/toolchain.py fetch
+
+      # the patches apply, the lifter tests pass, and the patched runtime compiles with the pinned clang
       - name: Tests
         run: python -m pytest -v
 

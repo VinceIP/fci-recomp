@@ -1,6 +1,6 @@
 # Third-party components
 
-This project's own code is MIT licensed ([LICENSE](LICENSE)). It includes, patches or downloads the
+This project's own code is MIT licensed ([LICENSE](LICENSE)). It includes or patches the
 following components, each under its own license.
 
 ## In this repository
@@ -22,18 +22,19 @@ none of the LGPL code below.
 | [Archivo](https://github.com/Omnibus-Type/Archivo), [Saira](https://github.com/Omnibus-Type/Saira) ExtraCondensed and [IBM Plex Mono](https://github.com/IBM/plex) fonts | `launcher/ui/fonts` | SIL Open Font License 1.1 (the `OFL-*.txt` files there) |
 | [Tauri](https://tauri.app) and the other Rust crates in `launcher/src-tauri/Cargo.toml` | built into the executable | MIT or Apache-2.0 (each crate's own) |
 
-## Downloaded during the build
+## Included in the release zip
 
-The build fetches these into its `build` folder; none of them is redistributed here.
+The release zip carries these beside this project's files, so a build downloads nothing. A git checkout
+fetches them instead (`tools/toolchain.py`, `tools/deps.py`, `tools/bootstrap.ps1`).
 
-| Component | Used for | License |
-|---|---|---|
-| [xboxrecomp](https://github.com/sp00nznet/xboxrecomp) at 193e2995 | the lifter and the Xbox runtime | MIT, 2026 sp00nz |
-| the [xemu](https://xemu.app) files in xboxrecomp (`src/apu`, `src/nv2a/nv2a_regs.h`) | the APU model | LGPL-2.1-or-later, see xboxrecomp's `NOTICE` |
-| [Xbox XBE Recomp](https://github.com/TGP482/Xbox-XBERecomp) at 65e959d4 | its XDK 5849 signature list | MIT, 2026 TGP482 |
-| [Python](https://www.python.org) (`BuildGame.cmd` and the launcher) | running the build tools | PSF License |
-| [Capstone](https://www.capstone-engine.org) | disassembly in the lifter and the signature matcher | BSD-3-Clause |
-| Microsoft Visual C++ Build Tools and the Windows SDK (only without Visual Studio) | compiling | Microsoft's license terms, which the user accepts before the download |
+| Component | Where | Used for | License |
+|---|---|---|---|
+| [llvm-mingw](https://github.com/mstorsjo/llvm-mingw) 20261006 (LLVM 23.1.3 clang, lld, the mingw-w64 headers and libraries), trimmed to what the build uses | `toolchain/` | compiling | LLVM: Apache-2.0 with LLVM exception; mingw-w64: ZPL, public domain and other permissive licenses; see `LICENSE.TXT` there |
+| [xboxrecomp](https://github.com/sp00nznet/xboxrecomp) at 193e2995 | `deps/xboxrecomp` | the lifter and the Xbox runtime | MIT, 2026 sp00nz |
+| the [xemu](https://xemu.app) files in xboxrecomp (`src/apu`, `src/nv2a/nv2a_regs.h`) | `deps/xboxrecomp` | the APU model | LGPL-2.1-or-later, see xboxrecomp's `NOTICE` |
+| [Xbox XBE Recomp](https://github.com/TGP482/Xbox-XBERecomp) at 65e959d4 | `deps/xbe-recomp` | its XDK 5849 signature list | MIT, 2026 TGP482 |
+| [Python](https://www.python.org) 3.13.16 | `python/` | running the build tools | PSF License (`python/LICENSE.txt`) |
+| [Capstone](https://www.capstone-engine.org) 5.0.7 | `python/Lib/site-packages` | disassembly in the lifter and the signature matcher | BSD-3-Clause |
 
 ## LGPL and the executables you build
 

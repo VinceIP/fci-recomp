@@ -420,6 +420,14 @@ struct GuestExtent {
     uint32_t h;
 };
 
+// FCI: a colour surface laid inside a bigger target's memory at its pitch (a splitscreen player's part of
+// the back buffer) is that rect of the target, as on the console, not a target of its own. Outside the
+// class: its member defaults must be complete where the class uses them as default arguments
+struct Window {
+    Target* parent = nullptr;
+    uint32_t gx = 0, gy = 0, gw = 0, gh = 0;  // console pixels in the parent
+};
+
 class D3D12Backend final : public Backend, public Context {
 public:
     bool Init(uint32_t width, uint32_t height) override;
@@ -594,12 +602,6 @@ private:
         uint32_t gh;
         std::unordered_map<uint64_t, Target>::iterator it;
         bool sized;  // the entry is there at the surface's size
-    };
-    // FCI: a colour surface laid inside a bigger target's memory at its pitch (a splitscreen player's part of
-    // the back buffer) is that rect of the target, as on the console, not a target of its own
-    struct Window {
-        Target* parent = nullptr;
-        uint32_t gx = 0, gy = 0, gw = 0, gh = 0;  // console pixels in the parent
     };
     bool FindWindow(uint32_t data, uint32_t pitch, uint32_t bits, uint32_t gw, uint32_t gh, Window& w);
     bool SurfaceWindow(const Surface& s, Window& w);
@@ -1091,8 +1093,8 @@ void D3D12Backend::Begin() {
         TerminateProcess(GetCurrentProcess(), 0);
     }
     HRESULT why = dev ? dev->GetDeviceRemovedReason() : S_OK;
-    std::fprintf(stderr, "[FCI] STOP 99 host GPU lost in %s (hr %08lX, reason %08lX)\n", where, unsigned long(hr),
-                 unsigned long(why));
+    std::fprintf(stderr, "[FCI] STOP 99 host GPU lost in %s (hr %08lX, reason %08lX)\n", where, static_cast<unsigned long>(hr),
+                 static_cast<unsigned long>(why));
     std::fflush(stderr);
     TerminateProcess(GetCurrentProcess(), 99);
     for (;;) {}
@@ -3345,7 +3347,7 @@ void D3D12Backend::ResizeSwap() {
     if (Lost(hr)) DeviceLost(dev_.Get(), "ResizeBuffers", hr);
     CreateBackBufferViews();  // FCI: on failure the swap chain keeps its old buffers; tried again next frame
     if (FAILED(hr)) {
-        LOG_FIRST(4, "d3d12: ResizeBuffers to %ux%u failed (%08lX)", w, h, unsigned long(hr));
+        LOG_FIRST(4, "d3d12: ResizeBuffers to %ux%u failed (%08lX)", w, h, static_cast<unsigned long>(hr));
         return;
     }
     bb_w_ = w;
@@ -4235,7 +4237,7 @@ void D3D12Backend::Present(const Surface& front) {
         HRESULT hr = swap_->Present(vsync ? 1 : 0, flags);
         if (hr == DXGI_ERROR_WAS_STILL_DRAWING) hr = S_OK;
         if (Lost(hr)) DeviceLost(dev_.Get(), "Present", hr);
-        if (FAILED(hr)) LOG_FIRST(4, "d3d12: Present failed (%08lX)", unsigned long(hr));
+        if (FAILED(hr)) LOG_FIRST(4, "d3d12: Present failed (%08lX)", static_cast<unsigned long>(hr));
         g_perf.swap += PerfMs(perf_swap);
         if (present_ns && SUCCEEDED(hr)) MeasureLatency(present_ns);
     }
