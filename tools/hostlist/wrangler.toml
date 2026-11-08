@@ -1,0 +1,13 @@
+# The host list Worker (lobby.js). Deploying needs a Cloudflare account: the maintainer's step.
+name = "fci-hostlist"
+main = "lobby.js"
+compatibility_date = "2026-10-01"
+
+[[durable_objects.bindings]]
+name = "LOBBY"
+class_name = "Lobby"
+
+# the Free plan creates only SQLite-backed Durable Objects
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Lobby"]
