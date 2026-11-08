@@ -25,6 +25,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -43,6 +44,8 @@ import toolchain  # noqa: E402
 DATA = REPO / "data"
 HOST = REPO / "src"
 BUILD_TOOLS = ("compile.py", "image_profile.py")
+# environment variables that change what tools/compile.py builds (diagnostic builds)
+DIAGNOSTIC_ENV = ("FCI_PROBE", "FCI_CALL_PROFILE")
 
 
 def default_jobs():
@@ -159,6 +162,7 @@ def build(image, xbe, lift_dir, deps, out, jobs=None, tc=None, obj_cache=None):
     out = Path(out)
     if out.exists():
         raise SystemExit(f"error: {out} exists; build into a new folder")
+    check_probes(lift_dir)
     jobs = jobs or default_jobs()
     tc = tc or toolchain.discover()
     started = time.time()
@@ -199,7 +203,25 @@ def inputs_digest(lift_dir, tc):
     files += [TOOLS / n for n in ("build.py", "patches.py", "sigmatch.py", "titles.py", *BUILD_TOOLS)]
     for p in files:
         h.update(p.relative_to(REPO).as_posix().encode() + b"\0" + p.read_bytes().replace(b"\r\n", b"\n"))
+    # diagnostic builds (tools/compile.py) differ from a plain one: never reuse one for the other
+    h.update(json.dumps({k: os.environ.get(k, "") for k in DIAGNOSTIC_ENV}, sort_keys=True).encode())
     return h.hexdigest()
+
+
+def check_probes(lift_dir):
+    """FCI_PROBE names functions as in their C names (0051C5EA for sub_0051C5EA); a probe that matches nothing
+    builds a plain executable that looks like a probe build, so say so"""
+    wanted = [p for p in os.environ.get("FCI_PROBE", "").split(",") if p]
+    if not wanted:
+        return
+    funcs = (Path(lift_dir) / "gen" / "recomp_funcs.h").read_text(encoding="utf-8", errors="replace")
+    bad = [p for p in wanted if not re.fullmatch(r"[0-9A-Fa-f]{8}", p)]
+    if bad:
+        raise SystemExit(f"error: FCI_PROBE takes 8 hex digits, no 0x: {', '.join(bad)}")
+    # the game and the editor are separate lifts: a probe usually exists in one of them only
+    for p in wanted:
+        if f"void sub_{p.upper()}(void);" not in funcs:
+            print(f"FCI_PROBE: no function {p} in {lift_dir}; this build has no probe there", flush=True)
 
 
 def current(out, lift_dir, tc):
