@@ -244,7 +244,8 @@ EVO_SCENARIOS = {
         "seconds": 90,
         "steps": EVO_TO_GAME
         + ["pad:start:200", "sleep:2"]
-        + ["pad:down:150", "sleep:0.4"] * 6
+        # up from Resume wraps to the last item, Quit: counting down depends on Friends List, skipped with no link
+        + ["pad:up:150", "sleep:0.4"]
         + ["pad:a:200", "sleep:2", "pad:up:200", "sleep:1", "pad:a:200", "sleep:12", "capture"],
         "block": 170,  # as menu, and the relaunch lands anywhere in the background video's loop (144 seen)
         "mean": 20,

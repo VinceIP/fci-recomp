@@ -700,6 +700,13 @@ void Pace()
         unlock = OptionFlag("RECOMP_FCI_XBR_UNLOCK", false);
         const char* f = std::getenv("RECOMP_FCI_XBR_FPS");
         fps = f ? std::atof(f) : 0.0;
+        const char* net = std::getenv("RECOMP_FCI_NET");
+        if (net && *net && (unlock || fps > 0)) {
+            // online every player runs the Xbox's 30 updates: physics and AI depend on the rate (multiplayer.md)
+            std::fprintf(stderr, "[FCI] network: the game keeps its own 30 frames a second while linked; "
+                                 "RECOMP_FCI_XBR_REPLAY still shows more\n");
+            unlock = 0, fps = 0.0;
+        }
         QueryPerformanceFrequency(&freq);
     }
     uint32_t blanks = g_interval & 0xF;

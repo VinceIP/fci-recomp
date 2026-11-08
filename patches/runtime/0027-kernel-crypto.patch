@@ -1,0 +1,83 @@
+Subject: Modular exponentiation and DES in the kernel's crypto services
+
+XcModExp, XcDESKeyParity, XcKeyTable, XcBlockCrypt and XcBlockCryptCBC were stubs that left their
+outputs untouched. The network stack's key exchange calls XcModExp for its Diffie-Hellman values, so two
+instances derived different keys and a joiner's secure packets were dropped. fci-recomp implements them
+(src/fci_xcrypt.c): Montgomery exponentiation over the kernel's little-endian word arrays, and DES and
+triple DES (EDE) with a key table of its own layout; an odd request stops with exit 87.
+
+---
+diff --git a/src/kernel/kernel_crypto.c b/src/kernel/kernel_crypto.c
+index f8a502c..f9624cf 100644
+--- a/src/kernel/kernel_crypto.c
++++ b/src/kernel/kernel_crypto.c
+@@ -351,56 +351,43 @@ BOOLEAN __stdcall xbox_XcVerifyPKCS1Signature(PVOID Hash, PVOID PublicKey, PVOID
+     return TRUE;
+ }
+ 
++/* fci-recomp implements these in src/fci_xcrypt.c: the network stack's key exchange needs them */
++ULONG fci_xc_modexp(PULONG a, PULONG b, PULONG c, PULONG d, ULONG n);
++void fci_xc_des_key_parity(PUCHAR key, unsigned long len);
++void fci_xc_key_table(unsigned long cipher, PVOID table, const UCHAR *key);
++void fci_xc_block_crypt(unsigned long cipher, PVOID out, PVOID in, PVOID table, unsigned long op);
++void fci_xc_block_crypt_cbc(unsigned long cipher, unsigned long len, PVOID out, PVOID in, PVOID table,
++                            unsigned long op, PVOID feedback);
++
+ ULONG __stdcall xbox_XcModExp(PULONG Result, PULONG Base, PULONG Exponent, PULONG Modulus, ULONG ModulusLength)
+ {
+-    (void)Result;
+-    (void)Base;
+-    (void)Exponent;
+-    (void)Modulus;
+-    (void)ModulusLength;
+-    xbox_log(XBOX_LOG_WARN, XBOX_LOG_CRYPTO, "XcModExp: stubbed");
+-    return 0;
++    return fci_xc_modexp(Result, Base, Exponent, Modulus, ModulusLength);
+ }
+ 
+ /* ============================================================================
+  * DES / Block Cipher Operations
+- *
+- * Used for EEPROM and hard drive key derivation. Not needed for PC.
+  * ============================================================================ */
+ 
+ VOID __stdcall xbox_XcDESKeyParity(PUCHAR Key, ULONG KeyLength)
+ {
+-    (void)Key;
+-    (void)KeyLength;
++    fci_xc_des_key_parity(Key, KeyLength);
+ }
+ 
+ VOID __stdcall xbox_XcKeyTable(ULONG CipherSelect, PVOID KeyTable, const UCHAR* Key)
+ {
+-    (void)CipherSelect;
+-    (void)KeyTable;
+-    (void)Key;
++    fci_xc_key_table(CipherSelect, KeyTable, Key);
+ }
+ 
+ VOID __stdcall xbox_XcBlockCrypt(ULONG CipherSelect, PVOID Output, PVOID Input, PVOID KeyTable, ULONG Operation)
+ {
+-    (void)CipherSelect;
+-    (void)Output;
+-    (void)Input;
+-    (void)KeyTable;
+-    (void)Operation;
++    fci_xc_block_crypt(CipherSelect, Output, Input, KeyTable, Operation);
+ }
+ 
+ VOID __stdcall xbox_XcBlockCryptCBC(
+     ULONG CipherSelect, ULONG OutputLength, PVOID Output, PVOID Input,
+     PVOID KeyTable, ULONG Operation, PVOID FeedbackVector)
+ {
+-    (void)CipherSelect;
+-    (void)OutputLength;
+-    (void)Output;
+-    (void)Input;
+-    (void)KeyTable;
+-    (void)Operation;
+-    (void)FeedbackVector;
++    fci_xc_block_crypt_cbc(CipherSelect, OutputLength, Output, Input, KeyTable, Operation, FeedbackVector);
+ }
+ 
+ VOID __stdcall xbox_XcCryptService(ULONG Operation, PVOID Param)

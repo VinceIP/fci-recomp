@@ -1,0 +1,65 @@
+Subject: A call target inside reached code is not a function start
+
+The call-target pass decodes a target the linear sweep stepped over as a new function when its bytes
+decode as a body. A call operand read out of data can name such an address in the middle of real code:
+XNET's table of 01 01 bytes at 0052CD86 "called" 00520CCA, one byte into a mov in the receive function
+00520B59, which then ended there and stopped with exit 89 when a System Link frame arrived. A stepped-over
+target that lies inside an instruction reached by control flow from the starts already found, and whose
+callers no flow reaches, is now rejected.
+
+---
+diff --git a/tools/disasm/functions.py b/tools/disasm/functions.py
+index f369338..d6f82b3 100644
+--- a/tools/disasm/functions.py
++++ b/tools/disasm/functions.py
+@@ -412,7 +412,8 @@ class FunctionDetector:
+                 code_ranges.add(addr)
+ 
+         call_targets = self.engine.get_call_targets()
+-        realigned = unaligned = 0
++        realigned = unaligned = inside = 0
++        flow = None  # instructions reached from the starts found so far, built on first need
+         for target in call_targets:
+             section = self.image.get_section_at_va(target)
+             if not (section and section.executable):
+@@ -443,6 +444,27 @@ class FunctionDetector:
+                 if not self.engine.probes_as_function_body(target):
+                     unaligned += 1
+                     continue
++                # Inside an instruction that control flow from a known start
++                # executes, and called only from bytes no flow reaches, the
++                # call was read out of data: XNET's 01 01 table at 0052CD86
++                # "called" 00520CCA, one byte into a mov of the receive
++                # function 00520B59, and split it. A caller in reached code
++                # outweighs the overlap, which an out-of-phase run can fake.
++                if flow is None:
++                    bounds = [(s.virtual_addr, s.virtual_addr + s.virtual_size)
++                              for s in sections]
++                    flow = self.engine.recursive_descent(
++                        sorted(self._candidates), bounds)
++                    callers = {}
++                    for i in self.engine.instructions.values():
++                        if i.call_target is not None:
++                            callers.setdefault(i.call_target, []).append(i.address)
++                if (not any(c in flow for c in callers.get(target, ()))
++                        and any(a in flow and a + self.engine.instructions[a].size > target
++                                for a in range(target - 1, target - 16, -1)
++                                if a in self.engine.instructions)):
++                    inside += 1
++                    continue
+                 if self.engine.decode_at(target):
+                     realigned += 1
+                 else:
+@@ -452,9 +474,10 @@ class FunctionDetector:
+                 config.CONFIDENCE_CALL_TARGET,
+                 "call_target"
+             )
+-        if realigned or unaligned:
++        if realigned or unaligned or inside:
+             print(f"  Realigned {realigned} call targets the sweep stepped over"
+-                  f" ({unaligned} rejected: bytes do not decode as a function)")
++                  f" ({unaligned} rejected: bytes do not decode as a function;"
++                  f" {inside}: inside reached code, called only from data)")
+ 
+     def _pass_indirect_call_slots(self) -> None:
+         """

@@ -253,7 +253,7 @@ void fci_config_load(int *argc, char ***argv)
 {
     static char exe_dir[MAX_PATH], xbe[MAX_PATH], game[MAX_PATH], save[MAX_PATH], log_dir[MAX_PATH];
     static char fixed_log[MAX_PATH], shader_cache[MAX_PATH], shader_cache_arg[MAX_PATH + 32];
-    static char lines[96][512], rate_arg[64];
+    static char lines[96][512], rate_arg[64], hub_arg[300];
     static char *args[120];
     int n = 0, opts = 0, i, have_ini = 0, verbosity = 1, limit = 20, cap = 1;
     double rate = 30;
@@ -312,6 +312,10 @@ void fci_config_load(int *argc, char ***argv)
                 rate = !strcmp(v, "0") || !_stricmp(v, "unlimited") ? 0 : atof(v) > 0 ? atof(v) : 30;
             else if (!_stricmp(key, "engine-update-cap"))
                 cap = atoi(v) != 0;
+            else if (!_stricmp(key, "network-hub")) {
+                if (v[0])
+                    snprintf(hub_arg, sizeof hub_arg, "RECOMP_FCI_NET=%s", v);
+            }
             else if (opts < 96 && translate(key, v, lines[opts], sizeof lines[0]))
                 opts++;
         }
@@ -347,6 +351,10 @@ void fci_config_load(int *argc, char ***argv)
     }
     /* experimental frame rates: capped, the game keeps its 30 updates and the
        frames in between are blended from its last two; uncapped, the game itself runs at the rate */
+    if (hub_arg[0]) {
+        args[n++] = hub_arg;
+        cap = 1; /* online every player runs the Xbox's 30 updates: physics and AI depend on the rate */
+    }
     if (rate == 0 || rate > 30) {
         if (cap)
             snprintf(rate_arg, sizeof rate_arg, "RECOMP_FCI_XBR_REPLAY=%g", rate ? rate : 1000);

@@ -328,6 +328,9 @@ void fci_unbridged_ordinal(unsigned ordinal, int slot)
 
 void fci_thread_stop(const char *why, uint32_t routine) { stop(88, why, routine, NULL); }
 
+/* a kernel service asked for something its implementation does not do (src/fci_xcrypt.c) */
+void fci_kernel_unsupported(const char *what) { stop(87, what, g_esp >= 4 ? MEM32(g_esp - 4) : 0, NULL); }
+
 /* DirectSound's effects-image download (00580363) writes command 3 to the DSP doorbell at image + 0x810
  * (image = [[[this+8]+0x10]]) and spins until it clears: register that doorbell for acknowledgement */
 void fci_prehook_00580363(void)

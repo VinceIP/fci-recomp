@@ -222,6 +222,8 @@ class Game:
 
     def step(self, spec, timeout=90):
         t0 = self.elapsed()
+        if self.child.poll() is not None:  # otherwise pads and sleeps carry on against nothing
+            raise StepFailed(f"{spec}: the game exited ({self.child.returncode})")
         kind, _, arg = spec.partition(":")
         if kind == "wait":
             if arg == "title":

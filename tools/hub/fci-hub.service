@@ -1,0 +1,32 @@
+# The System Link hub as a systemd service, without a container:
+#   sudo install -D -m 644 tools/fci_hub.py /opt/fci-hub/fci_hub.py
+#   sudo cp tools/hub/fci-hub.service /etc/systemd/system/ && sudo systemctl enable --now fci-hub
+# Open UDP 47800 in the machine's firewall and the provider's. The status page answers on the server
+# itself (curl http://127.0.0.1:47880/); the log (journalctl -u fci-hub) holds players' addresses.
+[Unit]
+Description=fci-recomp System Link hub
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/python3 -B -u /opt/fci-hub/fci_hub.py --port 47800 --status-port 47880
+Restart=always
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+SystemCallArchitectures=native
+MemoryMax=256M
+
+[Install]
+WantedBy=multi-user.target

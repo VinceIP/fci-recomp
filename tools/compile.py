@@ -87,6 +87,7 @@ SYSTEM_LIBS = [
     "propsys",
     "uuid",
     "d3d12",
+    "ws2_32",  # the network card's hub link (src/fci_nic.c)
 ]
 DEFINES = ["-DWIN32_LEAN_AND_MEAN", "-DNOMINMAX", "-D_CRT_SECURE_NO_WARNINGS", "-D_USE_MATH_DEFINES"]
 # the semantics the lifted and runtime code were written and tested against with MSVC: no type-based alias

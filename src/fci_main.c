@@ -65,6 +65,11 @@ int xbox_OhciOwnsAddress(uint32_t xbox_va);
 int xbox_OhciHandleMmio(void *ctx, uint32_t xbox_va);
 void xbox_InputInit(void);
 
+/* the network card: registers, rings and interrupt, and the hub link of RECOMP_FCI_NET (fci_nic.c) */
+int fci_nic_init(ptrdiff_t mem_offset);
+int fci_nic_owns(uint32_t va);
+int fci_nic_mmio(void *ctx, uint32_t va);
+
 static LONG CALLBACK fci_veh(PEXCEPTION_POINTERS ep)
 {
     DWORD code = ep->ExceptionRecord->ExceptionCode;
@@ -89,6 +94,8 @@ static LONG CALLBACK fci_veh(PEXCEPTION_POINTERS ep)
             return EXCEPTION_CONTINUE_EXECUTION;
         if (xbox_OhciOwnsAddress(va) && xbox_OhciHandleMmio(ep->ContextRecord, va))
             return EXCEPTION_CONTINUE_EXECUTION; /* USB host controllers (RECOMP_USB) */
+        if (fci_nic_owns(va) && fci_nic_mmio(ep->ContextRecord, va))
+            return EXCEPTION_CONTINUE_EXECUTION;
     }
     if (code == EXCEPTION_ACCESS_VIOLATION || code == EXCEPTION_ILLEGAL_INSTRUCTION
         || code == EXCEPTION_INT_DIVIDE_BY_ZERO || code == EXCEPTION_STACK_OVERFLOW
@@ -302,6 +309,10 @@ int main(int argc, char **argv)
     if (!getenv("RECOMP_USB_PORT"))
         _putenv_s("RECOMP_USB_PORT", "2");
     xbox_OhciInit(); /* inert unless RECOMP_USB=1 */
+    if (!fci_nic_init(g_xbox_mem_offset)) {
+        fprintf(stderr, "[FCI] network card unavailable (error %lu)\n", GetLastError());
+        return 2;
+    }
     fprintf(stderr, "[FCI] guest memory offset %llX code [%08X,%08X)\n",
             (unsigned long long)g_xbox_mem_offset, g_xbox_code_lo, g_xbox_code_hi);
     if (!install_kernel_header())
