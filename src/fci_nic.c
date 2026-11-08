@@ -133,6 +133,18 @@ void fci_nic_mac(uint8_t *mac)
 
 ULONG fci_nic_link_state(void) { return s_sock != INVALID_SOCKET ? LINK_UP : 0; }
 
+/* Down before a relaunch (fci_manual.c): the next instance re-reads RECOMP_FCI_NET_PEERS and would find
+ * this one's port still bound. The process is going, so no other state needs winding back. */
+void fci_nic_shutdown(void)
+{
+    AcquireSRWLockExclusive(&s_lock);
+    if (s_sock != INVALID_SOCKET) {
+        closesocket(s_sock);
+        s_sock = INVALID_SOCKET;
+    }
+    ReleaseSRWLockExclusive(&s_lock);
+}
+
 /* to the hub (to == NULL) or to one peer; a lost datagram is a lost frame, as on a wire */
 static void send_datagram_to(const peer_t *to, char kind, const void *data, int len)
 {
@@ -464,23 +476,35 @@ static int connect_hub(const char *spec)
 }
 
 /* RECOMP_FCI_NET_PEERS=<local port>,<host>:<port>[,<host>:<port>...]: a fixed set of peer cards, no hub.
- * The step before hole punching fills the table from the host list (multiplayer.md, design detail). */
-static int connect_peers(const char *spec)
+ * The step before hole punching fills the table from the host list (multiplayer.md, design detail).
+ * 0 on a bad spec or a socket error, with the failure in err. */
+static int connect_peers(const char *spec, char *err, int errlen)
 {
     char list[1024], *tok, *next;
     struct sockaddr_in local;
     WSADATA wsa;
     u_long nb = 1;
     int port;
-    if (strlen(spec) >= sizeof list || WSAStartup(MAKEWORD(2, 2), &wsa))
+    if (strlen(spec) >= sizeof list) {
+        snprintf(err, errlen, "spec too long");
         return 0;
+    }
+    if (WSAStartup(MAKEWORD(2, 2), &wsa)) {
+        snprintf(err, errlen, "WSAStartup failed (%d)", WSAGetLastError());
+        return 0;
+    }
     strcpy(list, spec);
     next = strchr(list, ',');
-    if (next)
-        *next++ = 0;
-    port = atoi(list);
-    if (port <= 0 || port > 65535)
+    if (!next) {
+        snprintf(err, errlen, "spec is not <local port>,<host>:<port>[,...]");
         return 0;
+    }
+    *next++ = 0;
+    port = atoi(list);
+    if (port <= 0 || port > 65535) {
+        snprintf(err, errlen, "local port %s is not 1-65535", list);
+        return 0;
+    }
     for (tok = next; tok && *tok; tok = next) {
         char *colon;
         struct addrinfo hints, *ai = NULL;
@@ -488,26 +512,51 @@ static int connect_peers(const char *spec)
         if (next)
             *next++ = 0;
         colon = strrchr(tok, ':');
-        if (!colon || s_npeers == PEERS_MAX)
+        if (!colon) {
+            snprintf(err, errlen, "peer %s is not <host>:<port>", tok);
             return 0;
+        }
+        if (s_npeers == PEERS_MAX) {
+            snprintf(err, errlen, "more than %d peers", PEERS_MAX);
+            return 0;
+        }
         *colon = 0;
         memset(&hints, 0, sizeof hints);
         hints.ai_family = AF_INET;
         hints.ai_socktype = SOCK_DGRAM;
-        if (getaddrinfo(tok, colon + 1, &hints, &ai) || !ai)
+        if (getaddrinfo(tok, colon + 1, &hints, &ai) || !ai) {
+            snprintf(err, errlen, "peer %s:%s does not resolve", tok, colon + 1);
             return 0;
+        }
         memcpy(&s_peers[s_npeers++].addr, ai->ai_addr, sizeof(struct sockaddr_in));
         freeaddrinfo(ai);
     }
-    if (!s_npeers)
+    if (!s_npeers) {
+        snprintf(err, errlen, "no peers after the local port");
         return 0;
+    }
     memset(&local, 0, sizeof local);
     local.sin_family = AF_INET;
     local.sin_port = htons((u_short)port);
     s_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (s_sock == INVALID_SOCKET || bind(s_sock, (struct sockaddr *)&local, sizeof local)
-        || ioctlsocket(s_sock, FIONBIO, &nb))
+    if (s_sock == INVALID_SOCKET) {
+        snprintf(err, errlen, "no socket (%d)", WSAGetLastError());
         return 0;
+    }
+    if (bind(s_sock, (struct sockaddr *)&local, sizeof local)) {
+        int e = WSAGetLastError();
+        closesocket(s_sock);
+        s_sock = INVALID_SOCKET;
+        snprintf(err, errlen, "bind of port %d failed (%d)", port, e);
+        return 0;
+    }
+    if (ioctlsocket(s_sock, FIONBIO, &nb)) {
+        int e = WSAGetLastError();
+        closesocket(s_sock);
+        s_sock = INVALID_SOCKET;
+        snprintf(err, errlen, "non-blocking mode failed (%d)", e);
+        return 0;
+    }
     s_direct = 1;
     return 1;
 }
@@ -536,11 +585,9 @@ int fci_nic_init(ptrdiff_t mem_offset)
                 m[0], m[1], m[2], m[3], m[4], m[5]);
         fflush(stderr);
     } else if (peers && *peers) {
-        if (!connect_peers(peers)) {
-            fprintf(stderr,
-                    "[FCI] RECOMP_FCI_NET_PEERS=%s: not <local port>,<host>:<port>[,...], or no socket "
-                    "(%d)\n",
-                    peers, WSAGetLastError());
+        char err[128];
+        if (!connect_peers(peers, err, sizeof err)) {
+            fprintf(stderr, "[FCI] RECOMP_FCI_NET_PEERS=%s: %s\n", peers, err);
             return 0;
         }
         fci_nic_mac(m);

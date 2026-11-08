@@ -29,6 +29,7 @@ extern int fci_launch_argc;
 extern char **fci_launch_argv;
 unsigned long fci_window_handoff(void **frame); /* fci_xbr_glue.cpp */
 void fci_window_pass_on(void);                  /* fci_xbr_glue.cpp */
+void fci_nic_shutdown(void);                    /* fci_nic.c */
 int fci_host_symbol(DWORD64 pc, char *name, size_t size, DWORD64 *disp,
                     DWORD64 *symbol_size); /* fci_threads.c */
 
@@ -198,6 +199,7 @@ void fci_relaunch(uint32_t page)
     si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
     fprintf(stderr, "[FCI] relaunch: %s -> %s with %s\n", path, exe, file);
     fflush(stderr);
+    fci_nic_shutdown(); /* the next instance re-binds RECOMP_FCI_NET_PEERS' port; this one must not hold it */
     fci_window_pass_on(); /* the next instance's frame takes this one's place */
     if (!CreateProcessA(exe, cmd, NULL, NULL, TRUE, CREATE_SUSPENDED, NULL, NULL, &si, &pi)) {
         fprintf(stderr, "[FCI] relaunch: CreateProcess failed (%lu)\n", GetLastError());
