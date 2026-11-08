@@ -160,38 +160,28 @@ static void send_datagram_to(const peer_t *to, char kind, const void *data, int 
 
 static void send_datagram(char kind, const void *data, int len) { send_datagram_to(NULL, kind, data, len); }
 
-/* a DHCP request (UDP to port 67): no server answers on a peer link, as on the hub; XNET picks its own address */
-static int is_dhcp(const uint8_t *f, uint32_t len)
-{
-    uint32_t ihl;
-    if (len < 14 + 20 + 8 || f[12] != 0x08 || f[13] != 0x00 || f[23] != 17)
-        return 0;
-    ihl = (f[14] & 15u) * 4;
-    return 14 + ihl + 4 <= len && f[14 + ihl + 2] == 0 && f[14 + ihl + 3] == 67;
-}
-
-/* a frame from the guest: unicast to the peer whose card it names, broadcast to every peer */
-static void route_frame(const uint8_t *f, uint32_t len)
+/* a frame from the guest: unicast to the peer whose card it names, broadcast (DHCP included, as the hub
+   relays it) to every peer; returns 1 if it went out, 0 if dropped */
+static int route_frame(const uint8_t *f, uint32_t len)
 {
     int i;
     if (!s_direct) {
         send_datagram('F', f, (int)len);
-        return;
+        return 1;
     }
     if (f[0] & 1) {
-        if (is_dhcp(f, len))
-            return;
         for (i = 0; i < s_npeers; i++)
             send_datagram_to(&s_peers[i], 'F', f, (int)len);
-        return;
+        return s_npeers > 0;
     }
     for (i = 0; i < s_npeers; i++)
         if (s_peers[i].has_mac && !memcmp(s_peers[i].mac, f, 6)) {
             send_datagram_to(&s_peers[i], 'F', f, (int)len);
-            return;
+            return 1;
         }
     if (!s_unrouted++) /* XNET answers only cards it heard from, so this is unexpected but harmless */
         fprintf(stderr, "[FCI] network: a frame to a card no peer has shown, dropped\n"), fflush(stderr);
+    return 0;
 }
 
 /* a datagram from no peer, or not its card's frame: dropped, so nothing outside the session reaches XNET */
@@ -255,8 +245,7 @@ static void tx_run(void)
         }
         TRACE_FRAME("tx %u bytes in %u descriptors from %u\n", len, parts, i);
         if (s_sock != INVALID_SOCKET) {
-            route_frame(frame, len);
-            if (!s_sent++)
+            if (route_frame(frame, len) && !s_sent++)
                 fprintf(stderr, "[FCI] network: first frame sent (%u bytes)\n", len), fflush(stderr);
         } else if (!s_dropped++) {
             fprintf(stderr, "[FCI] network: a frame sent with no link, dropped as by a card with no cable\n");
