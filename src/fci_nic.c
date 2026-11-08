@@ -1,7 +1,8 @@
 /* MCPX network card (guest FEF00000), the nForce MAC the game's XNET drives itself: registers, descriptor
  * rings and interrupt. Its Ethernet frames go over UDP to a hub (RECOMP_FCI_NET=<host>:<port>[/<room>],
- * tools/fci_hub.py) or straight to peer cards (RECOMP_FCI_NET_PEERS); without either the link is down, as
- * with no cable. research/docs/multiplayer.md */
+ * tools/fci_hub.py), straight to peer cards (RECOMP_FCI_NET_PEERS), or through the internet host list
+ * (RECOMP_FCI_NET_LIST, with hole punching and STUN); without any the link is down, as with no cable.
+ * research/docs/multiplayer.md */
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
@@ -11,6 +12,7 @@
 #include <string.h>
 
 #include "mmio_decode.h"
+#include "fci_net_worker.h"
 
 #define NIC_BASE   0xFEF00000u
 #define NIC_SIZE   0x1000u /* one page; the card's BAR is 1 KiB */
@@ -48,6 +50,27 @@
 #define MAGIC  "FCN1"  /* hub datagrams: magic, kind ('H' hello: MAC, cookie, room; 'C' cookie; 'F' frame) */
 #define COOKIE 8       /* the hub's proof that this address is ours (tools/fci_hub.py) */
 
+/* LIST mode: the internet host list (RECOMP_FCI_NET_LIST) */
+#define LIST_PEER_MAX    16
+#define LIST_PENDING_MAX 8
+#define PUNCH_PERIOD_MS  100
+#define PUNCH_WINDOW_MS  3000
+#define PEER_EXPIRE_MS   15000
+#define STUN_PERIOD_MS   60000
+#define STUN_MAGIC       0x2112A442u
+
+typedef enum { LP_PENDING, LP_LIVE } lp_state;
+
+typedef struct {
+    struct sockaddr_in endpoint;
+    uint8_t mac[6];
+    uint8_t nonce[16];
+    lp_state state;
+    ULONGLONG next_punch; /* next punch deadline (GetTickCount64) */
+    ULONGLONG punch_end;  /* stop punching, transition or drop */
+    ULONGLONG last_frame; /* last frame received (expiry) */
+} lpeer_t;
+
 static uint32_t regs[NIC_SIZE / 4];
 static SRWLOCK s_lock = SRWLOCK_INIT; /* the timer thread may tick before init */
 static ptrdiff_t s_mem_offset;
@@ -74,6 +97,21 @@ static unsigned long s_sent, s_received, s_dropped;
 static int s_trace
         = -1; /* RECOMP_FCI_NET_TRACE=1: control writes and interrupts (the first 400) and frames */
 static unsigned s_traced;
+
+/* LIST mode state */
+static int s_list; /* 1 when RECOMP_FCI_NET_LIST is in use */
+static lpeer_t s_lpeers[LIST_PEER_MAX];
+static int s_nlpeers;
+static int s_lpending;                /* count of LP_PENDING peers (cap at LIST_PENDING_MAX) */
+static struct sockaddr_in s_stun_ep;  /* the card's public endpoint (from STUN or _ENDPOINT) */
+static int s_stun_known;              /* 1 when the endpoint is set */
+static ULONGLONG s_stun_next;         /* next STUN send deadline */
+static uint32_t s_stun_txn;           /* STUN transaction ID counter */
+static struct sockaddr_in s_stun_srv; /* the STUN server address (resolved at init) */
+static int s_stun_srv_valid;          /* 1 when the STUN server is resolved */
+static char s_list_url[512];          /* the Worker base URL (for the worker thread, round B) */
+static char s_relay_spec[256];        /* RECOMP_FCI_NET_RELAY, if set */
+static volatile LONG s_probe;         /* the game broadcast in LIST mode: the worker should fetch the list */
 
 #define TRACE(...)                                                                                           \
     do {                                                                                                     \
@@ -143,12 +181,21 @@ void fci_nic_mac(uint8_t *mac)
     memcpy(mac, s_mac, 6);
 }
 
+/* the card's MAC as "02:46:43:xx:xx:xx" (for the worker's register and connect calls) */
+void fci_nic_mac_str(char *buf, int buflen)
+{
+    uint8_t m[6];
+    fci_nic_mac(m);
+    snprintf(buf, (size_t)buflen, "%02x:%02x:%02x:%02x:%02x:%02x", m[0], m[1], m[2], m[3], m[4], m[5]);
+}
+
 ULONG fci_nic_link_state(void) { return s_sock != INVALID_SOCKET ? LINK_UP : 0; }
 
 /* Down before a relaunch (fci_manual.c): the next instance re-reads RECOMP_FCI_NET_PEERS and would find
  * this one's port still bound. The process is going, so no other state needs winding back. */
 void fci_nic_shutdown(void)
 {
+    fci_net_worker_stop(); /* before the socket closes: the worker takes s_lock for list calls */
     AcquireSRWLockExclusive(&s_lock);
     if (s_sock != INVALID_SOCKET) {
         closesocket(s_sock);
@@ -177,6 +224,40 @@ static void send_datagram(char kind, const void *data, int len) { send_datagram_
 static int route_frame(const uint8_t *f, uint32_t len)
 {
     int i;
+    if (s_list) {
+        /* LIST mode: route to the peer table by MAC */
+        if (f[0] & 1) {
+            /* broadcast: to every live peer; signal the worker to fetch the list */
+            int sent = 0;
+            InterlockedExchange(&s_probe, 1);
+            for (i = 0; i < s_nlpeers; i++) {
+                if (s_lpeers[i].state != LP_LIVE)
+                    continue;
+                char buf[FRAME_MAX + 8];
+                memcpy(buf, MAGIC, 4);
+                buf[4] = 'F';
+                memcpy(buf + 5, f, (size_t)len);
+                sendto(s_sock, buf, (int)len + 5, 0, (const struct sockaddr *)&s_lpeers[i].endpoint,
+                       sizeof s_lpeers[i].endpoint);
+                sent = 1;
+            }
+            return sent;
+        }
+        for (i = 0; i < s_nlpeers; i++) {
+            if (s_lpeers[i].state != LP_LIVE || memcmp(s_lpeers[i].mac, f, 6))
+                continue;
+            char buf[FRAME_MAX + 8];
+            memcpy(buf, MAGIC, 4);
+            buf[4] = 'F';
+            memcpy(buf + 5, f, (size_t)len);
+            sendto(s_sock, buf, (int)len + 5, 0, (const struct sockaddr *)&s_lpeers[i].endpoint,
+                   sizeof s_lpeers[i].endpoint);
+            return 1;
+        }
+        if (!s_unrouted++) /* XNET answers only cards it heard from, so this is unexpected but harmless */
+            fprintf(stderr, "[FCI] network: a frame to a card no peer has shown, dropped\n"), fflush(stderr);
+        return 0;
+    }
     if (!s_direct) {
         send_datagram('F', f, (int)len);
         return 1;
@@ -225,6 +306,238 @@ static void hello(void)
     memcpy(b + 6 + COOKIE, s_room, n);
     send_datagram('H', b, (int)(6 + COOKIE + n));
 }
+
+/* --- LIST mode: STUN, punch, peer table --- */
+
+/* send a STUN-5 binding request from the card socket; the response's XOR-MAPPED-ADDRESS is the
+ * card's public endpoint (the NAT mapping the punches will open) */
+static void stun_send(void)
+{
+    char buf[20];
+    if (!s_stun_srv_valid)
+        return;
+    s_stun_txn++;
+    /* type 0x0001 (binding request), length 0, magic, 12-byte transaction ID */
+    memcpy(buf, "\x00\x01\x00\x00", 4);
+    uint32_t m = htonl(STUN_MAGIC);
+    memcpy(buf + 4, &m, 4);
+    memset(buf + 8, 0, 12);
+    buf[8] = (char)(s_stun_txn >> 24), buf[9] = (char)(s_stun_txn >> 16);
+    buf[10] = (char)(s_stun_txn >> 8), buf[11] = (char)s_stun_txn;
+    sendto(s_sock, buf, 20, 0, (const struct sockaddr *)&s_stun_srv, sizeof s_stun_srv);
+}
+
+/* a STUN binding response (type 0x0101): extract the mapped address. Accept only from the
+ * STUN server and only with our last transaction ID. Walk the attributes: prefer
+ * XOR-MAPPED-ADDRESS (0x0020), fall back to MAPPED-ADDRESS (0x0001). */
+static int stun_recv(const char *buf, int n, const struct sockaddr_in *from)
+{
+    uint32_t m, txn;
+    int off;
+    if (n < 20)
+        return 0;
+    if (buf[0] != 0x01 || buf[1] != 0x01)
+        return 0;
+    memcpy(&m, buf + 4, 4);
+    if (ntohl(m) != STUN_MAGIC)
+        return 0;
+    /* only from the STUN server we sent to */
+    if (from->sin_addr.s_addr != s_stun_srv.sin_addr.s_addr || from->sin_port != s_stun_srv.sin_port)
+        return 0;
+    /* only our last transaction ID */
+    memcpy(&txn, buf + 8, 4);
+    if (txn != htonl(s_stun_txn))
+        return 0;
+    /* walk the attributes */
+    off = 20;
+    while (off + 4 <= n) {
+        uint16_t type = (uint16_t)((((uint8_t)buf[off] << 8) | (uint8_t)buf[off + 1]));
+        uint16_t len = (uint16_t)((((uint8_t)buf[off + 2] << 8) | (uint8_t)buf[off + 3]));
+        if (off + 4 + (int)len > n)
+            break;
+        if (type == 0x0020 && len == 8) {
+            /* XOR-MAPPED-ADDRESS */
+            uint16_t port = (uint16_t)((((uint8_t)buf[off + 6] << 8) | (uint8_t)buf[off + 7]) ^ 0x2112);
+            uint32_t addr;
+            memcpy(&addr, buf + off + 8, 4);
+            addr ^= STUN_MAGIC;
+            s_stun_ep.sin_family = AF_INET;
+            s_stun_ep.sin_port = htons(port);
+            s_stun_ep.sin_addr.s_addr = addr;
+            if (!s_stun_known) {
+                s_stun_known = 1;
+                fprintf(stderr, "[FCI] network: STUN endpoint %s:%u\n", inet_ntoa(s_stun_ep.sin_addr),
+                        ntohs(s_stun_ep.sin_port));
+                fflush(stderr);
+            }
+            return 1;
+        }
+        if (type == 0x0001 && len == 8) {
+            /* MAPPED-ADDRESS (plain, not XOR) */
+            uint16_t port = (uint16_t)((((uint8_t)buf[off + 6] << 8) | (uint8_t)buf[off + 7]));
+            uint32_t addr;
+            memcpy(&addr, buf + off + 8, 4);
+            s_stun_ep.sin_family = AF_INET;
+            s_stun_ep.sin_port = htons(port);
+            s_stun_ep.sin_addr.s_addr = ntohl(addr);
+            if (!s_stun_known) {
+                s_stun_known = 1;
+                fprintf(stderr, "[FCI] network: STUN endpoint (MAPPED) %s:%u\n",
+                        inet_ntoa(s_stun_ep.sin_addr), ntohs(s_stun_ep.sin_port));
+                fflush(stderr);
+            }
+            return 1;
+        }
+        off += 4 + (int)len;
+    }
+    return 0;
+}
+
+/* send a punch datagram (FCN1 'P' + 16-byte nonce) to a peer's endpoint */
+static void punch_send(const lpeer_t *p)
+{
+    char buf[21];
+    memcpy(buf, MAGIC, 4);
+    buf[4] = 'P';
+    memcpy(buf + 5, p->nonce, 16);
+    sendto(s_sock, buf, 21, 0, (const struct sockaddr *)&p->endpoint, sizeof p->endpoint);
+}
+
+static void punch_answer_send(const lpeer_t *p)
+{
+    char buf[21];
+    memcpy(buf, MAGIC, 4);
+    buf[4] = 'A';
+    memcpy(buf + 5, p->nonce, 16);
+    sendto(s_sock, buf, 21, 0, (const struct sockaddr *)&p->endpoint, sizeof p->endpoint);
+}
+
+/* a received punch 'P' or answer 'A' (FCN1 + type + 16-byte nonce): a 'P' is answered with an 'A';
+ * an 'A' is never answered. Either one, with a matching nonce and endpoint, moves a pending peer to live. */
+static void punch_recv(const char *buf, char type, const struct sockaddr_in *from)
+{
+    int i;
+    for (i = 0; i < s_nlpeers; i++) {
+        lpeer_t *p = &s_lpeers[i];
+        if (p->state != LP_PENDING && p->state != LP_LIVE)
+            continue;
+        if (p->endpoint.sin_addr.s_addr != from->sin_addr.s_addr || p->endpoint.sin_port != from->sin_port)
+            continue;
+        if (memcmp(p->nonce, buf + 5, 16))
+            continue;
+        if (p->state == LP_PENDING) {
+            p->state = LP_LIVE;
+            p->last_frame = GetTickCount64();
+            s_lpending--;
+            TRACE("punch complete: peer %s:%u is live\n", inet_ntoa(from->sin_addr), ntohs(from->sin_port));
+        }
+        if (type == 'P')
+            punch_answer_send(p);
+        return;
+    }
+    /* a punch/answer from an unknown peer: dropped (it may be our own bouncing back) */
+}
+
+/* remove a peer from the table (by index); called under s_lock */
+static void lpeer_remove(int i)
+{
+    lpeer_t *p = &s_lpeers[i];
+    if (p->state == LP_PENDING)
+        s_lpending--;
+    memmove(&s_lpeers[i], &s_lpeers[i + 1], (size_t)(s_nlpeers - i - 1) * sizeof(lpeer_t));
+    s_nlpeers--;
+}
+
+/* add a pending peer (called by the worker under s_lock, no I/O); returns 0 on cap */
+int fci_nic_list_add_peer(const char *endpoint, const uint8_t mac[6], const uint8_t nonce[16])
+{
+    struct addrinfo hints, *ai = NULL;
+    char host[128], port[16];
+    const char *colon;
+    ULONGLONG now;
+    if (s_nlpeers >= LIST_PEER_MAX)
+        return 0;
+    colon = strrchr(endpoint, ':');
+    if (!colon || (size_t)(colon - endpoint) >= sizeof host || strlen(colon + 1) >= sizeof port)
+        return 0;
+    memcpy(host, endpoint, (size_t)(colon - endpoint));
+    host[colon - endpoint] = 0;
+    strcpy(port, colon + 1);
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_DGRAM;
+    if (getaddrinfo(host, port, &hints, &ai) || !ai)
+        return 0;
+    if (s_lpending >= LIST_PENDING_MAX) {
+        /* the pending cap: drop the oldest pending peer */
+        int oldest = -1;
+        int i;
+        for (i = 0; i < s_nlpeers; i++)
+            if (s_lpeers[i].state == LP_PENDING) {
+                oldest = i;
+                break;
+            }
+        if (oldest >= 0) {
+            fprintf(stderr, "[FCI] network: pending peer cap (%d) reached, dropping oldest\n",
+                    LIST_PENDING_MAX);
+            fflush(stderr);
+            lpeer_remove(oldest);
+        }
+    }
+    {
+        lpeer_t *p = &s_lpeers[s_nlpeers]; /* after any removal: the table has shifted */
+        memcpy(&p->endpoint, ai->ai_addr, sizeof(struct sockaddr_in));
+        freeaddrinfo(ai);
+        memcpy(p->mac, mac, 6);
+        memcpy(p->nonce, nonce, 16);
+        p->state = LP_PENDING;
+        now = GetTickCount64();
+        p->next_punch = now;
+        p->punch_end = now + PUNCH_WINDOW_MS;
+        p->last_frame = now;
+        s_lpending++;
+        s_nlpeers++;
+        return 1;
+    }
+}
+
+/* the card's public endpoint as "ip:port" (for the worker's register call); 0 if not yet known */
+int fci_nic_list_endpoint(char *buf, int buflen)
+{
+    if (!s_stun_known)
+        return 0;
+    snprintf(buf, (size_t)buflen, "%s:%u", inet_ntoa(s_stun_ep.sin_addr), ntohs(s_stun_ep.sin_port));
+    return 1;
+}
+
+/* 1 when a peer with the given endpoint ("ip:port") is pending or live; called under s_lock */
+int fci_nic_list_has_peer(const char *endpoint)
+{
+    struct addrinfo hints, *ai = NULL;
+    char host[128], port[16];
+    const char *colon;
+    int i, have = 0;
+    colon = strrchr(endpoint, ':');
+    if (!colon || (size_t)(colon - endpoint) >= sizeof host || strlen(colon + 1) >= sizeof port)
+        return 0;
+    memcpy(host, endpoint, (size_t)(colon - endpoint));
+    host[colon - endpoint] = 0;
+    strcpy(port, colon + 1);
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_DGRAM;
+    if (getaddrinfo(host, port, &hints, &ai) || !ai)
+        return 0;
+    for (i = 0; i < s_nlpeers; i++)
+        if (memcmp(&s_lpeers[i].endpoint, ai->ai_addr, sizeof(struct sockaddr_in)) == 0) {
+            have = 1;
+            break;
+        }
+    freeaddrinfo(ai);
+    return have;
+}
+
+/* --- end LIST mode --- */
 
 /* send every complete frame the driver has queued; it marks a frame's last fragment before its first */
 static void tx_run(void)
@@ -315,9 +628,54 @@ static void receive(void)
                 continue;
             return;
         }
-        if (n < 5 || memcmp(buf, MAGIC, 4))
+        if (s_list) {
+            /* LIST mode: classify STUN, punch, frame */
+            if (n >= 20 && (uint8_t)buf[4] == 0x21 && (uint8_t)buf[5] == 0x12 && (uint8_t)buf[6] == 0xA4
+                && (uint8_t)buf[7] == 0x42) {
+                if (fromlen == sizeof from)
+                    stun_recv(buf, n, &from);
+                continue;
+            }
+            if (n < 5 || memcmp(buf, MAGIC, 4))
+                continue;
+            if ((buf[4] == 'P' || buf[4] == 'A') && n == 21) {
+                if (fromlen == sizeof from)
+                    punch_recv(buf, buf[4], &from);
+                continue;
+            }
+            if (buf[4] != 'F' || n < 5 + 14 || n > 5 + ETHER_MAX)
+                continue;
+            /* a frame: only from a live peer, with that peer's MAC */
+            {
+                int i;
+                lpeer_t *lp = NULL;
+                for (i = 0; i < s_nlpeers; i++)
+                    if (s_lpeers[i].state == LP_LIVE
+                        && s_lpeers[i].endpoint.sin_addr.s_addr == from.sin_addr.s_addr
+                        && s_lpeers[i].endpoint.sin_port == from.sin_port) {
+                        lp = &s_lpeers[i];
+                        break;
+                    }
+                if (!lp) {
+                    stray(&from);
+                    continue;
+                }
+                {
+                    const uint8_t *src = (const uint8_t *)buf + 5 + 6;
+                    if (src[0] & 1) { /* no card sends from a group address */
+                        stray(&from);
+                        continue;
+                    }
+                    if (memcmp(lp->mac, src, 6)) {
+                        stray(&from);
+                        continue;
+                    }
+                    lp->last_frame = GetTickCount64();
+                }
+            }
+        } else if (n < 5 || memcmp(buf, MAGIC, 4)) {
             continue;
-        if (s_direct) { /* only peers reach the guest, each with its own card's frames */
+        } else if (s_direct) { /* only peers reach the guest, each with its own card's frames */
             p = fromlen == sizeof from ? peer_at(&from) : NULL;
             if (!p || buf[4] != 'F') {
                 stray(&from);
@@ -359,6 +717,44 @@ static void receive(void)
     }
 }
 
+/* LIST mode: the punch schedule, STUN refresh, and peer expiries (called under s_lock in the tick) */
+static void list_tick(ULONGLONG now)
+{
+    int i;
+    /* STUN: at link-up and every 60 s (skipped when _ENDPOINT set s_stun_known at init) */
+    if (s_stun_srv_valid && now >= s_stun_next) {
+        stun_send();
+        s_stun_next = now + STUN_PERIOD_MS;
+    }
+    /* punch schedule and expiries */
+    for (i = 0; i < s_nlpeers; i++) {
+        lpeer_t *p = &s_lpeers[i];
+        if (p->state == LP_PENDING) {
+            if (now >= p->punch_end) {
+                /* 3 s with no answer: drop (relay fallback not implemented yet) */
+                fprintf(stderr, "[FCI] network: punch to %s:%u failed, relay not implemented: peer dropped\n",
+                        inet_ntoa(p->endpoint.sin_addr), ntohs(p->endpoint.sin_port));
+                fflush(stderr);
+                lpeer_remove(i);
+                i--;
+                continue;
+            }
+            if (now >= p->next_punch) {
+                punch_send(p);
+                p->next_punch += PUNCH_PERIOD_MS;
+            }
+        } else { /* LP_LIVE: expire after 15 s without a frame */
+            if (now - p->last_frame > PEER_EXPIRE_MS) {
+                fprintf(stderr, "[FCI] network: peer %s:%u: no frame in 15 s, expired\n",
+                        inet_ntoa(p->endpoint.sin_addr), ntohs(p->endpoint.sin_port));
+                fflush(stderr);
+                lpeer_remove(i);
+                i--;
+            }
+        }
+    }
+}
+
 /* from the kernel's 1 ms timer thread (runtime patch 0026): the vector to raise, or -1 */
 int fci_nic_tick(void)
 {
@@ -367,10 +763,12 @@ int fci_nic_tick(void)
     AcquireSRWLockExclusive(&s_lock);
     if (s_sock != INVALID_SOCKET) {
         ULONGLONG now = GetTickCount64();
-        if (!s_direct && now >= next_hello) {
+        if (!s_direct && !s_list && now >= next_hello) {
             hello();
             next_hello = now + 2000;
         }
+        if (s_list)
+            list_tick(now);
         receive();
     }
     if (s_tx_kick) {
@@ -562,17 +960,159 @@ static int connect_peers(const char *spec, char *err, int errlen)
     return 1;
 }
 
-/* returns 0 when the page cannot be trapped or RECOMP_FCI_NET(_PEERS) cannot be used */
+/* RECOMP_FCI_NET_LIST=<url>: the internet host list. The card socket is unbound (ephemeral port) and
+ * unconnected: it sends STUN and punches to any address, and receives from live peers. _ENDPOINT skips
+ * STUN (local test); _RELAY names a hub for the relay fallback (a TODO this round).
+ * 0 on a socket error, with the failure in err. */
+static int connect_list(const char *url, char *err, int errlen)
+{
+    WSADATA wsa;
+    u_long nb = 1;
+    const char *endpoint = getenv("RECOMP_FCI_NET_ENDPOINT");
+    if (strlen(url) >= sizeof s_list_url) {
+        snprintf(err, errlen, "URL too long");
+        return 0;
+    }
+    if (WSAStartup(MAKEWORD(2, 2), &wsa)) {
+        snprintf(err, errlen, "WSAStartup failed (%d)", WSAGetLastError());
+        return 0;
+    }
+    strcpy(s_list_url, url);
+    s_relay_spec[0] = 0;
+    if (getenv("RECOMP_FCI_NET_RELAY"))
+        snprintf(s_relay_spec, sizeof s_relay_spec, "%s", getenv("RECOMP_FCI_NET_RELAY"));
+    /* the card socket: bound to a local port, unconnected (punches and STUN go to any address) */
+    s_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (s_sock == INVALID_SOCKET) {
+        snprintf(err, errlen, "no socket (%d)", WSAGetLastError());
+        return 0;
+    }
+    if (ioctlsocket(s_sock, FIONBIO, &nb)) {
+        int e = WSAGetLastError();
+        closesocket(s_sock);
+        s_sock = INVALID_SOCKET;
+        snprintf(err, errlen, "non-blocking mode failed (%d)", e);
+        return 0;
+    }
+    s_list = 1;
+    /* the endpoint: from _ENDPOINT (local test) or STUN (the real path) */
+    if (endpoint && *endpoint) {
+        char host[128], port[16];
+        const char *colon = strrchr(endpoint, ':');
+        if (colon && (size_t)(colon - endpoint) < sizeof host && strlen(colon + 1) < sizeof port) {
+            memcpy(host, endpoint, (size_t)(colon - endpoint));
+            host[colon - endpoint] = 0;
+            strcpy(port, colon + 1);
+            {
+                struct addrinfo hints, *ai = NULL;
+                struct sockaddr_in bind_addr;
+                memset(&hints, 0, sizeof hints);
+                hints.ai_family = AF_INET;
+                hints.ai_socktype = SOCK_DGRAM;
+                if (!getaddrinfo(host, port, &hints, &ai) && ai) {
+                    memcpy(&s_stun_ep, ai->ai_addr, sizeof s_stun_ep);
+                    s_stun_known = 1;
+                    freeaddrinfo(ai);
+                    /* bind the card socket to this port (INADDR_ANY) so punches use it */
+                    memset(&bind_addr, 0, sizeof bind_addr);
+                    bind_addr.sin_family = AF_INET;
+                    bind_addr.sin_addr.s_addr = INADDR_ANY;
+                    bind_addr.sin_port = s_stun_ep.sin_port;
+                    if (bind(s_sock, (const struct sockaddr *)&bind_addr, sizeof bind_addr)) {
+                        closesocket(s_sock);
+                        s_sock = INVALID_SOCKET;
+                        snprintf(err, errlen, "bind to %s failed (%d)", endpoint, WSAGetLastError());
+                        return 0;
+                    }
+                    fprintf(stderr, "[FCI] network: endpoint from _ENDPOINT %s (bound)\n", endpoint);
+                    fflush(stderr);
+                } else {
+                    closesocket(s_sock);
+                    s_sock = INVALID_SOCKET;
+                    snprintf(err, errlen, "endpoint %s not an address", endpoint);
+                    return 0;
+                }
+            }
+        } else {
+            closesocket(s_sock);
+            s_sock = INVALID_SOCKET;
+            snprintf(err, errlen, "endpoint %s not <ip:port>", endpoint);
+            return 0;
+        }
+    } else {
+        /* bind port 0 (the OS picks) and log the local port */
+        struct sockaddr_in bind_addr;
+        memset(&bind_addr, 0, sizeof bind_addr);
+        bind_addr.sin_family = AF_INET;
+        bind_addr.sin_addr.s_addr = INADDR_ANY;
+        bind_addr.sin_port = 0;
+        if (bind(s_sock, (const struct sockaddr *)&bind_addr, sizeof bind_addr)) {
+            int e = WSAGetLastError();
+            closesocket(s_sock);
+            s_sock = INVALID_SOCKET;
+            snprintf(err, errlen, "bind failed (%d)", e);
+            return 0;
+        }
+        {
+            struct sockaddr_in local;
+            int llen = sizeof local;
+            if (!getsockname(s_sock, (struct sockaddr *)&local, &llen)) {
+                fprintf(stderr, "[FCI] network: card socket bound to port %u\n", ntohs(local.sin_port));
+                fflush(stderr);
+            }
+        }
+        /* resolve the STUN server (_STUN overrides, default stun.l.google.com:19302) */
+        {
+            const char *stun = getenv("RECOMP_FCI_NET_STUN");
+            char shost[128], sport[16];
+            const char *colon;
+            if (stun && *stun) {
+                colon = strrchr(stun, ':');
+                if (!colon || (size_t)(colon - stun) >= sizeof shost || strlen(colon + 1) >= sizeof sport) {
+                    fprintf(stderr, "[FCI] RECOMP_FCI_NET_STUN=%s: not <host:port>\n", stun);
+                    return 0;
+                }
+                memcpy(shost, stun, (size_t)(colon - stun));
+                shost[colon - stun] = 0;
+                strcpy(sport, colon + 1);
+            } else {
+                strcpy(shost, "stun.l.google.com");
+                strcpy(sport, "19302");
+            }
+            struct addrinfo hints, *ai = NULL;
+            memset(&hints, 0, sizeof hints);
+            hints.ai_family = AF_INET;
+            hints.ai_socktype = SOCK_DGRAM;
+            if (!getaddrinfo(shost, sport, &hints, &ai) && ai) {
+                memcpy(&s_stun_srv, ai->ai_addr, sizeof s_stun_srv);
+                s_stun_srv_valid = 1;
+                freeaddrinfo(ai);
+                s_stun_next = 0; /* send the first STUN at the next tick */
+            } else {
+                fprintf(stderr,
+                        "[FCI] network: STUN server %s:%s didn't resolve: no public endpoint, "
+                        "hosting and joining off\n",
+                        shost, sport);
+                fflush(stderr);
+            }
+        }
+    }
+    return 1;
+}
+
+/* returns 0 when the page cannot be trapped or RECOMP_FCI_NET(_PEERS|_LIST) cannot be used */
 int fci_nic_init(ptrdiff_t mem_offset)
 {
     DWORD old;
     const char *net = getenv("RECOMP_FCI_NET"), *peers = getenv("RECOMP_FCI_NET_PEERS");
+    const char *list = getenv("RECOMP_FCI_NET_LIST");
     const char *trace = getenv("RECOMP_FCI_NET_TRACE");
     uint8_t m[6];
+    int nset = (net && *net) + (peers && *peers) + (list && *list);
     s_trace = trace && *trace == '1';
     s_mem_offset = mem_offset;
-    if (net && *net && peers && *peers) {
-        fprintf(stderr, "[FCI] RECOMP_FCI_NET and RECOMP_FCI_NET_PEERS are both set: one link at a time\n");
+    if (nset > 1) {
+        fprintf(stderr, "[FCI] RECOMP_FCI_NET, _PEERS and _LIST: one link at a time\n");
         return 0;
     }
     if (net && *net) {
@@ -595,6 +1135,17 @@ int fci_nic_init(ptrdiff_t mem_offset)
         fprintf(stderr, "[FCI] network: link up to %d peers, card %02X:%02X:%02X:%02X:%02X:%02X\n", s_npeers,
                 m[0], m[1], m[2], m[3], m[4], m[5]);
         fflush(stderr);
+    } else if (list && *list) {
+        char err[128];
+        if (!connect_list(list, err, sizeof err)) {
+            fprintf(stderr, "[FCI] RECOMP_FCI_NET_LIST=%s: %s\n", list, err);
+            return 0;
+        }
+        fci_nic_mac(m);
+        fprintf(stderr, "[FCI] network: link up (host list %s), card %02X:%02X:%02X:%02X:%02X:%02X\n", list,
+                m[0], m[1], m[2], m[3], m[4], m[5]);
+        fflush(stderr);
+        fci_net_worker_start(); /* LIST mode: the worker thread does the host-list HTTP */
     }
     return VirtualProtect((char *)mem_offset + NIC_BASE, NIC_SIZE, PAGE_NOACCESS, &old) != 0;
 }
@@ -609,3 +1160,13 @@ int fci_nic_mmio(void *ctx, uint32_t va)
     fail("an access the decoder cannot emulate", va - NIC_BASE);
     return 0;
 }
+
+/* the worker's probe flag: set by route_frame on broadcast, cleared by the worker after a fetch.
+ * Returns 1 and clears the flag if a probe was pending. */
+int fci_nic_worker_probe_take(void) { return InterlockedExchange(&s_probe, 0) != 0; }
+
+/* the list URL (for the worker). Returns NULL if not in LIST mode. */
+const char *fci_nic_list_url(void) { return s_list ? s_list_url : NULL; }
+
+/* the NIC's lock (the worker takes it for fci_nic_list_* calls) */
+SRWLOCK *fci_nic_lock(void) { return &s_lock; }

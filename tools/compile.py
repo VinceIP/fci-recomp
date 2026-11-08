@@ -88,6 +88,8 @@ SYSTEM_LIBS = [
     "uuid",
     "d3d12",
     "ws2_32",  # the network card's hub link (src/fci_nic.c)
+    "winhttp",  # the host list worker (src/fci_net_worker.c)
+    "bcrypt",  # nonce generation (src/fci_net_worker.c)
 ]
 DEFINES = ["-DWIN32_LEAN_AND_MEAN", "-DNOMINMAX", "-D_CRT_SECURE_NO_WARNINGS", "-D_USE_MATH_DEFINES"]
 # the semantics the lifted and runtime code were written and tested against with MSVC: no type-based alias
@@ -161,6 +163,11 @@ REPLACE = {
         "the title's movie player (path, ...), cdecl; RECOMP_FCI_SKIP_INTROS / "
         "RECOMP_FCI_SKIP_MOVIES skip listed movies as if they had played (fci_disk.c, "
         "re/notes/MOVIES.md)",
+    ),
+    "sub_0051CDD4": (
+        "prehook",
+        "XNetRegisterKey: the host registers its network key; the worker thread registers with the "
+        "host list (fci_net_worker.c)",
     ),
 }
 

@@ -213,6 +213,7 @@ void guest_cpu_part(void);
 const char *fci_xbe_path, *fci_game_dir, *fci_save_dir;
 int fci_launch_argc;
 char **fci_launch_argv;
+uint32_t fci_xbe_version; /* the XBE certificate's Version field (the disc's version, for the host list) */
 void fci_config_load(int *argc, char ***argv); /* fci_config.c: fci.ini when started without arguments */
 
 int main(int argc, char **argv)
@@ -292,6 +293,12 @@ int main(int argc, char **argv)
         fprintf(stderr, "[FCI] XBE does not match compiled image %s entry %08X\n", FCI_IMAGE_FILENAME,
                 FCI_ENTRY_VA);
         return 2;
+    }
+    { /* the certificate's Version field: a patched disc lists apart from another */
+        uint32_t base = *(const uint32_t *)((const char *)xbe + 0x104); /* the header's load address */
+        uint32_t cert = *(const uint32_t *)((const char *)xbe + 0x118) - base; /* certificate VA -> offset */
+        if (cert + 0xB0 <= xbe_size)
+            fci_xbe_version = *(const uint32_t *)((const char *)xbe + cert + 0xAC);
     }
     if (!xbox_MemoryLayoutInit(xbe, xbe_size)) {
         fprintf(stderr, "[FCI] memory layout init failed\n");

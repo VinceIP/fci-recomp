@@ -80,6 +80,11 @@
     "sub_0012D981": [
       "prehook",
       "called by the movement handler 0012C298 (ebx = vehicle): RECOMP_FCI_VEHTRACE (fci_vehdiag.c)"
+    ],
+    "sub_003D02D4": [
+      "prehook",
+      "XNetRegisterKey (Evolution's address from the static note; Instincts' 0051CDD4): the host registers its network key; the worker thread registers with the host list (fci_net_worker.c)",
+      "0051CDD4"
     ]
   },
   "evidence": "Exploratory Evolution profile: descriptor helper by masked bytes (unique match); code end = BINKDATA end (as Instincts' 0070C6E4).",
