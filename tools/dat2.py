@@ -243,6 +243,83 @@ def _refuse_original(dat_path):
             )
 
 
+def cmd_repack(fat, args):
+    """Repack a DAT2 with one entry replaced (handles size changes).
+
+    Reads the original .fat/.dat, replaces the target entry's payload,
+    rebuilds the .dat with all entries packed sequentially (4-byte aligned),
+    and writes a new .fat with updated offsets. Entries remain sorted by hash.
+    """
+    i = _resolve(fat, args)
+    off, size, h = fat.entries[i]
+
+    # safety: refuse to write over inputs/media/repo
+    _refuse_original(fat.dat_path)
+    _refuse_original(fat.fat_path)
+    # also refuse to write output over the input
+    import os
+
+    out_fat = os.path.abspath(args.out_fat)
+    out_dat = os.path.abspath(args.out_dat)
+    in_fat = os.path.abspath(fat.fat_path)
+    in_dat = os.path.abspath(fat.dat_path)
+    if out_fat == in_fat or out_dat == in_dat:
+        raise SystemExit("error: output path is the same as the input path")
+    for p in (out_fat, out_dat):
+        lower = p.lower().replace("\\", "/")
+        for marker in ("/build/", "qwen-in", "/original"):
+            if marker in lower:
+                raise SystemExit(f"error: output {p} is under a media/reference path")
+
+    # Read the replacement
+    with open(args.from_file, "rb") as f:
+        repl = f.read()
+
+    # Read all payloads from the original .dat
+    d = fat.dat()
+    payloads = []
+    for j in range(fat.count):
+        eoff, esize, _ = fat.entries[j]
+        payloads.append(d[eoff : eoff + esize])
+
+    # Replace the target entry
+    payloads[i] = repl
+
+    # Rebuild the .dat: pack all entries sequentially with 4-byte alignment
+    new_dat = bytearray()
+    new_entries = []
+    for j in range(fat.count):
+        # 4-byte align
+        while len(new_dat) % 4 != 0:
+            new_dat.append(0)
+        new_off = len(new_dat)
+        new_dat.extend(payloads[j])
+        _, _, new_hash = fat.entries[j]
+        new_entries.append((new_off, len(payloads[j]), new_hash))
+
+    # Sort by hash (should already be sorted, but ensure it)
+    new_entries.sort(key=lambda e: e[2])
+
+    # Write the new .fat
+    new_fat = bytearray()
+    new_fat.extend(MAGIC)
+    new_fat.extend(struct.pack("<I", len(new_entries)))
+    for off_e, size_e, hash_e in new_entries:
+        new_fat.extend(struct.pack("<III", off_e, size_e, hash_e))
+
+    # Write output files
+    with open(out_fat, "wb") as f:
+        f.write(new_fat)
+    with open(out_dat, "wb") as f:
+        f.write(new_dat)
+
+    print(f"# repacked {fat.count} entries")
+    print(f"# replaced entry {i} (hash {h:#x}): {size} -> {len(repl)} bytes")
+    print(f"# .dat: {len(d)} -> {len(new_dat)} bytes")
+    print(f"# .fat: {out_fat}")
+    print(f"# .dat: {out_dat}")
+
+
 def cmd_patch(fat, args):
     """Same-size in-place replacement of one entry in the .dat."""
     i = _resolve(fat, args)
@@ -313,6 +390,16 @@ def main(argv=None):
     sp.add_argument("--name", help="entry path (resolved by CRC-32 hash)")
     sp.add_argument("--from", dest="from_file", required=True, help="replacement file (must be same size as the entry)")
     sp.set_defaults(func=lambda a: cmd_patch(finish(a), a))
+
+    sp = sub.add_parser("repack", help="repack with one entry replaced (handles size changes)")
+    add_fat(sp)
+    sp.add_argument("--hash", type=lambda s: int(s, 0), help="entry hash")
+    sp.add_argument("--find", help="the entry whose payload contains this text")
+    sp.add_argument("--name", help="entry path (resolved by CRC-32 hash)")
+    sp.add_argument("--from", dest="from_file", required=True, help="replacement file")
+    sp.add_argument("--out-fat", required=True, help="output .fat path")
+    sp.add_argument("--out-dat", required=True, help="output .dat path")
+    sp.set_defaults(func=lambda a: cmd_repack(finish(a), a))
 
     a = p.parse_args(argv)
     a.func(a)
