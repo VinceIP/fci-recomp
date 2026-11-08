@@ -1,7 +1,7 @@
 /* The network worker thread: one WinHTTP session for the host list (RECOMP_FCI_NET_LIST).
  * Guest path: the NIC signals "probe" on broadcast; the worker fetches /v1/hosts, adds peers,
  * and posts /v1/connect for each new host.
- * Host path: fci_prehook_0051CDD4 (XNetRegisterKey) sets "host started"; the worker registers
+ * Host path: fci_prehook_0051C5EA (XNetCreateKey: only a host creates a key) sets "host started"; the worker registers
  * and long-polls /v1/connects.
  * It never touches the card's UDP socket; it takes s_lock only around fci_nic_list_* calls.
  * research/docs/multiplayer.md, tools/fake_hostlist.py */
@@ -37,7 +37,7 @@ extern uint32_t fci_xbe_version;
 static HANDLE s_thread;
 static HANDLE s_stop;
 static HINTERNET s_session;
-static volatile LONG s_host_started; /* set by fci_prehook_0051CDD4 */
+static volatile LONG s_host_started; /* set by fci_prehook_0051C5EA */
 
 /* host registration state */
 static char s_host_id[64];
@@ -536,8 +536,8 @@ void fci_net_worker_stop(void)
     }
 }
 
-void fci_prehook_0051CDD4(void)
+void fci_prehook_0051C5EA(void)
 {
-    /* XNetRegisterKey: the game is registering a host. Set the flag; the worker picks it up. */
+    /* XNetCreateKey: the game is creating a host's key. Set the flag; the worker picks it up. */
     InterlockedExchange(&s_host_started, 1);
 }

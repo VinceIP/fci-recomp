@@ -164,10 +164,10 @@ REPLACE = {
         "RECOMP_FCI_SKIP_MOVIES skip listed movies as if they had played (fci_disk.c, "
         "re/notes/MOVIES.md)",
     ),
-    "sub_0051CDD4": (
+    "sub_0051C5EA": (
         "prehook",
-        "XNetRegisterKey: the host registers its network key; the worker thread registers with the "
-        "host list (fci_net_worker.c)",
+        "XNetCreateKey: only a host creates a key (a guest registers the host's), so this is host "
+        "started; the worker thread registers with the host list (fci_net_worker.c)",
     ),
 }
 
