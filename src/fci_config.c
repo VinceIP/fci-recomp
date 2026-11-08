@@ -315,8 +315,7 @@ void fci_config_load(int *argc, char ***argv)
             else if (!_stricmp(key, "network-hub")) {
                 if (v[0])
                     snprintf(hub_arg, sizeof hub_arg, "RECOMP_FCI_NET=%s", v);
-            }
-            else if (opts < 96 && translate(key, v, lines[opts], sizeof lines[0]))
+            } else if (opts < 96 && translate(key, v, lines[opts], sizeof lines[0]))
                 opts++;
         }
         fclose(f);

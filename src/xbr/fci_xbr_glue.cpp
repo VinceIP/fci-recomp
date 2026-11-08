@@ -39,6 +39,7 @@ uint32_t xbox_HeapAlloc(uint32_t size, uint32_t alignment);
 void xbox_HeapFree(uint32_t xbox_va);
 void fci_guest_event(uint32_t guest_va, int set);
 int fci_guest_host_thread_init(void);
+unsigned long fci_nic_link_state(void);   // nonzero while the network card has a hub or peers (fci_nic.c)
 int guest_cpu_interrupt_enter(void);
 void guest_cpu_interrupt_leave(int);
 void fci_framebuffer_key(int vk, int down);   // keyboard pad, fci_nv2a.c
@@ -700,8 +701,7 @@ void Pace()
         unlock = OptionFlag("RECOMP_FCI_XBR_UNLOCK", false);
         const char* f = std::getenv("RECOMP_FCI_XBR_FPS");
         fps = f ? std::atof(f) : 0.0;
-        const char* net = std::getenv("RECOMP_FCI_NET");
-        if (net && *net && (unlock || fps > 0)) {
+        if (fci_nic_link_state() && (unlock || fps > 0)) {
             // online every player runs the Xbox's 30 updates: physics and AI depend on the rate (multiplayer.md)
             std::fprintf(stderr, "[FCI] network: the game keeps its own 30 frames a second while linked; "
                                  "RECOMP_FCI_XBR_REPLAY still shows more\n");
