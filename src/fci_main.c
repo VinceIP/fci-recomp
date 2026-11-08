@@ -295,8 +295,9 @@ int main(int argc, char **argv)
         return 2;
     }
     { /* the certificate's Version field: a patched disc lists apart from another */
-        uint32_t base = *(const uint32_t *)((const char *)xbe + 0x104); /* the header's load address */
-        uint32_t cert = *(const uint32_t *)((const char *)xbe + 0x118) - base; /* certificate VA -> offset */
+        /* the certificate's address (0x118) is a VA: minus the load address (0x104) */
+        uint32_t base = *(const uint32_t *)((const char *)xbe + 0x104);
+        uint32_t cert = *(const uint32_t *)((const char *)xbe + 0x118) - base;
         if (cert + 0xB0 <= xbe_size)
             fci_xbe_version = *(const uint32_t *)((const char *)xbe + cert + 0xAC);
     }

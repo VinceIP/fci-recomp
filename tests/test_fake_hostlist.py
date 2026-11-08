@@ -13,9 +13,9 @@ import urllib.request
 from fake_hostlist import Lobby, make_handler  # tools/ is on the path (conftest); a `tools.` import hides the toolkit's
 
 
-def start_server():
+def start_server(break_punch=False):
     """Start the fake host list on a random port; return (port, server, lobby)."""
-    lobby = Lobby()
+    lobby = Lobby(break_punch=break_punch)
     server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(lobby))
     server.daemon_threads = True
     port = server.server_address[1]
@@ -202,6 +202,63 @@ def test_register_uppercase_mac_is_rejected():
         )
         assert status == 400, body
         assert "MAC" in body["error"]
+    finally:
+        server.shutdown()
+
+
+def test_break_punch_rewrites_connect_endpoint():
+    """With --break-punch, the connect the host receives has the port + 1000 (a dead port)."""
+    port, server, lobby = start_server(break_punch=True)
+    try:
+        base = f"http://127.0.0.1:{port}"
+        status, body = http_json(
+            f"{base}/v1/register",
+            method="POST",
+            body={
+                "proto": 1,
+                "title": "evolution",
+                "version": "3",
+                "mac": "02:46:43:12:34:56",
+                "endpoint": "127.0.0.1:40000",
+            },
+        )
+        assert status == 200, body
+        host_id = body["id"]
+        token = body["token"]
+
+        result = []
+
+        def do_poll():
+            s, b = http_json(f"{base}/v1/connects?id={host_id}&token={token}&wait=10")
+            result.append((s, b))
+
+        t = threading.Thread(target=do_poll, daemon=True)
+        t.start()
+        time.sleep(0.2)  # the poll is now held
+
+        nonce = "fedcba9876543210fedcba9876543210"
+        status, _ = http_json(
+            f"{base}/v1/connect",
+            method="POST",
+            body={
+                "id": host_id,
+                "endpoint": "127.0.0.1:50000",
+                "nonce": nonce,
+                "mac": "02:46:43:aa:bb:cc",
+            },
+        )
+        assert status == 204
+
+        t.join(timeout=5)
+        assert len(result) == 1, "the poll was not released"
+        status, body = result[0]
+        assert status == 200
+        assert len(body["connects"]) == 1
+        # the port is shifted +1000: the host punches a dead port
+        assert body["connects"][0]["endpoint"] == "127.0.0.1:51000", body["connects"][0]
+        # the nonce and MAC are untouched (the relay room is named by the nonce)
+        assert body["connects"][0]["nonce"] == nonce
+        assert body["connects"][0]["mac"] == "02:46:43:aa:bb:cc"
     finally:
         server.shutdown()
 

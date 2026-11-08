@@ -59,13 +59,14 @@
 #define STUN_PERIOD_MS   60000
 #define STUN_MAGIC       0x2112A442u
 
-typedef enum { LP_PENDING, LP_LIVE } lp_state;
+typedef enum { LP_PENDING, LP_LIVE, LP_RELAY } lp_state;
 
 typedef struct {
     struct sockaddr_in endpoint;
     uint8_t mac[6];
     uint8_t nonce[16];
     lp_state state;
+    int relay;            /* the relay socket (s_relsock) when in the relay room; -1 otherwise */
     ULONGLONG next_punch; /* next punch deadline (GetTickCount64) */
     ULONGLONG punch_end;  /* stop punching, transition or drop */
     ULONGLONG last_frame; /* last frame received (expiry) */
@@ -111,7 +112,17 @@ static struct sockaddr_in s_stun_srv; /* the STUN server address (resolved at in
 static int s_stun_srv_valid;          /* 1 when the STUN server is resolved */
 static char s_list_url[512];          /* the Worker base URL (for the worker thread, round B) */
 static char s_relay_spec[256];        /* RECOMP_FCI_NET_RELAY, if set */
-static volatile LONG s_probe;         /* the game broadcast in LIST mode: the worker should fetch the list */
+/* the relay fallback (RECOMP_FCI_NET_RELAY): the hub keys a member by address, so one socket per
+ * relay room, opened on the first relay peer and closed when its peer expires */
+#define RELAY_MAX       4
+#define HELLO_PERIOD_MS 2000           /* the hub leaves a quiet member after 10 s */
+static struct sockaddr_in s_relay_hub; /* the hub address, resolved from _RELAY at init */
+static int s_relay_hub_valid;
+static SOCKET s_relsock[RELAY_MAX]; /* a socket per relay room; INVALID_SOCKET = free */
+static uint8_t s_relcookie[RELAY_MAX][COOKIE];
+static char s_relroom[RELAY_MAX][33];   /* the room name: the peer's nonce in hex (32) */
+static ULONGLONG s_relhello[RELAY_MAX]; /* next hello deadline per socket */
+static volatile LONG s_probe; /* the game broadcast in LIST mode: the worker should fetch the list */
 
 #define TRACE(...)                                                                                           \
     do {                                                                                                     \
@@ -189,18 +200,40 @@ void fci_nic_mac_str(char *buf, int buflen)
     snprintf(buf, (size_t)buflen, "%02x:%02x:%02x:%02x:%02x:%02x", m[0], m[1], m[2], m[3], m[4], m[5]);
 }
 
+/* a frame to a relay room, over that room's hub socket (the hub socket is connected to the hub) */
+static void relay_send_frame(int i, const uint8_t *f, uint32_t len)
+{
+    char buf[FRAME_MAX + 8];
+    memcpy(buf, MAGIC, 4);
+    buf[4] = 'F';
+    memcpy(buf + 5, f, (size_t)len);
+    send(s_relsock[i], buf, (int)len + 5, 0);
+}
+
+static void relay_socket_close(int i)
+{
+    if (s_relsock[i] != INVALID_SOCKET) {
+        closesocket(s_relsock[i]); /* closing the socket leaves the room */
+        s_relsock[i] = INVALID_SOCKET;
+        s_relroom[i][0] = 0;
+    }
+}
+
 ULONG fci_nic_link_state(void) { return s_sock != INVALID_SOCKET ? LINK_UP : 0; }
 
 /* Down before a relaunch (fci_manual.c): the next instance re-reads RECOMP_FCI_NET_PEERS and would find
  * this one's port still bound. The process is going, so no other state needs winding back. */
 void fci_nic_shutdown(void)
 {
+    int i;
     fci_net_worker_stop(); /* before the socket closes: the worker takes s_lock for list calls */
     AcquireSRWLockExclusive(&s_lock);
     if (s_sock != INVALID_SOCKET) {
         closesocket(s_sock);
         s_sock = INVALID_SOCKET;
     }
+    for (i = 0; i < RELAY_MAX; i++)
+        relay_socket_close(i); /* the relay rooms leave with the process */
     ReleaseSRWLockExclusive(&s_lock);
 }
 
@@ -225,33 +258,42 @@ static int route_frame(const uint8_t *f, uint32_t len)
 {
     int i;
     if (s_list) {
-        /* LIST mode: route to the peer table by MAC */
+        /* LIST mode: route to the peer table by MAC (live over the card socket, relay over its room) */
         if (f[0] & 1) {
-            /* broadcast: to every live peer; signal the worker to fetch the list */
+            /* broadcast: to every live and relay peer; signal the worker to fetch the list */
             int sent = 0;
-            InterlockedExchange(&s_probe, 1);
             for (i = 0; i < s_nlpeers; i++) {
-                if (s_lpeers[i].state != LP_LIVE)
-                    continue;
+                lpeer_t *p = &s_lpeers[i];
+                if (p->state == LP_LIVE) {
+                    char buf[FRAME_MAX + 8];
+                    memcpy(buf, MAGIC, 4);
+                    buf[4] = 'F';
+                    memcpy(buf + 5, f, (size_t)len);
+                    sendto(s_sock, buf, (int)len + 5, 0, (const struct sockaddr *)&p->endpoint,
+                           sizeof p->endpoint);
+                    sent = 1;
+                } else if (p->state == LP_RELAY) {
+                    relay_send_frame(p->relay, f, len);
+                    sent = 1;
+                }
+            }
+            InterlockedExchange(&s_probe, 1);
+            return sent;
+        }
+        for (i = 0; i < s_nlpeers; i++) {
+            lpeer_t *p = &s_lpeers[i];
+            if ((p->state != LP_LIVE && p->state != LP_RELAY) || memcmp(p->mac, f, 6))
+                continue;
+            if (p->state == LP_LIVE) {
                 char buf[FRAME_MAX + 8];
                 memcpy(buf, MAGIC, 4);
                 buf[4] = 'F';
                 memcpy(buf + 5, f, (size_t)len);
-                sendto(s_sock, buf, (int)len + 5, 0, (const struct sockaddr *)&s_lpeers[i].endpoint,
-                       sizeof s_lpeers[i].endpoint);
-                sent = 1;
+                sendto(s_sock, buf, (int)len + 5, 0, (const struct sockaddr *)&p->endpoint,
+                       sizeof p->endpoint);
+            } else {
+                relay_send_frame(p->relay, f, len);
             }
-            return sent;
-        }
-        for (i = 0; i < s_nlpeers; i++) {
-            if (s_lpeers[i].state != LP_LIVE || memcmp(s_lpeers[i].mac, f, 6))
-                continue;
-            char buf[FRAME_MAX + 8];
-            memcpy(buf, MAGIC, 4);
-            buf[4] = 'F';
-            memcpy(buf + 5, f, (size_t)len);
-            sendto(s_sock, buf, (int)len + 5, 0, (const struct sockaddr *)&s_lpeers[i].endpoint,
-                   sizeof s_lpeers[i].endpoint);
             return 1;
         }
         if (!s_unrouted++) /* XNET answers only cards it heard from, so this is unexpected but harmless */
@@ -537,6 +579,127 @@ int fci_nic_list_has_peer(const char *endpoint)
     return have;
 }
 
+/* the relay fallback (RECOMP_FCI_NET_RELAY): the hub keys a member by address, so one socket per
+ * relay room (cap RELAY_MAX); the room is the nonce in hex, so it holds exactly the two cards. */
+static void relay_hello(int i)
+{
+    char b[5 + 6 + COOKIE + 32];
+    uint8_t mac[6];
+    size_t n = strlen(s_relroom[i]);
+    fci_nic_mac(mac);
+    memcpy(b, MAGIC, 4); /* the hub's header, as send_datagram writes it */
+    b[4] = 'H';
+    memcpy(b + 5, mac, 6);
+    memcpy(b + 5 + 6, s_relcookie[i], COOKIE);
+    memcpy(b + 5 + 6 + COOKIE, s_relroom[i], n);
+    send(s_relsock[i], b, (int)(5 + 6 + COOKIE + n), 0);
+}
+
+/* a hub socket for a relay room, opened on the first relay peer. Returns the socket index, -2 on a
+ * socket error (the peer stays pending and keeps punching) or -1 on the cap. */
+static int relay_socket_new(const lpeer_t *p)
+{
+    SOCKET s;
+    u_long nb = 1;
+    int i, n;
+    if (!s_relay_hub_valid)
+        return -2;
+    for (i = 0; i < RELAY_MAX; i++)
+        if (s_relsock[i] == INVALID_SOCKET)
+            break;
+    if (i == RELAY_MAX)
+        return -1;
+    s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (s == INVALID_SOCKET || connect(s, (const struct sockaddr *)&s_relay_hub, sizeof s_relay_hub)
+        || ioctlsocket(s, FIONBIO, &nb)) {
+        int e = WSAGetLastError();
+        if (s != INVALID_SOCKET)
+            closesocket(s);
+        fprintf(stderr, "[FCI] network: relay hub %s: no socket (%d), the peer keeps punching\n",
+                s_relay_spec, e);
+        fflush(stderr);
+        return -2;
+    }
+    s_relsock[i] = s;
+    memset(s_relcookie[i], 0, COOKIE);
+    for (n = 0; n < 16; n++) /* the room: the peer's nonce in hex, 32 chars */
+        sprintf(s_relroom[i] + n * 2, "%02x", p->nonce[n]);
+    s_relroom[i][32] = 0;
+    s_relhello[i] = GetTickCount64(); /* hello now: the cookie exchange starts */
+    relay_hello(i);
+    return i;
+}
+
+/* the relay room's nonce as 32 hex (the room name, for the log lines) */
+static const char *relay_room_hex(const lpeer_t *p)
+{
+    static char hex[33];
+    int n;
+    for (n = 0; n < 16; n++)
+        sprintf(hex + n * 2, "%02x", p->nonce[n]);
+    hex[32] = 0;
+    return hex;
+}
+
+static void receive_relays(void)
+{
+    int i, k;
+    for (i = 0; i < RELAY_MAX; i++) {
+        char buf[FRAME_MAX + 8];
+        if (s_relsock[i] == INVALID_SOCKET)
+            continue;
+        for (k = 0; k < RX_QUEUE; k++) {
+            struct sockaddr_in from;
+            int fromlen = sizeof from;
+            int n = recvfrom(s_relsock[i], buf, sizeof buf, 0, (struct sockaddr *)&from, &fromlen);
+            if (n == SOCKET_ERROR) {
+                int e = WSAGetLastError(); /* WSAEWOULDBLOCK: no more this millisecond */
+                if (e == WSAEMSGSIZE || e == WSAECONNRESET)
+                    continue;
+                break;
+            }
+            /* the socket is connected to the hub: only the hub's datagrams arrive */
+            if (n < 5 || memcmp(buf, MAGIC, 4) || fromlen != sizeof from
+                || from.sin_addr.s_addr != s_relay_hub.sin_addr.s_addr
+                || from.sin_port != s_relay_hub.sin_port)
+                continue;
+            if (buf[4] == 'C' && n == 5 + COOKIE) {
+                memcpy(s_relcookie[i], buf + 5, COOKIE);
+                relay_hello(i); /* say hello with the cookie, as in hub mode */
+                continue;
+            }
+            if (buf[4] != 'F' || n < 5 + 14 || n > 5 + ETHER_MAX)
+                continue;
+            {
+                /* only the room's peer, with its pre-seeded source MAC; anything else is dropped */
+                int j, ok = 0;
+                for (j = 0; j < s_nlpeers; j++)
+                    if (s_lpeers[j].state == LP_RELAY && s_lpeers[j].relay == i) {
+                        const uint8_t *src = (const uint8_t *)buf + 5 + 6;
+                        ok = !(src[0] & 1) && !memcmp(s_lpeers[j].mac, src, 6);
+                        if (ok)
+                            s_lpeers[j].last_frame = GetTickCount64();
+                        break;
+                    }
+                if (!ok) {
+                    stray(&from);
+                    continue;
+                }
+            }
+            if (s_rxq_count == RX_QUEUE) {
+                s_rxq_head = (s_rxq_head + 1) % RX_QUEUE;
+                s_rxq_count--;
+            }
+            {
+                int slot = (s_rxq_head + s_rxq_count) % RX_QUEUE;
+                memcpy(s_rxq[slot], buf + 5, (size_t)(n - 5));
+                s_rxq_len[slot] = n - 5;
+                s_rxq_count++;
+            }
+        }
+    }
+}
+
 /* --- end LIST mode --- */
 
 /* send every complete frame the driver has queued; it marks a frame's last fragment before its first */
@@ -726,13 +889,46 @@ static void list_tick(ULONGLONG now)
         stun_send();
         s_stun_next = now + STUN_PERIOD_MS;
     }
+    /* relay hellos: the hub leaves a quiet member, so the room's socket keeps saying hello */
+    for (i = 0; i < RELAY_MAX; i++)
+        if (s_relsock[i] != INVALID_SOCKET && now >= s_relhello[i]) {
+            relay_hello(i);
+            s_relhello[i] = now + HELLO_PERIOD_MS;
+        }
     /* punch schedule and expiries */
     for (i = 0; i < s_nlpeers; i++) {
         lpeer_t *p = &s_lpeers[i];
         if (p->state == LP_PENDING) {
             if (now >= p->punch_end) {
-                /* 3 s with no answer: drop (relay fallback not implemented yet) */
-                fprintf(stderr, "[FCI] network: punch to %s:%u failed, relay not implemented: peer dropped\n",
+                /* 3 s with no answer: the relay fallback, if set, keeps the peer in its nonce room */
+                if (s_relay_spec[0]) {
+                    int r = relay_socket_new(p);
+                    if (r == -1) {
+                        fprintf(stderr,
+                                "[FCI] network: relay socket cap (%d) reached, "
+                                "dropping peer %s:%u\n",
+                                RELAY_MAX, inet_ntoa(p->endpoint.sin_addr), ntohs(p->endpoint.sin_port));
+                        fflush(stderr);
+                        lpeer_remove(i);
+                        i--;
+                        continue;
+                    }
+                    if (r == -2) {
+                        /* no socket: stay pending, keep punching, and try again at the next window */
+                        p->punch_end = now + PUNCH_WINDOW_MS;
+                        p->next_punch = now;
+                        continue;
+                    }
+                    p->state = LP_RELAY;
+                    p->relay = r;
+                    s_lpending--;
+                    p->last_frame = now;
+                    fprintf(stderr, "[FCI] network: punch to %s:%u failed, using relay room %.8s\n",
+                            inet_ntoa(p->endpoint.sin_addr), ntohs(p->endpoint.sin_port), relay_room_hex(p));
+                    fflush(stderr);
+                    continue;
+                }
+                fprintf(stderr, "[FCI] network: punch to %s:%u failed, no relay set: peer dropped\n",
                         inet_ntoa(p->endpoint.sin_addr), ntohs(p->endpoint.sin_port));
                 fflush(stderr);
                 lpeer_remove(i);
@@ -743,14 +939,20 @@ static void list_tick(ULONGLONG now)
                 punch_send(p);
                 p->next_punch += PUNCH_PERIOD_MS;
             }
-        } else { /* LP_LIVE: expire after 15 s without a frame */
-            if (now - p->last_frame > PEER_EXPIRE_MS) {
+        } else if (now - p->last_frame > PEER_EXPIRE_MS) {
+            /* LP_LIVE and LP_RELAY: expire after 15 s without a frame */
+            if (p->state == LP_RELAY) {
+                fprintf(stderr, "[FCI] network: relay room %.8s: no frame in 15 s, peer expired\n",
+                        relay_room_hex(p));
+                relay_socket_close(p->relay);
+                p->relay = -1;
+            } else {
                 fprintf(stderr, "[FCI] network: peer %s:%u: no frame in 15 s, expired\n",
                         inet_ntoa(p->endpoint.sin_addr), ntohs(p->endpoint.sin_port));
-                fflush(stderr);
-                lpeer_remove(i);
-                i--;
             }
+            fflush(stderr);
+            lpeer_remove(i);
+            i--;
         }
     }
 }
@@ -767,8 +969,10 @@ int fci_nic_tick(void)
             hello();
             next_hello = now + 2000;
         }
-        if (s_list)
+        if (s_list) {
             list_tick(now);
+            receive_relays(); /* before receive(): the relay queue shares s_rxq */
+        }
         receive();
     }
     if (s_tx_kick) {
@@ -968,7 +1172,7 @@ static int connect_list(const char *url, char *err, int errlen)
 {
     WSADATA wsa;
     u_long nb = 1;
-    const char *endpoint = getenv("RECOMP_FCI_NET_ENDPOINT");
+    const char *endpoint = getenv("RECOMP_FCI_NET_ENDPOINT"), *relay = getenv("RECOMP_FCI_NET_RELAY");
     if (strlen(url) >= sizeof s_list_url) {
         snprintf(err, errlen, "URL too long");
         return 0;
@@ -979,8 +1183,35 @@ static int connect_list(const char *url, char *err, int errlen)
     }
     strcpy(s_list_url, url);
     s_relay_spec[0] = 0;
-    if (getenv("RECOMP_FCI_NET_RELAY"))
-        snprintf(s_relay_spec, sizeof s_relay_spec, "%s", getenv("RECOMP_FCI_NET_RELAY"));
+    for (int i = 0; i < RELAY_MAX; i++) /* static storage starts at 0, which is a valid SOCKET */
+        s_relsock[i] = INVALID_SOCKET;
+    s_relay_hub_valid = 0;
+    if (relay && *relay) {
+        /* the relay hub (host:port, no room): resolve it now so a bad value is seen at link-up */
+        char host[256], port[16];
+        const char *colon = strrchr(relay, ':');
+        struct addrinfo hints, *ai = NULL;
+        if (!colon || (size_t)(colon - relay) >= sizeof host || strlen(colon + 1) >= sizeof port) {
+            snprintf(err, errlen, "relay %s is not <host:port>", relay);
+            return 0;
+        }
+        snprintf(s_relay_spec, sizeof s_relay_spec, "%s", relay);
+        memcpy(host, relay, (size_t)(colon - relay));
+        host[colon - relay] = 0;
+        strcpy(port, colon + 1);
+        memset(&hints, 0, sizeof hints);
+        hints.ai_family = AF_INET;
+        hints.ai_socktype = SOCK_DGRAM;
+        if (getaddrinfo(host, port, &hints, &ai) || !ai) {
+            snprintf(err, errlen, "relay %s does not resolve", relay);
+            return 0;
+        }
+        memcpy(&s_relay_hub, ai->ai_addr, sizeof s_relay_hub);
+        s_relay_hub_valid = 1;
+        freeaddrinfo(ai);
+        fprintf(stderr, "[FCI] network: relay hub %s (fallback when a punch fails)\n", relay);
+        fflush(stderr);
+    }
     /* the card socket: bound to a local port, unconnected (punches and STUN go to any address) */
     s_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (s_sock == INVALID_SOCKET) {

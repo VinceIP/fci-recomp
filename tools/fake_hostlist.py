@@ -4,15 +4,19 @@ Stdlib only: ThreadingHTTPServer on 127.0.0.1. Implements the four endpoints wit
 lobby.js, including the held long-poll and the token. Skips the public-address check so 127.0.0.1
 registers and connects work.
 
-Usage: python tools/fake_hostlist.py [port]   (default 47801)
+Usage: python tools/fake_hostlist.py [port] [--break-punch]   (default 47801)
+
+--break-punch rewrites the endpoint in every connect it forwards to the host (port + 1000), so the
+host punches a dead port and ignores the guest's punches (endpoint mismatch): both 3 s windows fail
+and both sides fall back to the relay (RECOMP_FCI_NET_RELAY).
 """
 
+import argparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 import re
 import secrets
-import sys
 import threading
 import time
 from urllib.parse import parse_qs, urlparse
@@ -27,11 +31,12 @@ MAC_RE = re.compile(r"^[0-9a-f]{2}(:[0-9a-f]{2}){5}$")
 class Lobby:
     """In-memory host list, the same shape as lobby.js's Durable Object."""
 
-    def __init__(self):
+    def __init__(self, break_punch=False):
         self.lock = threading.Lock()
         self.hosts = {}  # id -> {id, token, ip, proto, title, version, mac, endpoint, expires}
         self.connects = {}  # id -> [{endpoint, nonce, mac}]
         self.waiters = {}  # id -> {event, result}
+        self.break_punch = break_punch  # rewrite the endpoint in every connect (port + 1000)
 
     def _expire(self, id_):
         self.hosts.pop(id_, None)
@@ -128,6 +133,10 @@ class Lobby:
             return 400, {"error": "bad request"}
         if not MAC_RE.match(mac):
             return 400, {"error": "bad MAC (want lowercase xx:xx:xx:xx:xx:xx)"}
+        if self.break_punch:
+            # the host will punch a dead port and ignore the guest's punches (endpoint mismatch)
+            host, port = endpoint.rsplit(":", 1)
+            endpoint = f"{host}:{int(port) + 1000}"
         with self.lock:
             if id_ not in self.hosts:
                 return 404, {"error": "no such host"}
@@ -199,10 +208,22 @@ def make_handler(lobby):
 
 
 def main():
-    port = int(os.environ.get("FAKE_HOSTLIST_PORT", "47801"))
-    if len(sys.argv) > 1:
-        port = int(sys.argv[1])
-    lobby = Lobby()
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument(
+        "port",
+        nargs="?",
+        type=int,
+        default=None,
+        help="port (default $FAKE_HOSTLIST_PORT, else 47801)",
+    )
+    ap.add_argument(
+        "--break-punch",
+        action="store_true",
+        help="rewrite the endpoint in every connect to the host (port + 1000)",
+    )
+    args = ap.parse_args()
+    port = args.port if args.port is not None else int(os.environ.get("FAKE_HOSTLIST_PORT", "47801"))
+    lobby = Lobby(break_punch=args.break_punch)
     server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(lobby))
     server.daemon_threads = True
     print(f"fake host list on http://127.0.0.1:{port}")
