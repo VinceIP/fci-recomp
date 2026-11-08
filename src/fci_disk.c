@@ -9,6 +9,133 @@
 
 #include "recomp_types.h"
 
+/* ── RECOMP_FCI_PAK_LOG=<file>: a JSON-lines trace of pak lookups and .dat reads ─────────────────
+ * The name→hash step (sub_002ACAF0) names the file the game wants; the .dat read that follows it
+ * lands at the entry's offset. tools/pak_pairs.py pairs the two to recover the name→hash function.
+ * Inert unless the variable is set; each line is flushed (a debug trace). */
+static FILE *pak_log;
+static volatile LONG pak_seq;
+static SRWLOCK pak_lock = SRWLOCK_INIT;
+
+void fci_pak_log_init(void)
+{
+    const char *path = getenv("RECOMP_FCI_PAK_LOG");
+    if (path && *path)
+        pak_log = fopen(path, "w");
+}
+
+/* a JSON string literal (quoted, escaped) for a UTF-8 C string */
+static size_t pak_json_str(char *out, size_t cap, const char *s)
+{
+    size_t o = 0;
+    if (o < cap)
+        out[o++] = '"';
+    for (const unsigned char *p = (const unsigned char *)s; *p && o < cap - 7; p++) {
+        if (*p == '"' || *p == '\\') {
+            out[o++] = '\\';
+            if (o < cap - 1)
+                out[o++] = (char)*p;
+        } else if (*p < 0x20) {
+            o += (size_t)snprintf(out + o, cap - o, "\\u%04x", *p);
+        } else if (o < cap - 1) {
+            out[o++] = (char)*p;
+        }
+    }
+    if (o < cap)
+        out[o++] = '"';
+    if (o < cap)
+        out[o] = 0;
+    return o;
+}
+
+/* one JSON line: seq (global counter), tid (host thread), ev (event), then the caller's extra fields */
+static void pak_log_line(const char *ev, const char *extra)
+{
+    if (!pak_log)
+        return;
+    AcquireSRWLockExclusive(&pak_lock);
+    fprintf(pak_log, "{\"seq\": %ld, \"tid\": %lu, \"ev\": \"%s\"%s}\n",
+            (long)InterlockedIncrement(&pak_seq), (unsigned long)GetCurrentThreadId(), ev, extra);
+    fflush(pak_log);
+    ReleaseSRWLockExclusive(&pak_lock);
+}
+
+/* the file name behind a handle (the same FILE_NAME_INFO lookup partition_of uses) */
+static int pak_file_name(HANDLE h, char *out, size_t cap)
+{
+    union {
+        FILE_NAME_INFO info;
+        uint8_t raw[sizeof(FILE_NAME_INFO) + MAX_PATH * sizeof(wchar_t)];
+    } u;
+    wchar_t w[MAX_PATH];
+    size_t chars;
+    if (!h || h == INVALID_HANDLE_VALUE || !GetFileInformationByHandleEx(h, FileNameInfo, &u, sizeof u))
+        return 0;
+    chars = u.info.FileNameLength / sizeof(wchar_t);
+    if (chars >= MAX_PATH)
+        return 0;
+    memcpy(w, u.info.FileName, chars * sizeof(wchar_t));
+    w[chars] = 0;
+    return WideCharToMultiByte(CP_UTF8, 0, w, -1, out, (int)cap, NULL, NULL) != 0;
+}
+
+/* pak name→hash (recomp_0043.c:23244, sub_002ACAF0): thiscall, ecx = the pak object; esi = output
+ * (fastcall); 1 stack param: a UTF-8 file name. The body normalizes the name (appends ".xgb", strips
+ * the extension) and hashes it (sub_0023FA10), then the caller passes the hash to the .fat binary
+ * search (sub_002B09F0 → sub_002B9E10). This is on every pak-lookup path, including boot/menu, unlike
+ * the vtable FindFile (sub_002DFD20) which is never dispatched during boot. Log the name here. */
+void fci_prehook_002ACAF0(void)
+{
+    uint32_t name;
+    int i, ro;
+    char raw[768], rj[1024], extra[2048];
+    if (!pak_log)
+        return;
+    name = MEM32(g_esp + 4); /* the UTF-8 file name (first stack param) */
+    ro = 0;
+    for (i = 0; i < 255; i++) {
+        char c = (char)MEM8(name + (size_t)i);
+        if (!c || ro + 1 >= (int)sizeof raw)
+            break;
+        raw[ro++] = c;
+    }
+    raw[ro] = 0;
+    pak_json_str(rj, sizeof rj, raw);
+    snprintf(extra, sizeof extra, ", \"name\": %s", rj);
+    pak_log_line("findfile", extra);
+}
+
+/* a .dat read (bridge_NtReadFile -> fci_partition_read_fill): the file, offset and length. When the
+ * read is position-based (off == NULL, bridge_NtReadFile with no explicit offset), the file pointer
+ * has already advanced past the data, so the start is the current position minus the bytes read. */
+static void fci_pak_log_read(HANDLE h, const LARGE_INTEGER *off, uint32_t length, uint32_t status,
+                             uint32_t got)
+{
+    char name[MAX_PATH], nj[MAX_PATH + 16], extra[2 * (MAX_PATH + 16) + 64];
+    const char *dot;
+    LONGLONG start;
+    LARGE_INTEGER pos;
+    if (!pak_log || status != 0)
+        return;
+    if (off)
+        start = off->QuadPart;
+    else if (SetFilePointerEx(h, (LARGE_INTEGER){0}, &pos, FILE_CURRENT))
+        start = pos.QuadPart - (LONGLONG)got;
+    else
+        return;
+    if (start < 0)
+        return;
+    if (!pak_file_name(h, name, sizeof name))
+        return;
+    dot = strrchr(name, '.');
+    if (!dot || _stricmp(dot, ".dat"))
+        return;
+    pak_json_str(nj, sizeof nj, name);
+    snprintf(extra, sizeof extra, ", \"file\": %s, \"offset\": %lld, \"length\": %u, \"got\": %u", nj,
+             (long long)start, length, got);
+    pak_log_line("read", extra);
+}
+
 static const ULONGLONG part_sectors[6] = {
         0, 0x00465400ull, 0x000FA000ull, 0x00177000ull, 0x00177000ull, 0x00177000ull,
 };
@@ -53,6 +180,7 @@ uint32_t fci_partition_read_fill(HANDLE h, void *buf, uint32_t length, const LAR
 {
     int p;
     ULONGLONG end;
+    fci_pak_log_read(h, off, length, status, *got); /* inert unless RECOMP_FCI_PAK_LOG */
     if (*got >= length || (status != 0 && status != 0xC0000011u /* END_OF_FILE */) || !off)
         return status;
     if ((p = partition_of(h)) < 1 || p > 5)

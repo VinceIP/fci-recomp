@@ -132,6 +132,8 @@ static int load_file(const char *path, void **data, size_t *size)
  * fci-kinit.dll is a real image laid out that way, and its loaded header is copied there unchanged. */
 void fci_cpu_init(void);
 void fci_disk_init(const char *save_dir);
+void fci_pak_log_init(void);
+void fci_menu_log_init(void);
 
 static int install_kernel_header(void)
 {
@@ -311,6 +313,8 @@ int main(int argc, char **argv)
     xbox_SetThreadMode(XBOX_THREAD_MODE_SPAWN);
     xbox_path_init(argv[2], argv[3]);
     fci_disk_init(argv[3]);
+    fci_pak_log_init(); /* RECOMP_FCI_PAK_LOG (fci_disk.c): trace pak lookups and .dat reads */
+    fci_menu_log_init(); /* RECOMP_FCI_MENU_LOG (fci_menu.c): trace menu action dispatch */
     xbox_kernel_bridge_init();
     { /* XeImageFileName names the image compiled into this process */
         const char name[] = "\\Device\\CdRom0\\" FCI_IMAGE_FILENAME;
