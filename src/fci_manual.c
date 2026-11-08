@@ -30,6 +30,7 @@ extern char **fci_launch_argv;
 unsigned long fci_window_handoff(void **frame); /* fci_xbr_glue.cpp */
 void fci_window_pass_on(void);                  /* fci_xbr_glue.cpp */
 void fci_nic_shutdown(void);                    /* fci_nic.c */
+void fci_nic_mac(uint8_t *mac);                 /* fci_nic.c */
 int fci_host_symbol(DWORD64 pc, char *name, size_t size, DWORD64 *disp,
                     DWORD64 *symbol_size); /* fci_threads.c */
 
@@ -200,6 +201,13 @@ void fci_relaunch(uint32_t page)
     fprintf(stderr, "[FCI] relaunch: %s -> %s with %s\n", path, exe, file);
     fflush(stderr);
     fci_nic_shutdown(); /* the next instance re-binds RECOMP_FCI_NET_PEERS' port; this one must not hold it */
+    { /* the instance keeps its card's MAC across its relaunches, as a console keeps its through a reboot */
+        uint8_t m[6];
+        char mac[13];
+        fci_nic_mac(m);
+        snprintf(mac, sizeof mac, "%02X%02X%02X%02X%02X%02X", m[0], m[1], m[2], m[3], m[4], m[5]);
+        SetEnvironmentVariableA("RECOMP_FCI_MAC", mac);
+    }
     fci_window_pass_on(); /* the next instance's frame takes this one's place */
     if (!CreateProcessA(exe, cmd, NULL, NULL, TRUE, CREATE_SUSPENDED, NULL, NULL, &si, &pi)) {
         fprintf(stderr, "[FCI] relaunch: CreateProcess failed (%lu)\n", GetLastError());

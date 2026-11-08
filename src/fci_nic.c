@@ -119,13 +119,25 @@ static uint32_t *desc(uint32_t ring, uint32_t i) { return (uint32_t *)phys(ring 
 void fci_nic_mac(uint8_t *mac)
 {
     if (!s_mac_made) {
-        /* locally administered, so it clashes with no real card; one per process for several on one PC */
-        LARGE_INTEGER t;
-        uint32_t h = GetCurrentProcessId() * 2654435761u;
-        QueryPerformanceCounter(&t);
-        h ^= (uint32_t)t.QuadPart * 40503u;
-        s_mac[0] = 0x02, s_mac[1] = 0x46, s_mac[2] = 0x43;
-        s_mac[3] = (uint8_t)(h >> 16), s_mac[4] = (uint8_t)(h >> 8), s_mac[5] = (uint8_t)h;
+        /* RECOMP_FCI_MAC: the relaunch (fci_manual.c) passes the instance's MAC to its successor, so an
+         * instance keeps it across its relaunches, as a console keeps its through a reboot */
+        const char *env = getenv("RECOMP_FCI_MAC");
+        int kept = env
+                   && sscanf(env, "%2hhx%2hhx%2hhx%2hhx%2hhx%2hhx", &s_mac[0], &s_mac[1], &s_mac[2],
+                             &s_mac[3], &s_mac[4], &s_mac[5])
+                              == 6;
+        if (env && !kept)
+            fprintf(stderr, "[FCI] RECOMP_FCI_MAC=%s is not six bytes of hex: a new MAC\n", env),
+                    fflush(stderr);
+        if (!kept) {
+            /* locally administered, so it clashes with no real card; one per process for several on one PC */
+            LARGE_INTEGER t;
+            uint32_t h = GetCurrentProcessId() * 2654435761u;
+            QueryPerformanceCounter(&t);
+            h ^= (uint32_t)t.QuadPart * 40503u;
+            s_mac[0] = 0x02, s_mac[1] = 0x46, s_mac[2] = 0x43;
+            s_mac[3] = (uint8_t)(h >> 16), s_mac[4] = (uint8_t)(h >> 8), s_mac[5] = (uint8_t)h;
+        }
         s_mac_made = 1;
     }
     memcpy(mac, s_mac, 6);
