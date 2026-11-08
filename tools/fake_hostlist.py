@@ -170,6 +170,9 @@ def make_handler(lobby):
 
         def do_POST(self):
             url = urlparse(self.path)
+            if "application/json" not in (self.headers.get("content-type") or ""):
+                self._send(415, {"error": "JSON only"})  # as the Worker (lobby.js) answers
+                return
             length = int(self.headers.get("content-length", 0))
             raw = self.rfile.read(length) if length else b"{}"
             try:

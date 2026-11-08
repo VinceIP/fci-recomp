@@ -295,3 +295,19 @@ def test_connect_uppercase_mac_is_rejected():
         assert "MAC" in body["error"]
     finally:
         server.shutdown()
+
+
+def test_post_without_json_content_type_is_415():
+    """POSTs need content-type application/json, as the deployed Worker requires (a runtime bug hid here)."""
+    port, server, lobby = start_server()
+    try:
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/v1/register", data=b"{}", method="POST")
+        req.add_header("content-type", "application")
+        try:
+            urllib.request.urlopen(req, timeout=10)
+            status = 200
+        except urllib.error.HTTPError as e:
+            status = e.code
+        assert status == 415
+    finally:
+        server.shutdown()
