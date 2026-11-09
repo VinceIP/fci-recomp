@@ -124,14 +124,17 @@ int fci_gate_0026A628(void)
     {
         uint32_t arg1 = MEM32(g_esp + 4), arg2 = MEM32(g_esp + 8), ecx_in = g_ecx;
         sub_0026A628_fci_body();
-        if (getenv("RECOMP_FCI_MENU_LOOKUP_DEBUG")) { /* diagnostic: what the lookup is given and returns */
-            static int n;
-            if (n++ < 40) {
-                char extra[256];
-                uint32_t e = g_eax;
-                snprintf(extra, sizeof extra, ", \"ecx\": \"%08X\", \"a1\": \"%08X\", \"a2\": \"%08X\", \"ret\": \"%08X\", \"d\": \"%08X %08X %08X %08X\"",
-                         ecx_in, arg1, arg2, e, guest_ok(e, 16) ? MEM32(e) : 0, guest_ok(e, 16) ? MEM32(e + 4) : 0,
-                         guest_ok(e, 16) ? MEM32(e + 8) : 0, guest_ok(e, 16) ? MEM32(e + 12) : 0);
+        if (getenv("RECOMP_FCI_MENU_LOOKUP_DEBUG") && (arg1 == 0x9b680e53u || arg1 == 0xf65128aau)) {
+            /* diagnostic: the B_Live / B_SystemLink objects and what their pointers lead to */
+            uint32_t e = g_eax, k, w;
+            for (k = 0; k < 4 && guest_ok(e, 16); k++) {
+                uint32_t base = k == 0 ? e : MEM32(e + 4 * k + 4);
+                char extra[600];
+                int len = snprintf(extra, sizeof extra, ", \"id\": \"%08X\", \"ecx\": \"%08X\", \"which\": %u, \"at\": \"%08X\", \"w\": \"",
+                                   arg1, ecx_in, k, base);
+                for (w = 0; w < 24 && guest_ok(base + 4 * w, 4) && len < (int)sizeof extra - 12; w++)
+                    len += snprintf(extra + len, sizeof extra - len, "%08X ", MEM32(base + 4 * w));
+                snprintf(extra + len, sizeof extra - len, "\"");
                 menu_log_line("evo-mp", "lookup", extra);
             }
         }
