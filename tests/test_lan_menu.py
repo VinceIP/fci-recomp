@@ -8,7 +8,8 @@ Mirrored:
 - ``action_crc``           <- the CRC-32 of the action name (sub_0026ACB2, poly 0xEDB88320)
 - ``gate_pick``            <- ``fci_gate_000FB0A2`` (the B_Live/B_SystemLink pick, the hash rewrite)
 - ``pick_state_machine``   <- ``fci_nic_start_menu_transport`` (first pick wins until restart)
-- ``relabel``              <- ``relabel_in_table`` (the "XBOX LIVE" -> "INTERNET" replacement)
+- ``relabel_entry``        <- ``relabel_entry`` (the "XBOX LIVE" -> "INTERNET" UTF-16 replacement
+                               in the string table entry, sub_0026A628 posthook)
 """
 
 import zlib
@@ -33,11 +34,6 @@ def test_action_crc_known_values():
 
 # --- the gate's pick logic (fci_gate_000FB0A2) --------------------------------
 
-# The hash table: one line per relabeled/redirected item. "INTERNET" for B_Live; SYSTEM LINK is left
-# as the game has it. (The C: s_relabel in fci_lan_menu.c.)
-RELABEL = {
-    0x9B680E53: ("XBOX LIVE", "INTERNET"),  # B_Live
-}
 # The redirect: B_Live -> B_SystemLink (the System Link lobby branch, the redirect target).
 REDIRECT_TO = 0xF65128AA  # B_SystemLink
 
@@ -144,43 +140,75 @@ def test_list_no_url_then_list():
     assert pick_state_machine([1, 1, 0], url_set=False) == ["no-url", "no-url", "started"]
 
 
-# --- the relabel (relabel_in_table) -------------------------------------------
+# --- the relabel (relabel_entry, sub_0026A628 posthook) -----------------------
+
+# The UTF-16LE byte sequences (the C: s_from_utf16, s_to_utf16 in fci_lan_menu.c).
+FROM_UTF16 = "XBOX LIVE"
+TO_UTF16 = "INTERNET"
+SCAN_UNITS = 64  # 128 bytes / 2 (the C: scan_units in relabel_entry)
 
 
-def relabel(text: str, table: dict) -> str:
-    """Mirror of relabel_in_table: the "XBOX LIVE" -> "INTERNET" replacement.
+def relabel_entry(buf: bytes) -> tuple[bytes, bool]:
+    """Mirror of relabel_entry: scan a UTF-16LE buffer for "XBOX LIVE" and replace with "INTERNET".
 
-    table: the {crc: (from, to)} relabel table (the C: s_relabel in fci_lan_menu.c).
-    Returns the text with the first match replaced (null-padded to the original length).
+    buf: the entry structure (up to 128 bytes = 64 uint16_t).
+    Returns (new_buf, found): the buffer with the first match replaced (null-padded),
+    and whether a match was found.
     """
-    for _crc, (frm, to) in table.items():
-        idx = text.find(frm)
-        if idx >= 0 and (idx + len(frm) >= len(text) or text[idx + len(frm)] == "\0"):
-            # Found: replace with .to, null-padded to .from's length.
-            span = max(len(frm), len(to))
-            replacement = to + "\0" * (span - len(to))
-            return text[:idx] + replacement + text[idx + len(frm) :]
-    return text
+    from_bytes = FROM_UTF16.encode("utf-16-le")
+    to_bytes = TO_UTF16.encode("utf-16-le")
+    # Null-pad the replacement to the same length as the original
+    padded_to = to_bytes + b"\x00\x00" * ((len(from_bytes) - len(to_bytes)) // 2)
+
+    data = buf[: SCAN_UNITS * 2]  # scan at most 128 bytes
+    idx = data.find(from_bytes)
+    if idx < 0:
+        return buf, False
+    # Replace at idx
+    new_data = data[:idx] + padded_to + data[idx + len(from_bytes) :]
+    return new_data + buf[SCAN_UNITS * 2 :], True
 
 
-def test_relabel_xbox_live():
-    # "XBOX LIVE" -> "INTERNET" (null-padded to the original length).
-    assert relabel("XBOX LIVE\0", RELABEL) == "INTERNET\0\0"
+def test_relabel_entry_xbox_live():
+    # "XBOX LIVE" at the start of the entry: replaced with "INTERNET" (null-padded).
+    entry = "XBOX LIVE\0".encode("utf-16-le") + b"\x00" * 120
+    result, found = relabel_entry(entry)
+    assert found
+    assert result.startswith("INTERNET\0\0".encode("utf-16-le"))
 
 
-def test_relabel_idempotent():
+def test_relabel_entry_offset():
+    # "XBOX LIVE" at an offset within the entry (e.g. after the CRC-32 at +4): replaced.
+    # Simulate: 2 dwords of header (8 bytes), then the text.
+    header = b"\x53\x0e\x68\x9b\x00\x00\x00\x00"  # CRC-32 + padding
+    entry = header + "XBOX LIVE\0".encode("utf-16-le") + b"\x00" * 100
+    result, found = relabel_entry(entry)
+    assert found
+    assert "INTERNET".encode("utf-16-le") in result
+    assert "XBOX LIVE".encode("utf-16-le") not in result
+
+
+def test_relabel_entry_idempotent():
     # A second relabel finds nothing (the text is already "INTERNET").
-    once = relabel("XBOX LIVE\0", RELABEL)
-    twice = relabel(once, RELABEL)
-    assert twice == once  # no change on the second pass
+    entry = "XBOX LIVE\0".encode("utf-16-le") + b"\x00" * 120
+    once, found1 = relabel_entry(entry)
+    assert found1
+    twice, found2 = relabel_entry(once)
+    assert not found2
+    assert twice == once
 
 
-def test_relabel_no_match():
+def test_relabel_entry_no_match():
     # A string that doesn't match: unchanged.
-    assert relabel("SYSTEM LINK\0", RELABEL) == "SYSTEM LINK\0"
+    entry = "SYSTEM LINK\0".encode("utf-16-le") + b"\x00" * 120
+    result, found = relabel_entry(entry)
+    assert not found
+    assert result == entry
 
 
-def test_relabel_in_sentence():
-    # The label in a larger buffer (the string table): only the exact match is replaced.
-    buf = "SOME OTHER STRING\0XBOX LIVE\0ANOTHER\0"
-    assert relabel(buf, RELABEL) == "SOME OTHER STRING\0INTERNET\0\0ANOTHER\0"
+def test_relabel_entry_not_in_scan_range():
+    # "XBOX LIVE" beyond the 128-byte scan range: not found.
+    entry = b"\x00" * 128 + "XBOX LIVE\0".encode("utf-16-le")
+    result, found = relabel_entry(entry)
+    assert not found
+    assert result == entry

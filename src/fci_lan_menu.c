@@ -1,4 +1,4 @@
-/* The online menu gate and relabel for Evolution (Q19 phase 2, round 2).
+/* The online menu gate and relabel for Evolution (Q19 phase 2, round 3).
  *
  * Menu mode (RECOMP_FCI_NET_MENU=1, fci.ini network-menu): the card reports link up at boot
  * without a transport (fci_nic.c), so the online items in the pre-game menu are enabled. The
@@ -9,17 +9,27 @@
  *     (the redirect target, run-B confirmed).
  * "First choice wins until restart": a second pick logs and leaves the first transport.
  *
- * Two hooks (Evolution profile, compile.py REPLACE):
+ * Two hooks (Evolution profile, image-profile.json):
  *   - gate on sub_000FB0A2 (the pre-game multiplayer action dispatcher, recomp_0023.c:27569)
- *   - prehook on sub_000FA5B4 (the P_Multiplayer menu construction, recomp_0023.c:25290)
+ *   - gate on sub_0026A628 (runs the lookup, then relabels; the build has no posthook) (the string table lookup, recomp_0071.c:11496)
  *
  * The action hash is CRC-32 of the ASCII action name (sub_0026ACB2, poly 0xEDB88320), the same
  * transform used for element IDs. B_Live = 0x9b680e53, B_SystemLink = 0xf65128aa.
  *
- * The relabel: the Magma string lookup is vtable-nested (no clean small hook), so the label is
- * rewritten in memory after the string table loads (the task's "rewrite the parsed string" option).
- * The prehook scans the string table (MEM32(0x56BAC4)) for "XBOX LIVE" and overwrites it with
- * "INTERNET" (one-shot, idempotent; a second scan finds nothing). The text is one line in s_relabel.
+ * The relabel: the string table lookup (sub_0026A628) returns a pointer to the entry whose
+ * text is the label. The posthook scans the entry's first 128 bytes for the UTF-16 text
+ * "XBOX LIVE" and overwrites it with "INTERNET". One-shot and idempotent: once the text is
+ * replaced, a second lookup finds nothing. The entry is in the 0x80000000 memory region
+ * (the string table pool), not in the code/data region.
+ *
+ * Why not scan the string table at menu construction (the round-2 approach)?
+ *   - The string table pointer (MEM32(0x56BAC4)) is 0x8000d000, outside the 0x10000-0x3FFFFFF
+ *     range that guest_ok covers. The scan would not reach the text.
+ *   - The label "XBOX LIVE" is not resident as standalone text at dump time: it is consumed
+ *     into glyph data when the screen is built. The only "XBOX LIVE" strings in memory are
+ *     longer account messages, not the menu item label.
+ *   - The lookup (sub_0026A628) returns the entry pointer every time the label is resolved,
+ *     so hooking it catches the text before it is turned into glyphs.
  *
  * Inert unless menu mode is on; each log line is flushed.
  */
@@ -39,79 +49,81 @@ void menu_log_line(const char *handler, const char *ev, const char *extra);
 int fci_nic_menu_mode(void);
 int fci_nic_start_menu_transport(int mode); /* 0 = LAN, 1 = LIST */
 
-/* the label table: one line per relabeled item. "INTERNET" for B_Live; SYSTEM LINK is left as the
- * game has it. Changing the wording is one line here. (The description line is not changed: the
- * English description "Prove your skills..." does not mention Xbox Live.) */
-static const struct {
-    uint32_t crc;
-    const char *from; /* the game's text (the search) */
-    const char *to;   /* our text (the replacement) */
-} s_relabel[] = {
-    { 0x9b680e53u, "XBOX LIVE", "INTERNET" }, /* B_Live */
-};
-#define RELABEL_MAX (sizeof s_relabel / sizeof s_relabel[0])
+/* ---------------------------------------------------------------------------
+ * Relabel: UTF-16LE byte sequences for "XBOX LIVE" and "INTERNET".
+ *
+ * The string table entries store labels in UTF-16LE (confirmed by the description string
+ * at VA 0x01382980 in the memdump: "Prove your skills..." is UTF-16LE). The entry
+ * structure (sub_0026A628 return value) has the CRC-32 at offset +4; the text is
+ * elsewhere in the first few dwords. We scan 128 bytes (64 uint16_t) to find it.
+ * --------------------------------------------------------------------------- */
+static const uint16_t s_from_utf16[]
+        = {0x0058, 0x0042, 0x004F, 0x0058, 0x0020, 0x004C, 0x0049, 0x0056, 0x0045}; /* "XBOX LIVE" */
+#define FROM_LEN (sizeof s_from_utf16 / sizeof s_from_utf16[0])
 
-/* the string table (the current language's); loaded at boot, before any menu */
-#define STRING_TABLE_VA 0x56BAC4u
-/* the scan bound: the table's strings are in a contiguous pool near the table object; 1 MB is a
- * generous bound for a pre-game menu string table (a few KB of strings). guest_ok stops the scan
- * at the first uncommitted page, so the bound is a ceiling, not a requirement. */
-#define RELABEL_SCAN_BOUND 0x100000u
+static const uint16_t s_to_utf16[]
+        = {0x0049, 0x004E, 0x0054, 0x0045, 0x0052, 0x004E, 0x0045, 0x0054}; /* "INTERNET" */
+#define TO_LEN (sizeof s_to_utf16 / sizeof s_to_utf16[0])
 
-/* Scan the string table's memory for s_relabel[i].from and overwrite it with s_relabel[i].to.
- * One-shot and idempotent: once the text is replaced, a second scan finds nothing. The replacement
- * is written with a null terminator; if .to is shorter than .from, the trailing bytes of .from are
- * overwritten with nulls (the string is shorter, the rest is padding). Returns 1 when a replacement
- * is made. */
-static int relabel_in_table(uint32_t tbl)
+/* Scan a region of guest memory (UTF-16LE) for s_from_utf16 and overwrite with s_to_utf16.
+ * The region is the entry structure returned by sub_0026A628. We scan 128 bytes (64 uint16_t)
+ * which covers the entry header and the text. Returns 1 when a replacement is made. */
+static int relabel_entry(uint32_t entry_va)
 {
+    uint16_t *base;
     int i;
-    for (i = 0; i < (int)RELABEL_MAX; i++) {
-        const char *from = s_relabel[i].from, *to = s_relabel[i].to;
-        int fromlen = (int)strlen(from), tolen = (int)strlen(to);
-        int span = fromlen > tolen ? fromlen : tolen;
-        uint32_t off;
-        for (off = 0; off < RELABEL_SCAN_BOUND; off += 4) {
-            uint32_t va = tbl + off;
-            if (!guest_ok(va, (uint32_t)(fromlen + 1)))
-                break; /* past the committed region */
-            if (memcmp((const void *)XBOX_PTR(va), from, (size_t)fromlen) != 0)
-                continue;
-            if (MEM8(va + fromlen) != 0)
-                continue; /* not null-terminated: not the string */
-            /* found: overwrite with .to, null-padded to .from's length (the string is shorter) */
-            memcpy((void *)XBOX_PTR(va), to, (size_t)tolen);
-            memset((void *)XBOX_PTR(va + tolen), 0, (size_t)(span - tolen));
-            {
-                char extra[128];
-                snprintf(extra, sizeof extra, ", \"item\": %08x, \"from\": \"%s\", \"to\": \"%s\", \"va\": %08x",
-                         s_relabel[i].crc, from, to, va);
-                menu_log_line("evo-mp", "relabel", extra);
-            }
-            return 1;
+    const int scan_units = 64; /* 128 bytes / 2 */
+
+    if (!guest_ok(entry_va, (uint32_t)(scan_units * 2)))
+        return 0;
+
+    base = (uint16_t *)XBOX_PTR(entry_va);
+    for (i = 0; i + (int)FROM_LEN <= scan_units; i++) {
+        if (memcmp(&base[i], s_from_utf16, FROM_LEN * 2) != 0)
+            continue;
+        /* Found: overwrite with s_to_utf16, null-pad to FROM_LEN */
+        memcpy(&base[i], s_to_utf16, TO_LEN * 2);
+        {
+            int j;
+            for (j = (int)TO_LEN; j < (int)FROM_LEN; j++)
+                base[i + j] = 0;
         }
+        menu_log_line("evo-mp", "relabel",
+                      ", \"note\": \"B_Live label XBOX LIVE -> INTERNET at lookup "
+                      "(sub_0026A628 posthook)\"");
+        return 1;
     }
     return 0;
 }
 
 /* ---------------------------------------------------------------------------
- * Prehook on sub_000FA5B4: the P_Multiplayer menu construction (recomp_0023.c:25290).
+ * Posthook on sub_0026A628: the string table lookup (recomp_0071.c:11496).
  *
- * Runs after the string table loads (boot) and before the menu renders. Rewrites the label text
- * in the string table (one-shot, idempotent). Inert unless menu mode is on.
+ * sub_0026A628 is called by sub_0004F7FC (recomp_0007.c:9416) with the CRC-32 of the
+ * element ID (e.g. "B_Live" -> 0x9b680e53). It returns a pointer to the string table
+ * entry (eax) or 0 if not found. The entry contains the label text in UTF-16LE.
+ *
+ * The posthook runs after the lookup returns. If the entry is valid and contains
+ * "XBOX LIVE" (UTF-16LE), it overwrites the text with "INTERNET". This is one-shot
+ * and idempotent: once the text is replaced, subsequent lookups find "INTERNET"
+ * (not "XBOX LIVE") and the hook is a no-op.
+ *
+ * This hook fires for every string table lookup (not just the menu), but the
+ * relabel only matches "XBOX LIVE" which appears once in the table (the B_Live
+ * label). Other lookups are unaffected.
  * --------------------------------------------------------------------------- */
-void fci_prehook_000FA5B4(void)
+void sub_0026A628_fci_body(void); /* the lifted lookup, behind the gate (tools/compile.py "gate") */
+
+/* the build has no posthook kind: the gate runs the lookup itself at entry (the state is the entry
+ * state), fixes up the result, and returns 1 so the wrapper does not run it a second time */
+int fci_gate_0026A628(void)
 {
-    uint32_t tbl;
     if (!fci_nic_menu_mode())
-        return;
-    tbl = MEM32(STRING_TABLE_VA);
-    if (!guest_ok(tbl, 4))
-        return;
-    if (!relabel_in_table(tbl)) {
-        /* the label was not found (already relabeled, or the table layout differs): leave it as-is */
-        menu_log_line("evo-mp", "relabel-miss", ", \"note\": \"label not found; left as the game has it\"");
-    }
+        return 0;
+    sub_0026A628_fci_body();
+    if (g_eax)
+        relabel_entry(g_eax);
+    return 1;
 }
 
 /* ---------------------------------------------------------------------------
@@ -139,14 +151,16 @@ int fci_gate_000FB0A2(void)
     hash = MEM32(ev_obj + 4);
     if (hash == 0xf65128aau) { /* B_SystemLink -> the LAN transport */
         fci_nic_start_menu_transport(0);
-        menu_log_line("evo-mp", "pick", ", \"elem\": f65128aa, \"item\": \"SYSTEM LINK\", \"transport\": \"lan\"");
+        menu_log_line("evo-mp", "pick",
+                      ", \"elem\": f65128aa, \"item\": \"SYSTEM LINK\", \"transport\": \"lan\"");
         return 0; /* the body runs: the System Link lobby (the redirect target) */
     }
     if (hash == 0x9b680e53u) { /* B_Live -> the LIST transport; rewrite the hash to B_SystemLink */
         fci_nic_start_menu_transport(1);
         MEM32(ev_obj + 4) = 0xf65128aa; /* the dispatcher re-reads it: the System Link branch */
         menu_log_line("evo-mp", "pick",
-                      ", \"elem\": 9b680e53, \"item\": \"INTERNET\", \"transport\": \"list\", \"redirect\": \"f65128aa\"");
+                      ", \"elem\": 9b680e53, \"item\": \"INTERNET\", \"transport\": \"list\", \"redirect\": "
+                      "\"f65128aa\"");
         return 0;
     }
     return 0; /* other items: the body runs */
