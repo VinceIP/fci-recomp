@@ -329,7 +329,8 @@ static void identity_init(void)
         HCRYPTPROV prov = 0;
         HCRYPTHASH h = 0;
         DWORD len = sizeof hash;
-        if (CryptAcquireContext(&prov, NULL, NULL, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT)
+        /* PROV_RSA_AES: the PROV_RSA_FULL provider has no SHA-256 (CryptCreateHash fails there) */
+        if (CryptAcquireContext(&prov, NULL, NULL, PROV_RSA_AES, CRYPT_VERIFYCONTEXT)
             && CryptCreateHash(prov, CALG_SHA_256, 0, 0, &h)
             && CryptHashData(h, (const BYTE *)s_identity, 64, 0)
             && CryptGetHashParam(h, HP_HASHVAL, hash, &len, 0)) {
@@ -342,7 +343,11 @@ static void identity_init(void)
         if (prov)
             CryptReleaseContext(prov, 0);
     }
-    log_line("identity %s", s_own_id);
+    if (s_own_id[0])
+        log_line("identity %s", s_own_id);
+    else
+        log_line("identity: SHA-256 failed (error %lu); this instance can't recognise its own listing",
+                 (unsigned long)GetLastError());
 }
 
 /* --- guest path: fetch hosts and connect --- */
