@@ -177,8 +177,17 @@ int fci_gate_0026A628(void)
             }
         }
     }
-    if (g_eax)
-        relabel_entry(g_eax);
+    if (getenv("RECOMP_FCI_MENU_RELABEL_TEST") && MEM32(g_esp + 4) == 0x9b680e53u) {
+        /* FEASIBILITY TEST ONLY: the string-table record {B_Live hash, 0, text} near the observed
+         * address; the real code must reach the table from its root, not by scanning */
+        static int done;
+        uint32_t r;
+        for (r = 0x808E0000u; !done && r < 0x80900000u; r += 4)
+            if (guest_ok(r, 12) && MEM32(r) == 0x9b680e53u && MEM32(r + 4) == 0 && guest_ok(MEM32(r + 8), 20)
+                && MEM32(MEM32(r + 8)) == 0x00420058u) {
+                done = relabel_entry(MEM32(r + 8));
+            }
+    }
     return 1;
 }
 
