@@ -380,6 +380,10 @@ int main(int argc, char **argv)
         fci_memdump_start(); /* inert unless RECOMP_FCI_MEMDUMP is given */
         fci_status_start();  /* inert unless RECOMP_FCI_STATUS is given */
     }
+    {
+        extern void fci_telemetry_start(void);
+        fci_telemetry_start(); /* inert unless RECOMP_FCI_TELEMETRY is given (Evolution only) */
+    }
     fci_register_guest_thread(FCI_ENTRY_VA, 0);
     guest_cpu_join(); /* the entry is a guest thread too */
     xbe_entry_point();

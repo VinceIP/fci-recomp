@@ -85,6 +85,14 @@
       "prehook",
       "XNetCreateKey (Instincts' 0051C5EA, research qwen/notes/q5-hosting-hook.md): only a host creates a key; RegisterKey also runs on a joining guest here. The worker thread registers with the host list (fci_net_worker.c)",
       "0051C5EA"
+    ],
+    "sub_00063F01": [
+      "prehook",
+      "the CEntity constructor (the entity is the first stack argument; it stores the vtable 004B04E8 at recomp_0010.c:7114): registers the entity with RECOMP_FCI_TELEMETRY (fci_telemetry.c)"
+    ],
+    "sub_000648E7": [
+      "prehook",
+      "the CEntity destructor body (ecx = the entity; called by the deleting destructor sub_000648B4, the vtable 004B04E8's first slot): unregisters it from RECOMP_FCI_TELEMETRY (fci_telemetry.c)"
     ]
   },
   "evidence": "Exploratory Evolution profile: descriptor helper by masked bytes (unique match); code end = BINKDATA end (as Instincts' 0070C6E4).",
@@ -96,6 +104,34 @@
     "FCI_GAME_TIMER": [
       "0x0056CCC8",
       "the engine timer, as Instincts' 00644488: the game update (0017E185) updates it (001801EB), takes its frame time (00180281, the double at +0x68) and hands it and the clock (+0x28) to the scripts as _frametime and _time (0018FA11)"
+    ],
+    "FCI_TELEMETRY_ENTITY_VTABLE": [
+      "0x004B04E8",
+      "the CEntity vtable: all four player CEntities in the Q20 sync dumps carry it (re/notes/q20 §10); also the vtable Player_ProcessInput dispatches through (sub_00075C3E)"
+    ],
+    "FCI_TELEMETRY_PLAYER_VTABLE": [
+      "0x004AA7E0",
+      "the CPlayer vtable: a player CEntity's CPlayer back-ref (+0x4) carries it; filters player entities from the rest"
+    ],
+    "FCI_TELEMETRY_ENTITY_ID": [
+      "0x000001E0",
+      "CEntity::m_nID (build/fc1-src/CryEntitySystem/Entity.h:746): 2 host / 3 joiner, the same on both instances (re/notes/q20 §10)"
+    ],
+    "FCI_TELEMETRY_ENTITY_PLAYER": [
+      "0x00000004",
+      "the CEntity's CPlayer back-ref: points to the CPlayer (vtable 004AA7E0) for a player entity; CPlayer+0x23C points back (re/notes/q20 §10)"
+    ],
+    "FCI_TELEMETRY_ENTITY_ANG": [
+      "0x00000220",
+      "CEntity::m_angles: the orientation in degrees (yaw), consistent to within 0.01° on both instances (re/notes/q20 §10)"
+    ],
+    "FCI_TELEMETRY_PLAYER_FOOT": [
+      "0x0000034C",
+      "the CPlayer's foot position: the member comparable across instances (the owner's m_center is the bounding-box centre, foot + ~1.44 m Z; re/notes/q20 §10)"
+    ],
+    "FCI_TELEMETRY_CLOCK": [
+      "0x003CC868",
+      "the process-local tick counter at the same address in both instances, rising ~80/s (re/notes/q20 §9)"
     ]
   }
 }
