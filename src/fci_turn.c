@@ -94,6 +94,9 @@ static void log_turn(const char *fmt, ...)
     char line[340];
     sprintf_s(line, sizeof(line), "[FCI] network: turn %s", buf);
     OutputDebugStringA(line);
+    /* the session log too, like the NIC's lines: a relay failure must be visible in a player's log */
+    fprintf(stderr, "%s\n", line);
+    fflush(stderr);
     const char *path = getenv("RECOMP_FCI_TURN_LOG");
     if (path && *path) {
         FILE *f = fopen(path, "a");
