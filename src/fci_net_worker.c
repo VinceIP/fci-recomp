@@ -5,6 +5,8 @@
  * and long-polls /v1/connects.
  * It never touches the card's UDP socket; it takes s_lock only around fci_nic_list_* calls.
  * research/docs/multiplayer.md, tools/fake_hostlist.py */
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <windows.h>
 #include <winhttp.h>
 #include <bcrypt.h>
@@ -18,9 +20,10 @@
 #include "fci_net_worker.h"
 
 /* the NIC's worker API (fci_nic.c): called under s_lock */
-extern int fci_nic_list_add_peer(const char *endpoint, const uint8_t mac[6], const uint8_t nonce[16],
-                                 int guest);
+extern int fci_nic_list_add_peer(const char *endpoint, const char *local, const uint8_t mac[6],
+                                 const uint8_t nonce[16], int guest);
 extern int fci_nic_list_endpoint(char *buf, int buflen);
+extern int fci_nic_list_local_port(void);
 extern void fci_nic_mac(uint8_t *mac);
 extern void fci_nic_mac_str(char *buf, int buflen);
 extern int fci_nic_list_has_peer(const char *endpoint);
@@ -60,6 +63,112 @@ static char s_identity[65];
 static char s_own_id[33];
 
 /* host registration state */
+/* the card's LAN address (private IPv4:port), for the Worker's same-NAT forwarding. Detected
+ * once at worker start: RECOMP_FCI_NET_LOCAL (testing override) first, then auto-detect (a UDP
+ * connect to a public IP, getsockname for the local address, the card socket's port). */
+static char s_local_addr[64];
+
+static void log_line(const char *fmt, ...); /* forward declaration (defined below) */
+
+/* a private IPv4 (10/8, 172.16/12, 192.168/16) with a valid port.
+ * 100.64/10 (CGNAT) is excluded: two phones behind the same carrier share no network. */
+static int local_addr_ok(const char *s)
+{
+    unsigned a, b, c, d, port;
+    if (sscanf(s, "%u.%u.%u.%u:%u", &a, &b, &c, &d, &port) != 5)
+        return 0;
+    if (a < 1 || a > 255 || b > 255 || c > 255 || d > 255)
+        return 0;
+    if (port == 0 || port > 65535)
+        return 0;
+    return (a == 10) || (a == 172 && b >= 16 && b <= 31) ||
+           (a == 192 && b == 168);
+}
+
+static void local_addr_detect(void)
+{
+    if (s_local_addr[0])
+        return;
+    /* 1. RECOMP_FCI_NET_LOCAL (testing override) */
+    const char *env = getenv("RECOMP_FCI_NET_LOCAL");
+    if (env && env[0]) {
+        if (local_addr_ok(env)) {
+            snprintf(s_local_addr, sizeof s_local_addr, "%s", env);
+            log_line("local address: %s (RECOMP_FCI_NET_LOCAL)", s_local_addr);
+        } else {
+            log_line("RECOMP_FCI_NET_LOCAL=%s is not a private IPv4:port, ignored", env);
+        }
+        return;
+    }
+    /* 2. auto-detect: UDP connect to the host-list server's IP (no data sent), getsockname for
+     * the local address, combine with the card socket's bound port. The list server is the one
+     * the card already talks to; resolving its host gives the outbound interface's local address.
+     * If the host does not resolve, omit local. */
+    int port = fci_nic_list_local_port();
+    if (!port)
+        return;
+    const char *url = fci_nic_list_url();
+    if (!url)
+        return;
+    /* extract the host from the URL (http://host:port/... or https://host/...) */
+    char host[128];
+    const char *slash = strstr(url, "://");
+    if (!slash) {
+        WSACleanup();
+        return;
+    }
+    slash += 3;
+    const char *end = strchr(slash, '/');
+    size_t hlen = end ? (size_t)(end - slash) : strlen(slash);
+    if (hlen >= sizeof host) {
+        WSACleanup();
+        return;
+    }
+    memcpy(host, slash, hlen);
+    host[hlen] = 0;
+    /* strip the port from the host (if present) */
+    char *hcolon = strrchr(host, ':');
+    if (hcolon)
+        *hcolon = 0;
+    /* resolve the host to an IPv4 address */
+    WSADATA wsa;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0)
+        return;
+    struct addrinfo hints, *ai = NULL;
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_DGRAM;
+    if (getaddrinfo(host, NULL, &hints, &ai) || !ai) {
+        WSACleanup();
+        return; /* the host does not resolve: omit local */
+    }
+    SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (s == INVALID_SOCKET) {
+        freeaddrinfo(ai);
+        WSACleanup();
+        return;
+    }
+    struct sockaddr_in local;
+    int len = sizeof local;
+    if (connect(s, ai->ai_addr, (int)ai->ai_addrlen) == 0 &&
+        !getsockname(s, (struct sockaddr *)&local, &len)) {
+        unsigned a, b, c, d;
+        char ip[32];
+        snprintf(ip, sizeof ip, "%s", inet_ntoa(local.sin_addr));
+        if (sscanf(ip, "%u.%u.%u.%u", &a, &b, &c, &d) == 4) {
+            int is_private = (a == 10) || (a == 172 && b >= 16 && b <= 31) ||
+                             (a == 192 && b == 168);
+            if (is_private) {
+                snprintf(s_local_addr, sizeof s_local_addr, "%s:%u", ip, (unsigned)port);
+                log_line("local address detected: %s", s_local_addr);
+            }
+        }
+    }
+    closesocket(s);
+    freeaddrinfo(ai);
+    WSACleanup();
+}
+
 static char s_host_id[64];
 static int s_registered;
 static ULONGLONG s_last_fetch;    /* last /v1/hosts fetch (GetTickCount64) */
@@ -468,11 +577,20 @@ static void on_host_obj(const char *obj, int len)
     for (n = 0; n < 16; n++)
         snprintf(nhex + n * 2, 3, "%02x", nonce[n]);
     nhex[32] = 0;
-    /* POST /v1/connect with the GUEST's own endpoint, MAC and token: the reply carries the
-     * host's endpoint and MAC (the listing shows ids only) */
-    snprintf(buf, sizeof buf,
-             "{\"id\":\"%s\",\"endpoint\":\"%s\",\"nonce\":\"%s\",\"mac\":\"%s\",\"token\":\"%s\"}", id,
-             my_ep, nhex, my_mac, s_identity);
+    /* POST /v1/connect with the GUEST's own endpoint, MAC, token, and LAN address (if known):
+     * the reply carries the host's endpoint and MAC (the listing shows ids only), and the host's
+     * LAN address when both sides are behind the same NAT */
+    {
+        const char *lfield = s_local_addr[0] ? ",\"local\":\"" : "";
+        if (s_local_addr[0])
+            snprintf(buf, sizeof buf,
+                     "{\"id\":\"%s\",\"endpoint\":\"%s\",\"nonce\":\"%s\",\"mac\":\"%s\",\"token\":\"%s\"%s%s\"}",
+                     id, my_ep, nhex, my_mac, s_identity, lfield, s_local_addr);
+        else
+            snprintf(buf, sizeof buf,
+                     "{\"id\":\"%s\",\"endpoint\":\"%s\",\"nonce\":\"%s\",\"mac\":\"%s\",\"token\":\"%s\"}",
+                     id, my_ep, nhex, my_mac, s_identity);
+    }
     if (http_request(base, "POST", "/v1/connect", buf, resp, sizeof resp, &status) != 0 || status != 200) {
         log_line("connect to %s failed (status %d)", id, status);
         return;
@@ -486,8 +604,12 @@ static void on_host_obj(const char *obj, int len)
         != 6)
         return;
 
+    /* the host's LAN address (when the Worker forwarded one: both sides are behind the same NAT) */
+    char local[64];
+    json_str_val(resp, "local", local, sizeof local);
+
     AcquireSRWLockExclusive(lock);
-    fci_nic_list_add_peer(endpoint, mac, nonce, 1); /* we joined: the guest side */
+    fci_nic_list_add_peer(endpoint, local[0] ? local : NULL, mac, nonce, 1); /* we joined: the guest side */
     ReleaseSRWLockExclusive(lock);
 
     if (s_known_n < (int)(sizeof s_known / sizeof s_known[0]))
@@ -707,11 +829,19 @@ static void host_register(void)
 
     fci_nic_mac_str(macstr, sizeof macstr);
 
-    /* the token is ours (identity_init): the server derives the id from it and returns the id only */
-    snprintf(body, sizeof body,
-             "{\"proto\":%d,\"title\":\"%s\",\"version\":\"%s\",\"mac\":\"%s\",\"endpoint\":\"%s\","
-             "\"token\":\"%s\"}",
-             NET_PROTO, net_title(), net_version(), macstr, endpoint, s_identity);
+    /* the token is ours (identity_init): the server derives the id from it and returns the id only.
+     * The LAN address (s_local_addr) is included when known: the Worker forwards it to a guest
+     * only when both sides are behind the same NAT. */
+    if (s_local_addr[0])
+        snprintf(body, sizeof body,
+                 "{\"proto\":%d,\"title\":\"%s\",\"version\":\"%s\",\"mac\":\"%s\",\"endpoint\":\"%s\","
+                 "\"local\":\"%s\",\"token\":\"%s\"}",
+                 NET_PROTO, net_title(), net_version(), macstr, endpoint, s_local_addr, s_identity);
+    else
+        snprintf(body, sizeof body,
+                 "{\"proto\":%d,\"title\":\"%s\",\"version\":\"%s\",\"mac\":\"%s\",\"endpoint\":\"%s\","
+                 "\"token\":\"%s\"}",
+                 NET_PROTO, net_title(), net_version(), macstr, endpoint, s_identity);
     if (http_request(base, "POST", "/v1/register", body, buf, sizeof buf, &status) != 0 || status != 200) {
         s_reg_fail_ms = GetTickCount64();
         log_line("register failed (status %d)", status);
@@ -725,7 +855,7 @@ static void host_register(void)
 
 static void on_connect_obj(const char *obj, int len)
 {
-    char endpoint[128], nonce_hex[64], macstr[32];
+    char endpoint[128], nonce_hex[64], macstr[32], local[64];
     uint8_t mac[6], nonce[16];
     int n, relay;
     (void)len;
@@ -750,6 +880,9 @@ static void on_connect_obj(const char *obj, int len)
     if (relay < 0)
         relay = 0;
 
+    /* the guest's LAN address (when the Worker forwarded one: both sides are behind the same NAT) */
+    json_str_val(obj, "local", local, sizeof local);
+
     {
         SRWLOCK *lock = fci_nic_lock();
         AcquireSRWLockExclusive(lock);
@@ -757,7 +890,7 @@ static void on_connect_obj(const char *obj, int len)
             /* the guest's relayed connect: its peer is live at the relayed address (TURN) */
             fci_nic_list_turn_peer(nonce, mac, endpoint);
         } else {
-            fci_nic_list_add_peer(endpoint, mac, nonce, 0); /* a guest joined us */
+            fci_nic_list_add_peer(endpoint, local[0] ? local : NULL, mac, nonce, 0); /* a guest joined us */
         }
         ReleaseSRWLockExclusive(lock);
     }
@@ -836,6 +969,8 @@ static DWORD WINAPI worker_main(LPVOID arg)
         WinHttpSetOption(s_session, WINHTTP_OPTION_SEND_TIMEOUT, &t, sizeof t);
         WinHttpSetOption(s_session, WINHTTP_OPTION_RECEIVE_TIMEOUT, &t, sizeof t);
     }
+
+    local_addr_detect(); /* the card's LAN address (RECOMP_FCI_NET_LOCAL or auto-detect) */
 
     while (WaitForSingleObject(s_stop, WORKER_TICK_MS) == WAIT_TIMEOUT) {
         if (s_host_started && !s_registered) {

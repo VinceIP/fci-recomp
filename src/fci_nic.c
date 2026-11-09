@@ -64,6 +64,8 @@ typedef enum { LP_PENDING, LP_LIVE, LP_RELAY, LP_TURN_WAIT } lp_state;
 
 typedef struct {
     struct sockaddr_in endpoint;
+    struct sockaddr_in local_ep; /* the peer's LAN address (when both sides are behind the same NAT) */
+    int has_local;               /* 1 when local_ep is valid (cleared once the peer is live) */
     uint8_t mac[6];
     uint8_t nonce[16];
     lp_state state;
@@ -462,7 +464,9 @@ static int stun_recv(const char *buf, int n, const struct sockaddr_in *from)
     return 0;
 }
 
-/* send a punch datagram (FCN1 'P' + 16-byte nonce) to a peer's endpoint */
+/* send a punch datagram (FCN1 'P' + 16-byte nonce) to a peer's endpoint (and its LAN address,
+ * when the Worker forwarded one: both sides are behind the same NAT, so the local path is the
+ * one that will work) */
 static void punch_send(const lpeer_t *p)
 {
     char buf[21];
@@ -470,6 +474,8 @@ static void punch_send(const lpeer_t *p)
     buf[4] = 'P';
     memcpy(buf + 5, p->nonce, 16);
     sendto(s_sock, buf, 21, 0, (const struct sockaddr *)&p->endpoint, sizeof p->endpoint);
+    if (p->has_local)
+        sendto(s_sock, buf, 21, 0, (const struct sockaddr *)&p->local_ep, sizeof p->local_ep);
 }
 
 static void punch_answer_send(const lpeer_t *p)
@@ -482,7 +488,8 @@ static void punch_answer_send(const lpeer_t *p)
 }
 
 /* a received punch 'P' or answer 'A' (FCN1 + type + 16-byte nonce): a 'P' is answered with an 'A';
- * an 'A' is never answered. Either one, with a matching nonce and endpoint, moves a pending peer to live. */
+ * an 'A' is never answered. Either one, with a matching nonce and endpoint (or LAN address),
+ * moves a pending peer to live. When the local address wins, the peer's endpoint is switched to it. */
 static void punch_recv(const char *buf, char type, const struct sockaddr_in *from)
 {
     int i;
@@ -490,14 +497,29 @@ static void punch_recv(const char *buf, char type, const struct sockaddr_in *fro
         lpeer_t *p = &s_lpeers[i];
         if (p->state != LP_PENDING && p->state != LP_LIVE)
             continue;
-        if (p->endpoint.sin_addr.s_addr != from->sin_addr.s_addr || p->endpoint.sin_port != from->sin_port)
+        /* match the primary endpoint or the LAN address (when both sides are behind the same NAT) */
+        int is_local = 0;
+        if (p->endpoint.sin_addr.s_addr == from->sin_addr.s_addr &&
+            p->endpoint.sin_port == from->sin_port) {
+            /* primary match */
+        } else if (p->has_local &&
+                   p->local_ep.sin_addr.s_addr == from->sin_addr.s_addr &&
+                   p->local_ep.sin_port == from->sin_port) {
+            is_local = 1;
+        } else {
             continue;
+        }
         if (memcmp(p->nonce, buf + 5, 16))
             continue;
         if (p->state == LP_PENDING) {
             p->state = LP_LIVE;
             p->last_frame = GetTickCount64();
             s_lpending--;
+            if (is_local) {
+                /* the local path won: the peer is live at its LAN address */
+                memcpy(&p->endpoint, &p->local_ep, sizeof p->endpoint);
+            }
+            p->has_local = 0;
             TRACE("punch complete: peer %s:%u is live\n", inet_ntoa(from->sin_addr), ntohs(from->sin_port));
         }
         if (type == 'P')
@@ -517,8 +539,12 @@ static void lpeer_remove(int i)
     s_nlpeers--;
 }
 
-/* add a pending peer (called by the worker under s_lock, no I/O); returns 0 on cap */
-int fci_nic_list_add_peer(const char *endpoint, const uint8_t mac[6], const uint8_t nonce[16], int guest)
+/* add a pending peer (called by the worker under s_lock, no I/O); returns 0 on cap.
+ * `local` is the peer's LAN address ("ip:port") when the Worker forwarded one (both sides are
+ * behind the same NAT); NULL or "" when there is none. The NIC punches both addresses and the
+ * first valid answer wins. */
+int fci_nic_list_add_peer(const char *endpoint, const char *local, const uint8_t mac[6],
+                          const uint8_t nonce[16], int guest)
 {
     struct addrinfo hints, *ai = NULL;
     char host[128], port[16];
@@ -564,6 +590,27 @@ int fci_nic_list_add_peer(const char *endpoint, const uint8_t mac[6], const uint
         p->relay = -1;
         p->turn_ch = -1;
         p->via_turn = 0;
+        /* the peer's LAN address (when the Worker forwarded one) */
+        p->has_local = 0;
+        memset(&p->local_ep, 0, sizeof p->local_ep);
+        if (local && local[0]) {
+            char lhost[128], lport[16];
+            const char *lcolon = strrchr(local, ':');
+            if (lcolon && (size_t)(lcolon - local) < sizeof lhost && strlen(lcolon + 1) < sizeof lport) {
+                memcpy(lhost, local, (size_t)(lcolon - local));
+                lhost[lcolon - local] = 0;
+                strcpy(lport, lcolon + 1);
+                struct addrinfo lhints, *lai = NULL;
+                memset(&lhints, 0, sizeof lhints);
+                lhints.ai_family = AF_INET;
+                lhints.ai_socktype = SOCK_DGRAM;
+                if (!getaddrinfo(lhost, lport, &lhints, &lai) && lai) {
+                    memcpy(&p->local_ep, lai->ai_addr, sizeof p->local_ep);
+                    p->has_local = 1;
+                    freeaddrinfo(lai);
+                }
+            }
+        }
         now = GetTickCount64();
         p->next_punch = now;
         p->punch_end = now + PUNCH_WINDOW_MS;
@@ -581,6 +628,18 @@ int fci_nic_list_endpoint(char *buf, int buflen)
         return 0;
     snprintf(buf, (size_t)buflen, "%s:%u", inet_ntoa(s_stun_ep.sin_addr), ntohs(s_stun_ep.sin_port));
     return 1;
+}
+
+/* the card socket's bound port (for the worker's local-address detection); 0 if not in LIST mode */
+int fci_nic_list_local_port(void)
+{
+    struct sockaddr_in a;
+    int len = sizeof a;
+    if (!s_list || s_sock == INVALID_SOCKET)
+        return 0;
+    if (getsockname(s_sock, (struct sockaddr *)&a, &len))
+        return 0;
+    return (int)ntohs(a.sin_port);
 }
 
 /* 1 when a peer with the given endpoint ("ip:port") is pending or live; called under s_lock */

@@ -53,14 +53,33 @@ LIMITS = {
 }
 
 
-def _entries(q):
+def local_ok(endpoint):
+    """A private IPv4 (10/8, 172.16/12, 192.168/16) with a valid port.
+    The card's LAN address: only forwarded when both sides are behind the same NAT.
+    100.64/10 (CGNAT) is excluded: two phones behind the same carrier share no network."""
+    m = re.match(r"^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3}):(\d{1,5})$", str(endpoint))
+    if not m:
+        return False
+    a, b, c, d, port = (int(m[i]) for i in range(1, 6))
+    if a < 1 or a > 255 or b > 255 or c > 255 or d > 255:
+        return False
+    if port <= 0 or port > 65535:
+        return False
+    return a == 10 or (a == 172 and 16 <= b <= 31) or (a == 192 and b == 168)
+
+
+def _entries(q, host_ip=""):
     # The host sees {endpoint, nonce, mac} per connect (plus relay: true for a relayed
-    # address); the guest's id is the object's business.
+    # address, and local: the guest's LAN address when both sides are behind the same NAT);
+    # the guest's id is the object's business. The local is forwarded only when the
+    # guest's caller IP matches the host's caller IP (same NAT).
     out = []
     for c in q:
         e = {"endpoint": c["endpoint"], "nonce": c["nonce"], "mac": c["mac"]}
         if c.get("relay"):
             e["relay"] = True
+        if c.get("local") and c.get("ip") == host_ip:
+            e["local"] = c["local"]
         out.append(e)
     return out
 
@@ -185,6 +204,8 @@ class Lobby:
         if not MAC_RE.match(mac) or not endpoint:
             self.note("bad", ip)
             return 400, {"error": "bad registration"}
+        local = body.get("local", "")
+        local = local if local_ok(local) else None
         with self.lock:
             live = [h for h in self.hosts.values() if h["ip"] == ip]
             if len(live) >= LIMITS["hostsPerIp"]:
@@ -198,6 +219,7 @@ class Lobby:
                 "version": version,
                 "mac": mac,
                 "endpoint": endpoint,
+                "local": local,
                 "expires": now + TTL_SECONDS,
             }
         return 200, {"id": id_}  # no token back: the runtime already has it
@@ -232,7 +254,7 @@ class Lobby:
             q = self.connects.get(id_)
             if q:
                 del self.connects[id_]
-                return 200, {"connects": _entries(q)}
+                return 200, {"connects": _entries(q, h["ip"])}
             event = threading.Event()
             waiter = {"event": event, "result": None}
             old = self.waiters.pop(id_, None)
@@ -301,21 +323,46 @@ class Lobby:
                 mint["relay"] += 1
             self.pairs[key] = {"host": id_, "at": now}  # the mint gate: this guest reached this host
             self._prune_turn_state(now)
+            glocal = body.get("local", "")
+            glocal = glocal if local_ok(glocal) else None
             q = self.connects.setdefault(id_, [])
             i = next((j for j, c in enumerate(q) if c["gid"] == gid), -1)
             if i >= 0:
-                q[i] = {"endpoint": endpoint, "nonce": nonce, "mac": mac, "gid": gid, "relay": relay}
+                q[i] = {
+                    "endpoint": endpoint,
+                    "nonce": nonce,
+                    "mac": mac,
+                    "gid": gid,
+                    "relay": relay,
+                    "local": glocal,
+                    "ip": ip,
+                }
             else:
                 if len(q) >= CONNECTS_MAX:
                     q.pop(0)
-                q.append({"endpoint": endpoint, "nonce": nonce, "mac": mac, "gid": gid, "relay": relay})
+                q.append(
+                    {
+                        "endpoint": endpoint,
+                        "nonce": nonce,
+                        "mac": mac,
+                        "gid": gid,
+                        "relay": relay,
+                        "local": glocal,
+                        "ip": ip,
+                    }
+                )
             w = self.waiters.get(id_)
             if w:
                 self.waiters.pop(id_, None)
                 del self.connects[id_]
-                w["result"] = (200, {"connects": _entries(q)})
+                w["result"] = (200, {"connects": _entries(q, h["ip"])})
                 w["event"].set()
-        return 200, {"endpoint": h["endpoint"], "mac": h["mac"]}  # the host's endpoint and MAC
+        # The host's endpoint and MAC are the reply; the host's LAN address is forwarded only
+        # when the guest and the host are behind the same NAT (same caller IP).
+        reply = {"endpoint": h["endpoint"], "mac": h["mac"]}
+        if h.get("local") and h["ip"] == ip:
+            reply["local"] = h["local"]
+        return 200, reply
 
     # Mint a TURN credential for a guest, gated like the Worker: a recent connect from this
     # guest to this host with this nonce (the connect queue is drained by the poll, so the

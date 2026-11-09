@@ -125,6 +125,23 @@ function endpointOk(endpoint) {
   return port > 0 && port <= 65535 && publicIp(a, b, c);
 }
 
+// A private IPv4 (10/8, 172.16/12, 192.168/16) with a valid port.
+// The card's LAN address: only forwarded when both sides are behind the same NAT
+// (the caller IP the Worker sees matches on both sides). 100.64/10 (CGNAT) is excluded:
+// two phones behind the same carrier share no network.
+function localOk(endpoint) {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3}):(\d{1,5})$/.exec(String(endpoint));
+  if (!m) return false;
+  const a = Number(m[1]), b = Number(m[2]), c = Number(m[3]), d = Number(m[4]), port = Number(m[5]);
+  if (a < 1 || a > 255 || b > 255 || c > 255 || d > 255) return false;
+  if (port <= 0 || port > 65535) return false;
+  return (
+    a === 10 ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168)
+  );
+}
+
 // The player's id from the identity token: the first 16 bytes of SHA-256(token), hex.
 async function deriveId(token) {
   const h = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
@@ -269,11 +286,18 @@ export class Lobby {
   }
 
   release(id) {
-    // The host sees {endpoint, nonce, mac} per connect (plus relay: true for a relayed address);
-    // the guest's id is the object's business.
-    const q = (this.connects.get(id) || []).map(({ endpoint, nonce, mac, relay }) =>
-      relay ? { endpoint, nonce, mac, relay: true } : { endpoint, nonce, mac }
-    );
+    // The host sees {endpoint, nonce, mac} per connect (plus relay: true for a relayed address,
+    // and local: the guest's LAN address when both sides are behind the same NAT);
+    // the guest's id is the object's business. The host's IP is the caller IP that registered
+    // the host; the guest's IP is the caller IP that posted the connect. The local is forwarded
+    // only when the two match (same NAT).
+    const host = this.hosts.get(id);
+    const hostIp = host ? host.ip : "";
+    const q = (this.connects.get(id) || []).map(({ endpoint, nonce, mac, relay, local, ip: gip }) => {
+      const e = relay ? { endpoint, nonce, mac, relay: true } : { endpoint, nonce, mac };
+      if (local && gip === hostIp) e.local = local;
+      return e;
+    });
     this.connects.delete(id);
     return json({ connects: q });
   }
@@ -350,6 +374,7 @@ export class Lobby {
     }
     const old = this.hosts.get(id);
     if (old) clearTimeout(old.timer); // a re-register (the common case: the id is stable)
+    const local = localOk(msg.local) ? String(msg.local) : undefined;
     this.hosts.set(id, {
       id,
       ip,
@@ -358,6 +383,7 @@ export class Lobby {
       version: String(msg.version),
       mac: msg.mac,
       endpoint: msg.endpoint,
+      local,
       expires: now + this.ttl,
       timer: null,
     });
@@ -503,12 +529,13 @@ export class Lobby {
     if (relay) mint.relay++;
     this.pairs.set(key, { host: msg.id, at: now }); // the mint gate: this guest reached this host
     this.pruneTurnState(now);
+    const glocal = localOk(msg.local) ? String(msg.local) : undefined;
     const q = this.connects.get(msg.id) || [];
     const i = q.findIndex((c) => c.gid === gid);
-    if (i >= 0) q[i] = { endpoint: msg.endpoint, nonce: msg.nonce, mac: msg.mac, gid, relay };
+    if (i >= 0) q[i] = { endpoint: msg.endpoint, nonce: msg.nonce, mac: msg.mac, gid, relay, local: glocal, ip };
     else {
       if (q.length >= CONNECTS_MAX) q.shift(); // drop the oldest: the NIC can only hold 8 pending
-      q.push({ endpoint: msg.endpoint, nonce: msg.nonce, mac: msg.mac, gid, relay });
+      q.push({ endpoint: msg.endpoint, nonce: msg.nonce, mac: msg.mac, gid, relay, local: glocal, ip });
     }
     this.connects.set(msg.id, q);
     const w = this.waiters.get(msg.id);
@@ -518,7 +545,11 @@ export class Lobby {
       w.resolve(this.release(msg.id));
     }
     // The host's endpoint and MAC are the reply: the listing shows ids only.
-    return json({ endpoint: host.endpoint, mac: host.mac });
+    // The host's LAN address is forwarded only when the guest and the host are behind the same
+    // NAT (the Worker sees the same caller IP on both sides).
+    const reply = { endpoint: host.endpoint, mac: host.mac };
+    if (host.local && host.ip === ip) reply.local = host.local;
+    return json(reply);
   }
 
   // Mint a Cloudflare TURN credential for a guest. The guest must have connected to `id` with

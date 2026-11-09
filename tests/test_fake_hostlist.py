@@ -642,3 +642,205 @@ def test_unregister_releases_a_held_poll_and_clears_the_queue():
         assert body["connects"] == []  # the old connect was cleared by the unregister
     finally:
         server.shutdown()
+
+
+def test_local_stored_on_register():
+    """A valid private IPv4 local is stored; a public one or a bad format is ignored."""
+    port, server, lobby = start_server()
+    try:
+        base = f"http://127.0.0.1:{port}"
+        # a valid private address
+        token = secrets.token_hex(32)
+        status, body = http_json(
+            f"{base}/v1/register",
+            method="POST",
+            body={
+                "proto": 1,
+                "title": "evolution",
+                "version": "3",
+                "mac": "02:46:43:12:34:56",
+                "endpoint": "8.8.8.7:40000",
+                "token": token,
+                "local": "192.168.1.50:3074",
+            },
+        )
+        assert status == 200, body
+        hid = body["id"]
+        h = lobby.hosts.get(hid)
+        assert h["local"] == "192.168.1.50:3074"
+
+        # a public address is silently ignored
+        token2 = secrets.token_hex(32)
+        status, body = http_json(
+            f"{base}/v1/register",
+            method="POST",
+            body={
+                "proto": 1,
+                "title": "evolution",
+                "version": "3",
+                "mac": "02:46:43:12:34:57",
+                "endpoint": "8.8.8.8:40001",
+                "token": token2,
+                "local": "8.8.8.8:3074",
+            },
+        )
+        assert status == 200, body
+        assert lobby.hosts.get(body["id"]).get("local") is None
+
+        # a malformed local is silently ignored
+        token3 = secrets.token_hex(32)
+        status, body = http_json(
+            f"{base}/v1/register",
+            method="POST",
+            body={
+                "proto": 1,
+                "title": "evolution",
+                "version": "3",
+                "mac": "02:46:43:12:34:58",
+                "endpoint": "8.8.8.9:40002",
+                "token": token3,
+                "local": "not-an-address",
+            },
+        )
+        assert status == 200, body
+        assert lobby.hosts.get(body["id"]).get("local") is None
+    finally:
+        server.shutdown()
+
+
+def test_local_forwarded_same_ip():
+    """The host's local is in the connect reply (the Python fake uses the TCP client address,
+    so all requests share the same IP: the same-IP check always passes here).
+    The cross-IP case is tested in the Node tests (lobby.test.mjs)."""
+    port, server, lobby = start_server()
+    try:
+        base = f"http://127.0.0.1:{port}"
+        htoken = secrets.token_hex(32)
+        status, body = http_json(
+            f"{base}/v1/register",
+            method="POST",
+            body={
+                "proto": 1,
+                "title": "evolution",
+                "version": "3",
+                "mac": "02:46:43:12:34:56",
+                "endpoint": "93.184.100.9:40000",
+                "token": htoken,
+                "local": "192.168.1.50:3074",
+            },
+        )
+        assert status == 200, body
+        hid = body["id"]
+
+        # a guest connect: the reply includes the host's local (same IP in the Python fake)
+        gtoken = secrets.token_hex(32)
+        status, body = http_json(
+            f"{base}/v1/connect",
+            method="POST",
+            body={
+                "id": hid,
+                "endpoint": "93.184.100.9:41000",
+                "nonce": "e" * 32,
+                "mac": "02:46:43:aa:bb:cc",
+                "token": gtoken,
+                "local": "192.168.1.51:3074",
+            },
+        )
+        assert status == 200, body
+        assert body.get("local") == "192.168.1.50:3074"
+    finally:
+        server.shutdown()
+
+
+def test_local_in_poll():
+    """The guest's local is in the host's poll when both share the caller IP (same NAT)."""
+    port, server, lobby = start_server()
+    try:
+        base = f"http://127.0.0.1:{port}"
+        htoken = secrets.token_hex(32)
+        status, body = http_json(
+            f"{base}/v1/register",
+            method="POST",
+            body={
+                "proto": 1,
+                "title": "evolution",
+                "version": "3",
+                "mac": "02:46:43:12:34:56",
+                "endpoint": "93.184.100.9:40000",
+                "token": htoken,
+                "local": "192.168.1.50:3074",
+            },
+            headers={"cf-connecting-ip": "93.184.100.9"},
+        )
+        assert status == 200, body
+        hid = body["id"]
+
+        # a guest connect with a local
+        gtoken = secrets.token_hex(32)
+        status, body = http_json(
+            f"{base}/v1/connect",
+            method="POST",
+            body={
+                "id": hid,
+                "endpoint": "93.184.100.9:41000",
+                "nonce": "e" * 32,
+                "mac": "02:46:43:aa:bb:cc",
+                "token": gtoken,
+                "local": "192.168.1.51:3074",
+            },
+            headers={"cf-connecting-ip": "93.184.100.9"},
+        )
+        assert status == 200, body
+
+        # the host's poll: the guest's local is included
+        status, body = http_json(
+            f"{base}/v1/connects?id={hid}&token={htoken}&wait=1",
+            headers={"cf-connecting-ip": "93.184.100.9"},
+        )
+        assert status == 200, body
+        assert len(body["connects"]) == 1
+        assert body["connects"][0].get("local") == "192.168.1.51:3074"
+    finally:
+        server.shutdown()
+
+
+def test_local_cgnat_rejected():
+    """100.64/10 (CGNAT) is not a LAN: two phones behind the same carrier share no network."""
+    port, server, lobby = start_server()
+    try:
+        base = f"http://127.0.0.1:{port}"
+        htoken = secrets.token_hex(32)
+        status, body = http_json(
+            f"{base}/v1/register",
+            method="POST",
+            body={
+                "proto": 1,
+                "title": "evolution",
+                "version": "3",
+                "mac": "02:46:43:12:34:56",
+                "endpoint": "93.184.100.9:40000",
+                "token": htoken,
+                "local": "100.64.1.2:3074",
+            },
+        )
+        assert status == 200, body
+        hid = body["id"]
+
+        # a connect with a CGNAT local is also rejected
+        gtoken = secrets.token_hex(32)
+        status, body = http_json(
+            f"{base}/v1/connect",
+            method="POST",
+            body={
+                "id": hid,
+                "endpoint": "93.184.100.9:41000",
+                "nonce": "e" * 32,
+                "mac": "02:46:43:aa:bb:cc",
+                "token": gtoken,
+                "local": "100.64.1.3:3074",
+            },
+        )
+        assert status == 200, body
+        assert body.get("local") is None
+    finally:
+        server.shutdown()

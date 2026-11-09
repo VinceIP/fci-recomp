@@ -840,3 +840,139 @@ test("unregister clears the host's queued connects", async () => {
   assert.equal(pStatus, 200);
   assert.deepEqual(pBody.connects, []); // the old connect was cleared by the unregister
 });
+
+// --- the local field (same-NAT forwarding) ---
+
+test("local: a private IPv4 is stored on register; a public one is ignored", async () => {
+  const lobby = mk();
+  const hToken = "c".repeat(64);
+  // a valid private address
+  let [status, body] = await r(lobby, reg({ token: hToken, local: "192.168.1.50:3074" }));
+  assert.equal(status, 200);
+  const hid = body.id;
+  // the host record has the local field
+  const h = lobby.hosts.get(hid);
+  assert.equal(h.local, "192.168.1.50:3074");
+
+  // a public address is silently ignored
+  const hToken2 = "e".repeat(64);
+  [status, body] = await r(lobby, req("/v1/register", {
+    method: "POST", ip: "8.8.8.8",
+    body: { proto: 1, title: "instincts", version: "1", mac: "02:46:43:44:55:66",
+            endpoint: "8.8.8.8:40001", token: hToken2, local: "8.8.8.8:3074" },
+  }));
+  assert.equal(status, 200);
+  assert.equal(lobby.hosts.get(body.id).local, undefined);
+
+  // a malformed local is silently ignored
+  const hToken3 = "f".repeat(64);
+  [status, body] = await r(lobby, req("/v1/register", {
+    method: "POST", ip: "8.8.8.9",
+    body: { proto: 1, title: "instincts", version: "1", mac: "02:46:43:77:88:99",
+            endpoint: "8.8.8.9:40002", token: hToken3, local: "not-an-address" },
+  }));
+  assert.equal(status, 200);
+  assert.equal(lobby.hosts.get(body.id).local, undefined);
+});
+
+test("local: forwarded in the connect reply when both sides share the caller IP", async () => {
+  const lobby = mk();
+  const hToken = "c".repeat(64);
+  const ip = "93.184.100.9";
+  // register with a local address
+  let [status] = await r(lobby, req("/v1/register", {
+    method: "POST", ip,
+    body: { proto: 1, title: "instincts", version: "1", mac: "02:46:43:11:22:33",
+            endpoint: ip + ":40000", token: hToken, local: "192.168.1.50:3074" },
+  }));
+  assert.equal(status, 200);
+  const hid = sha16(hToken);
+
+  // a guest from the same IP: the reply includes the host's local
+  const gToken = "d".repeat(64);
+  let [cStatus, cBody] = await r(lobby, req("/v1/connect", {
+    method: "POST", ip, // same IP as the host
+    body: { id: hid, endpoint: ip + ":41000", nonce: "e".repeat(32),
+            mac: "02:46:43:aa:bb:cc", token: gToken, local: "192.168.1.51:3074" },
+  }));
+  assert.equal(cStatus, 200);
+  assert.equal(cBody.local, "192.168.1.50:3074"); // the host's LAN address
+
+  // a guest from a different IP: the reply does NOT include the host's local
+  const gToken2 = "f".repeat(64);
+  [cStatus, cBody] = await r(lobby, req("/v1/connect", {
+    method: "POST", ip: "1.2.3.4", // different IP
+    body: { id: hid, endpoint: "1.2.3.4:41000", nonce: "a".repeat(32),
+            mac: "02:46:43:dd:ee:ff", token: gToken2 },
+  }));
+  assert.equal(cStatus, 200);
+  assert.equal(cBody.local, undefined); // no local: different NAT
+});
+
+test("local: the guest's local is in the host's poll when IPs match; absent when they differ", async () => {
+  const lobby = mk({ TTL_MS: 5000 });
+  const hToken = "c".repeat(64);
+  const ip = "93.184.100.9";
+  let [status] = await r(lobby, req("/v1/register", {
+    method: "POST", ip,
+    body: { proto: 1, title: "instincts", version: "1", mac: "02:46:43:11:22:33",
+            endpoint: ip + ":40000", token: hToken, local: "192.168.1.50:3074" },
+  }));
+  assert.equal(status, 200);
+  const hid = sha16(hToken);
+
+  // a guest from the same IP, with its own local
+  const gToken = "d".repeat(64);
+  let [cStatus] = await r(lobby, req("/v1/connect", {
+    method: "POST", ip, // same IP
+    body: { id: hid, endpoint: ip + ":41000", nonce: "e".repeat(32),
+            mac: "02:46:43:aa:bb:cc", token: gToken, local: "192.168.1.51:3074" },
+  }));
+  assert.equal(cStatus, 200);
+
+  // the host's poll (from the same IP as the registration): the guest's local is included
+  let [pStatus, pBody] = await r(lobby, req(`/v1/connects?id=${hid}&token=${hToken}&wait=1`, { ip }));
+  assert.equal(pStatus, 200);
+  assert.equal(pBody.connects.length, 1);
+  assert.equal(pBody.connects[0].local, "192.168.1.51:3074");
+
+  // a guest from a different IP, with a local: the poll does NOT include the guest's local
+  // (the rule is symmetric: a side's LAN address is forwarded only when both share the caller IP)
+  lobby.connects.set(hid, []); // clear the queue
+  const gToken2 = "f".repeat(64);
+  [cStatus] = await r(lobby, req("/v1/connect", {
+    method: "POST", ip: "1.2.3.4", // different IP
+    body: { id: hid, endpoint: "1.2.3.4:41000", nonce: "a".repeat(32),
+            mac: "02:46:43:dd:ee:ff", token: gToken2, local: "10.0.0.5:3074" },
+  }));
+  assert.equal(cStatus, 200);
+
+  // the host's poll: the guest's local is absent (different caller IP)
+  [pStatus, pBody] = await r(lobby, req(`/v1/connects?id=${hid}&token=${hToken}&wait=1`, { ip }));
+  assert.equal(pStatus, 200);
+  assert.equal(pBody.connects.length, 1);
+  assert.equal(pBody.connects[0].local, undefined);
+});
+
+test("local: 100.64/10 (CGNAT) is rejected", async () => {
+  const lobby = mk();
+  // a CGNAT address is not a LAN: two phones behind the same carrier share no network
+  const hToken = "c".repeat(64);
+  let [status, body] = await r(lobby, req("/v1/register", {
+    method: "POST", ip: "8.8.8.7",
+    body: { proto: 1, title: "instincts", version: "1", mac: "02:46:43:11:22:33",
+            endpoint: "8.8.8.7:40000", token: hToken, local: "100.64.1.2:3074" },
+  }));
+  assert.equal(status, 200);
+  assert.equal(lobby.hosts.get(body.id).local, undefined);
+
+  // a connect with a CGNAT local is also rejected
+  const gToken = "d".repeat(64);
+  [status, body] = await r(lobby, req("/v1/connect", {
+    method: "POST", ip: "8.8.8.7",
+    body: { id: body.id, endpoint: "8.8.8.7:41000", nonce: "e".repeat(32),
+            mac: "02:46:43:aa:bb:cc", token: gToken, local: "100.64.1.3:3074" },
+  }));
+  assert.equal(status, 200);
+  assert.equal(body.local, undefined);
+});
