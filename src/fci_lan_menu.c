@@ -121,7 +121,21 @@ int fci_gate_0026A628(void)
 {
     if (!fci_nic_menu_mode() || !sub_0026A628_fci_body)
         return 0;
-    sub_0026A628_fci_body();
+    {
+        uint32_t arg1 = MEM32(g_esp + 4), arg2 = MEM32(g_esp + 8), ecx_in = g_ecx;
+        sub_0026A628_fci_body();
+        if (getenv("RECOMP_FCI_MENU_LOOKUP_DEBUG")) { /* diagnostic: what the lookup is given and returns */
+            static int n;
+            if (n++ < 40) {
+                char extra[256];
+                uint32_t e = g_eax;
+                snprintf(extra, sizeof extra, ", \"ecx\": \"%08X\", \"a1\": \"%08X\", \"a2\": \"%08X\", \"ret\": \"%08X\", \"d\": \"%08X %08X %08X %08X\"",
+                         ecx_in, arg1, arg2, e, guest_ok(e, 16) ? MEM32(e) : 0, guest_ok(e, 16) ? MEM32(e + 4) : 0,
+                         guest_ok(e, 16) ? MEM32(e + 8) : 0, guest_ok(e, 16) ? MEM32(e + 12) : 0);
+                menu_log_line("evo-mp", "lookup", extra);
+            }
+        }
+    }
     if (g_eax)
         relabel_entry(g_eax);
     return 1;
