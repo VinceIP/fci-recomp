@@ -125,6 +125,25 @@ int fci_gate_0026A628(void)
         uint32_t arg1 = MEM32(g_esp + 4), arg2 = MEM32(g_esp + 8), ecx_in = g_ecx;
         sub_0026A628_fci_body();
         if (getenv("RECOMP_FCI_MENU_LOOKUP_DEBUG") && (arg1 == 0x9b680e53u || arg1 == 0xf65128aau)) {
+            /* diagnostic: where the label text lives (the contiguous window is outside the RAM dumps) */
+            static int scanned;
+            if (!scanned++) {
+                uint32_t va;
+                int hits = 0;
+                for (va = 0x80010000u; va < 0x84000000u - 32 && hits < 12; va += 2) {
+                    if ((va & 0xFFF) == 0 && !guest_ok(va, 0x1000)) {
+                        va += 0x1000 - 2;
+                        continue;
+                    }
+                    if (MEM32(va) == 0x00420058u && MEM32(va + 4) == 0x0058004Fu && MEM32(va + 8) == 0x004C0020u) {
+                        char extra[160];
+                        snprintf(extra, sizeof extra, ", \"label_utf16_at\": \"%08X\", \"next\": \"%04X %04X\"", va,
+                                 MEM16(va + 18), MEM16(va + 20));
+                        menu_log_line("evo-mp", "scan", extra);
+                        hits++;
+                    }
+                }
+            }
             /* diagnostic: the B_Live / B_SystemLink objects and what their pointers lead to */
             uint32_t e = g_eax, k, w;
             for (k = 0; k < 4 && guest_ok(e, 16); k++) {
