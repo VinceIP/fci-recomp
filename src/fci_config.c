@@ -253,8 +253,8 @@ void fci_config_load(int *argc, char ***argv)
 {
     static char exe_dir[MAX_PATH], xbe[MAX_PATH], game[MAX_PATH], save[MAX_PATH], log_dir[MAX_PATH];
     static char fixed_log[MAX_PATH], shader_cache[MAX_PATH], shader_cache_arg[MAX_PATH + 32];
-    static char lines[96][512], rate_arg[64], hub_arg[300];
-    static char *args[120];
+    static char lines[96][512], rate_arg[64], hub_arg[300], lan_arg[40], list_arg[300], peers_arg[300];
+    static char *args[128];
     int n = 0, opts = 0, i, have_ini = 0, verbosity = 1, limit = 20, cap = 1;
     double rate = 30;
     char ini[MAX_PATH], *slash;
@@ -315,6 +315,15 @@ void fci_config_load(int *argc, char ***argv)
             else if (!_stricmp(key, "network-hub")) {
                 if (v[0])
                     snprintf(hub_arg, sizeof hub_arg, "RECOMP_FCI_NET=%s", v);
+            } else if (!_stricmp(key, "network-lan")) {
+                if (v[0] && strcmp(v, "0"))
+                    snprintf(lan_arg, sizeof lan_arg, "RECOMP_FCI_NET_LAN=1");
+            } else if (!_stricmp(key, "network-list")) {
+                if (v[0])
+                    snprintf(list_arg, sizeof list_arg, "RECOMP_FCI_NET_LIST=%s", v);
+            } else if (!_stricmp(key, "network-peers")) {
+                if (v[0])
+                    snprintf(peers_arg, sizeof peers_arg, "RECOMP_FCI_NET_PEERS=%s", v);
             } else if (opts < 96 && translate(key, v, lines[opts], sizeof lines[0]))
                 opts++;
         }
@@ -350,9 +359,15 @@ void fci_config_load(int *argc, char ***argv)
     }
     /* experimental frame rates: capped, the game keeps its 30 updates and the
        frames in between are blended from its last two; uncapped, the game itself runs at the rate */
-    if (hub_arg[0]) {
-        args[n++] = hub_arg;
-        cap = 1; /* online every player runs the Xbox's 30 updates: physics and AI depend on the rate */
+    /* the network keys: one link at a time (the card refuses two and says so) */
+    {
+        char *nets[] = {hub_arg, lan_arg, list_arg, peers_arg};
+        int k;
+        for (k = 0; k < 4; k++)
+            if (nets[k][0]) {
+                args[n++] = nets[k];
+                cap = 1; /* online every player runs the Xbox's 30 updates: physics and AI depend on the rate */
+            }
     }
     if (rate == 0 || rate > 30) {
         if (cap)

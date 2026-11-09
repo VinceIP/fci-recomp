@@ -88,6 +88,7 @@ SYSTEM_LIBS = [
     "uuid",
     "d3d12",
     "ws2_32",  # the network card's hub link (src/fci_nic.c)
+    "iphlpapi",  # the LAN transport's adapter list (src/fci_nic.c)
     "winhttp",  # the host list worker (src/fci_net_worker.c)
     "bcrypt",  # nonce generation (src/fci_net_worker.c)
 ]

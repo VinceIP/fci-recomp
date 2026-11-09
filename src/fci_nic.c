@@ -6,6 +6,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#include <iphlpapi.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -91,10 +92,26 @@ typedef struct {
     struct sockaddr_in addr;
     uint8_t mac[6]; /* the card at that endpoint, from its first frame */
     int has_mac;
+    ULONGLONG last_heard; /* the last frame from addr: the endpoint is alive while this is recent */
 } peer_t;
 static peer_t s_peers[PEERS_MAX];
 static int s_npeers, s_direct; /* s_direct: frames go to s_peers, not to a hub */
 static unsigned long s_unrouted, s_stray;
+/* LAN mode (RECOMP_FCI_NET_LAN=1, fci.ini network-lan): the card's frames travel as plain UDP
+ * broadcast on the players' own L2 segment (the subnet broadcast of each up IPv4 adapter), so
+ * nothing leaves it: no hub, no list, no worker. The learned MAC table is s_peers (32 entries,
+ * twice the game's 16-player cap, the entry shape already mac + endpoint). */
+#define LAN_PORT_DEFAULT 47920 /* 3074 is taken by Windows' own Xbox services */
+#define LAN_REFRESH_MS 30000   /* the adapter list: a 30 s timer and a send failure re-read it (Wi-Fi) */
+static int s_lan;
+static uint16_t s_lan_port;
+static uint16_t s_lan_bcports[8]; /* broadcast destination ports; default: the bind port */
+static int s_lan_nbcports;
+static struct in_addr s_lan_bc[8]; /* the subnet broadcast of each up IPv4 adapter */
+static int s_lan_nbc;
+static int s_lan_bc_logged; /* the list was logged at start; a refresh logs only a change */
+static ULONGLONG s_lan_bc_refresh; /* next adapter refresh (GetTickCount64) */
+static void lan_adapters_refresh(void);
 static char s_room[33];
 static uint8_t s_cookie[COOKIE];
 static uint8_t s_mac[6];
@@ -234,6 +251,10 @@ static void relay_socket_close(int i)
 
 ULONG fci_nic_link_state(void) { return s_sock != INVALID_SOCKET ? LINK_UP : 0; }
 
+/* 1 while a transport is up (a socket exists). The pacer reads it every frame (fci_xbr_glue.cpp), so
+ * a transport started after boot (the menu, later) engages the 30-updates lock the moment it starts. */
+int fci_nic_transport_active(void) { return s_sock != INVALID_SOCKET; }
+
 /* Down before a relaunch (fci_manual.c): the next instance re-reads RECOMP_FCI_NET_PEERS and would find
  * this one's port still bound. The process is going, so no other state needs winding back. */
 void fci_nic_shutdown(void)
@@ -245,6 +266,9 @@ void fci_nic_shutdown(void)
         closesocket(s_sock);
         s_sock = INVALID_SOCKET;
     }
+    s_lan = 0;
+    s_lan_nbc = s_lan_nbcports = 0;
+    s_lan_bc_logged = 0;
     for (i = 0; i < RELAY_MAX; i++)
         relay_socket_close(i); /* the relay rooms leave with the process */
     fci_turn_stop();           /* the relay allocation leaves with the process */
@@ -329,6 +353,50 @@ static int route_frame(const uint8_t *f, uint32_t len)
             fprintf(stderr, "[FCI] network: a frame to a card no peer has shown, dropped\n"), fflush(stderr);
         return 0;
     }
+    if (s_lan) {
+        /* LAN mode: a broadcast goes to every adapter's subnet broadcast at every broadcast port
+         * (the game's ~1/s discovery is the keepalive, so no hello); a unicast goes to the table */
+        char buf[FRAME_MAX + 8];
+        int j, failed = 0;
+        memcpy(buf, MAGIC, 4);
+        buf[4] = 'F';
+        memcpy(buf + 5, f, (size_t)len);
+        if (f[0] & 1) {
+            static ULONGLONG next_log;
+            ULONGLONG now = GetTickCount64();
+            if (s_lan_nbc == 0)
+                lan_adapters_refresh(); /* the list went empty: re-read it before giving up */
+            for (i = 0; i < s_lan_nbc; i++)
+                for (j = 0; j < s_lan_nbcports; j++) {
+                    struct sockaddr_in to;
+                    memset(&to, 0, sizeof to);
+                    to.sin_family = AF_INET;
+                    to.sin_addr = s_lan_bc[i];
+                    to.sin_port = htons(s_lan_bcports[j]);
+                    if (sendto(s_sock, buf, (int)len + 5, 0, (const struct sockaddr *)&to, sizeof to)
+                        == SOCKET_ERROR)
+                        failed = 1;
+                }
+            if (failed)
+                lan_adapters_refresh(); /* an address gone (Wi-Fi changed): re-read the list once */
+            if (now >= next_log && s_lan_nbc) {
+                next_log = now + 5000; /* about one a second: the steady state stays quiet */
+                fprintf(stderr, "[FCI] network: LAN broadcast %uB -> %s:%u (x%d adapters, %d ports)\n",
+                        len, inet_ntoa(s_lan_bc[0]), s_lan_bcports[0], s_lan_nbc, s_lan_nbcports);
+                fflush(stderr);
+            }
+            return s_lan_nbc > 0;
+        }
+        for (i = 0; i < PEERS_MAX; i++)
+            if (s_peers[i].has_mac && !memcmp(s_peers[i].mac, f, 6)) {
+                sendto(s_sock, buf, (int)len + 5, 0, (const struct sockaddr *)&s_peers[i].addr,
+                       sizeof s_peers[i].addr);
+                return 1;
+            }
+        if (!s_unrouted++) /* XNET answers only cards it heard from, so this is unexpected but harmless */
+            fprintf(stderr, "[FCI] network: a frame to a card no peer has shown, dropped\n"), fflush(stderr);
+        return 0;
+    }
     if (!s_direct) {
         send_datagram('F', f, (int)len);
         return 1;
@@ -364,6 +432,44 @@ static peer_t *peer_at(const struct sockaddr_in *a)
         if (s_peers[i].addr.sin_addr.s_addr == a->sin_addr.s_addr && s_peers[i].addr.sin_port == a->sin_port)
             return &s_peers[i];
     return NULL;
+}
+
+/* LAN mode: learn a card's endpoint from its frames, de-duplicated by MAC (a card reachable on two
+ * adapters is one entry). The learned endpoint is kept while it is alive; it moves to a new source
+ * only after 3 s of silence from the current one (an adapter change). NULL when the table is full. */
+static peer_t *lan_learn(const uint8_t *mac, const struct sockaddr_in *from)
+{
+    ULONGLONG now = GetTickCount64();
+    int i, free = -1;
+    for (i = 0; i < PEERS_MAX; i++) {
+        if (s_peers[i].has_mac && !memcmp(s_peers[i].mac, mac, 6)) {
+            if (s_peers[i].addr.sin_addr.s_addr == from->sin_addr.s_addr
+                && s_peers[i].addr.sin_port == from->sin_port)
+                s_peers[i].last_heard = now; /* the endpoint is alive: keep it */
+            else if (now - s_peers[i].last_heard >= 3000) {
+                /* quiet for 3 s (an adapter change): the card moved, the new source wins */
+                s_peers[i].addr = *from;
+                s_peers[i].last_heard = now;
+                fprintf(stderr, "[FCI] network: LAN learn %02X:%02X:%02X:%02X:%02X:%02X <- %s:%u (moved)\n",
+                        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], inet_ntoa(from->sin_addr),
+                        ntohs(from->sin_port));
+                fflush(stderr);
+            } /* a frame from another adapter while the endpoint is alive: keep it, no log */
+            return &s_peers[i];
+        }
+        if (!s_peers[i].has_mac && free < 0)
+            free = i;
+    }
+    if (free < 0)
+        return NULL;
+    s_peers[free].addr = *from;
+    memcpy(s_peers[free].mac, mac, 6);
+    s_peers[free].has_mac = 1;
+    s_peers[free].last_heard = now;
+    fprintf(stderr, "[FCI] network: LAN learn %02X:%02X:%02X:%02X:%02X:%02X <- %s:%u\n",
+            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], inet_ntoa(from->sin_addr), ntohs(from->sin_port));
+    fflush(stderr);
+    return &s_peers[free];
 }
 
 static void hello(void)
@@ -1118,6 +1224,35 @@ static void receive(void)
             }
         } else if (n < 5 || memcmp(buf, MAGIC, 4)) {
             continue;
+        } else if (s_lan) {
+            /* LAN mode: the segment's cards, each with its own card's frames. Our own broadcast comes
+             * back to us (another adapter, the test port): its source MAC is the card's own, drop it */
+            const uint8_t *src = (const uint8_t *)buf + 5 + 6;
+            static ULONGLONG next_own;
+            if (fromlen != sizeof from || buf[4] != 'F') {
+                stray(&from);
+                continue;
+            }
+            if (src[0] & 1) { /* no card sends from a group address */
+                stray(&from);
+                continue;
+            }
+            if (!memcmp(src, s_mac, 6)) {
+                ULONGLONG now = GetTickCount64();
+                if (now >= next_own) {
+                    next_own = now + 5000; /* the segment echoes our own frames: once a few seconds */
+                    fprintf(stderr,
+                            "[FCI] network: LAN dropped own broadcast (%02X:%02X:%02X:%02X:%02X:%02X)\n",
+                            src[0], src[1], src[2], src[3], src[4], src[5]);
+                    fflush(stderr);
+                }
+                continue;
+            }
+            p = lan_learn(src, &from); /* de-duplicated by MAC, the latest source wins */
+            if (!p) {
+                stray(&from);
+                continue;
+            }
         } else if (s_direct) { /* only peers reach the guest, each with its own card's frames */
             p = fromlen == sizeof from ? peer_at(&from) : NULL;
             if (!p || buf[4] != 'F') {
@@ -1370,6 +1505,10 @@ int fci_nic_tick(void)
         if (!s_direct && !s_list && now >= next_hello) {
             hello();
             next_hello = now + 2000;
+        }
+        if (s_lan && now >= s_lan_bc_refresh) {
+            lan_adapters_refresh(); /* Wi-Fi changes: the list is re-read every 30 s */
+            s_lan_bc_refresh = now + LAN_REFRESH_MS;
         }
         if (s_list) {
             list_tick(now);
@@ -1738,56 +1877,310 @@ static int connect_list(const char *url, char *err, int errlen)
     return 1;
 }
 
-/* returns 0 when the page cannot be trapped or RECOMP_FCI_NET(_PEERS|_LIST) cannot be used */
+/* one more subnet broadcast, de-duplicated (several addresses on one adapter share it); 0 when the
+ * list is full */
+static int lan_add_bc(const struct in_addr *bc)
+{
+    int i;
+    for (i = 0; i < s_lan_nbc; i++)
+        if (s_lan_bc[i].s_addr == bc->s_addr)
+            return 1;
+    if (s_lan_nbc >= 8)
+        return 0;
+    s_lan_bc[s_lan_nbc++] = *bc;
+    return 1;
+}
+
+/* 1 when the two de-duplicated broadcast sets differ (same size, same members) */
+static int lan_bc_set_changed(const struct in_addr *old, int oldn, const struct in_addr *now, int nown)
+{
+    int i, j;
+    if (oldn != nown)
+        return 1;
+    for (i = 0; i < nown; i++) {
+        for (j = 0; j < oldn; j++)
+            if (old[j].s_addr == now[i].s_addr)
+                break;
+        if (j == oldn)
+            return 1;
+    }
+    return 0;
+}
+
+/* the broadcast send list: the subnet broadcast (network | ~mask) of each up IPv4 adapter, skipping
+ * loopback, down adapters (0.0.0.0/0) and 169.254/16 link-local (unless it is the only one). Called at
+ * start, on a 30 s timer and on a send failure (Wi-Fi changes). The list is logged at start; a refresh
+ * logs only when the set of broadcast addresses changed. Uses the classic GetAdaptersInfo (the Vista
+ * GetAdaptersAddresses is not in the older mingw headers the build is checked against). */
+static void lan_adapters_refresh(void)
+{
+    IP_ADAPTER_INFO *a = NULL;
+    ULONG len = sizeof *a;
+    struct in_addr oldbc[8];
+    int oldn, ll = 0, got = 0;
+    struct in_addr llbc = {0};
+    int first = !s_lan_bc_logged;
+
+    memcpy(oldbc, s_lan_bc, sizeof oldbc);
+    oldn = s_lan_nbc;
+    s_lan_nbc = 0; /* recompute the list from scratch */
+
+    if (GetAdaptersInfo(NULL, &len) != ERROR_BUFFER_OVERFLOW) {
+        fprintf(stderr, "[FCI] network: LAN adapter list failed (WSA %d); no broadcast addresses\n",
+                WSAGetLastError());
+        fflush(stderr);
+    } else {
+        a = (IP_ADAPTER_INFO *)malloc(len);
+        if (!a || GetAdaptersInfo(a, &len) != NO_ERROR) {
+            fprintf(stderr, "[FCI] network: LAN adapter list failed (WSA %d); no broadcast addresses\n",
+                    WSAGetLastError());
+            fflush(stderr);
+        } else {
+            got = 1;
+            for (; a; a = a->Next) {
+                struct in_addr host = {0}, mask = {0}, bcn;
+                uint32_t h, m;
+                PIP_ADDR_STRING ip = a->CurrentIpAddress ? a->CurrentIpAddress : &a->IpAddressList;
+                if (a->Type == MIB_IF_TYPE_LOOPBACK || !ip || !ip->IpAddress.String[0])
+                    continue;
+                if (inet_pton(AF_INET, ip->IpAddress.String, &host) != 1)
+                    continue;
+                if (ip->IpMask.String[0])
+                    inet_pton(AF_INET, ip->IpMask.String, &mask);
+                h = ntohl(host.s_addr);
+                m = ntohl(mask.s_addr);
+                if (!h || !m)
+                    continue; /* a down adapter reports 0.0.0.0/0: no broadcast to send to */
+                bcn.s_addr = htonl((h & m) | ~m);
+                if ((h & 0xFFFF0000u) == 0xA9FE0000u) { /* 169.254/16: only the last one counts */
+                    if (!ll) {
+                        ll = 1;
+                        llbc = bcn;
+                    }
+                    continue;
+                }
+                lan_add_bc(&bcn);
+                if (first) {
+                    char hb[INET_ADDRSTRLEN], bb[INET_ADDRSTRLEN];
+                    inet_ntop(AF_INET, &host, hb, sizeof hb);
+                    inet_ntop(AF_INET, &bcn, bb, sizeof bb);
+                    fprintf(stderr, "[FCI] network: LAN adapter %s %s -> broadcast %s\n",
+                            a->AdapterName[0] ? a->AdapterName : "adapter", hb, bb);
+                    fflush(stderr);
+                }
+            }
+            if (!s_lan_nbc && ll) {
+                lan_add_bc(&llbc);
+                if (first) {
+                    char bb[INET_ADDRSTRLEN];
+                    inet_ntop(AF_INET, &llbc, bb, sizeof bb);
+                    fprintf(stderr, "[FCI] network: LAN adapter (link-local only) -> broadcast %s\n", bb);
+                    fflush(stderr);
+                }
+            }
+        }
+    }
+    free(a);
+    if (got && !first && lan_bc_set_changed(oldbc, oldn, s_lan_bc, s_lan_nbc))
+        fprintf(stderr, "[FCI] network: LAN adapters changed: %d broadcast addresses\n", s_lan_nbc),
+            fflush(stderr);
+    s_lan_bc_logged = 1;
+}
+
+/* the env path (at boot) and the menu (later) share one starter per transport; each is
+ * idempotency-guarded (a transport already up is left alone, the first wins) and logs the link up.
+ * 1 when the link is up. */
+int fci_nic_start_hub(const char *spec)
+{
+    uint8_t m[6];
+    if (s_sock != INVALID_SOCKET) {
+        fprintf(stderr, "[FCI] network: a transport is already up; the hub is not started\n");
+        fflush(stderr);
+        return 0;
+    }
+    if (!connect_hub(spec)) {
+        fprintf(stderr, "[FCI] RECOMP_FCI_NET=%s: not <host>:<port>[/<room>], or no socket (%d)\n", spec,
+                WSAGetLastError());
+        fflush(stderr);
+        return 0;
+    }
+    fci_nic_mac(m);
+    fprintf(stderr, "[FCI] network: link up through hub %s, card %02X:%02X:%02X:%02X:%02X:%02X\n", spec,
+            m[0], m[1], m[2], m[3], m[4], m[5]);
+    fflush(stderr);
+    return 1;
+}
+
+int fci_nic_start_peers(const char *spec)
+{
+    char err[128];
+    uint8_t m[6];
+    if (s_sock != INVALID_SOCKET) {
+        fprintf(stderr, "[FCI] network: a transport is already up; the peers are not started\n");
+        fflush(stderr);
+        return 0;
+    }
+    if (!connect_peers(spec, err, sizeof err)) {
+        fprintf(stderr, "[FCI] RECOMP_FCI_NET_PEERS=%s: %s\n", spec, err);
+        fflush(stderr);
+        return 0;
+    }
+    fci_nic_mac(m);
+    fprintf(stderr, "[FCI] network: link up to %d peers, card %02X:%02X:%02X:%02X:%02X:%02X\n", s_npeers,
+            m[0], m[1], m[2], m[3], m[4], m[5]);
+    fflush(stderr);
+    return 1;
+}
+
+int fci_nic_start_list(const char *url)
+{
+    char err[128];
+    uint8_t m[6];
+    if (s_sock != INVALID_SOCKET) {
+        fprintf(stderr, "[FCI] network: a transport is already up; the list is not started\n");
+        fflush(stderr);
+        return 0;
+    }
+    if (!connect_list(url, err, sizeof err)) {
+        fprintf(stderr, "[FCI] RECOMP_FCI_NET_LIST=%s: %s\n", url, err);
+        fflush(stderr);
+        return 0;
+    }
+    fci_nic_mac(m);
+    fprintf(stderr, "[FCI] network: link up (host list %s), card %02X:%02X:%02X:%02X:%02X:%02X\n", url,
+            m[0], m[1], m[2], m[3], m[4], m[5]);
+    fflush(stderr);
+    fci_net_worker_start(); /* LIST mode: the worker thread does the host-list HTTP */
+    /* leave the host list on a clean exit (quit-to-dashboard / shutdown): the toolkit calls
+     * this once, on the exiting thread, just before it exits (patches/runtime/0031-exit-hook.patch) */
+    extern void (*xbox_exit_hook)(void);
+    xbox_exit_hook = fci_net_leave;
+    return 1;
+}
+
+/* LAN mode (RECOMP_FCI_NET_LAN=1, fci.ini network-lan): the card's frames are carried by plain UDP
+ * broadcast on the players' own L2 segment (the subnet broadcast of each up IPv4 adapter); no hub,
+ * no list, nothing leaves the segment. The game's ~1/s broadcast is the keepalive, so no hello.
+ * Idempotent: a second start (the menu, later) logs and leaves the first transport. 1 when up. */
+int fci_nic_start_lan(void)
+{
+    WSADATA wsa;
+    u_long nb = 1;
+    uint16_t port = LAN_PORT_DEFAULT;
+    const char *pe = getenv("RECOMP_FCI_NET_LAN_PORT"), *bp = getenv("RECOMP_FCI_NET_LAN_BCPORTS");
+    uint8_t m[6];
+    if (s_sock != INVALID_SOCKET) {
+        fprintf(stderr, "[FCI] network: a transport is already up; the LAN transport is not started\n");
+        fflush(stderr);
+        return 0;
+    }
+    if (pe && *pe) {
+        int p = atoi(pe);
+        if (p <= 0 || p > 65535) {
+            fprintf(stderr, "[FCI] RECOMP_FCI_NET_LAN_PORT=%s is not 1-65535\n", pe);
+            fflush(stderr);
+            return 0;
+        }
+        port = (uint16_t)p;
+    }
+    if (WSAStartup(MAKEWORD(2, 2), &wsa)) {
+        fprintf(stderr, "[FCI] network: LAN WSAStartup failed (%d); link down\n", WSAGetLastError());
+        fflush(stderr);
+        return 0;
+    }
+    s_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (s_sock == INVALID_SOCKET) {
+        fprintf(stderr, "[FCI] network: LAN no socket (%d); link down\n", WSAGetLastError());
+        fflush(stderr);
+        return 0;
+    }
+    {
+        int on = 1;
+        setsockopt(s_sock, SOL_SOCKET, SO_BROADCAST, (const char *)&on, sizeof on); /* a bind to any is no
+                                                                                      broadcast right */
+    }
+    {
+        struct sockaddr_in local;
+        memset(&local, 0, sizeof local);
+        local.sin_family = AF_INET;
+        local.sin_addr.s_addr = INADDR_ANY;
+        local.sin_port = htons(port);
+        if (bind(s_sock, (struct sockaddr *)&local, sizeof local)) {
+            int e = WSAGetLastError();
+            closesocket(s_sock);
+            s_sock = INVALID_SOCKET;
+            fprintf(stderr, "[FCI] network: LAN bind 0.0.0.0:%u failed (WSA %d); link down\n", port, e);
+            fflush(stderr);
+            return 0;
+        }
+    }
+    if (ioctlsocket(s_sock, FIONBIO, &nb)) {
+        int e = WSAGetLastError();
+        closesocket(s_sock);
+        s_sock = INVALID_SOCKET;
+        fprintf(stderr, "[FCI] network: LAN non-blocking mode failed (%d); link down\n", e);
+        fflush(stderr);
+        return 0;
+    }
+    /* the broadcast destination ports (RECOMP_FCI_NET_LAN_BCPORTS, the test hook): the default is the
+     * bind port; the game's browser probes the port a match was listed on, the XNET card the segment's */
+    s_lan_port = port;
+    s_lan_nbcports = 0;
+    if (bp && *bp) {
+        char list[128];
+        if (strlen(bp) < sizeof list) {
+            char *tok;
+            strcpy(list, bp);
+            for (tok = strtok(list, ","); tok; tok = strtok(NULL, ",")) {
+                int p = atoi(tok);
+                if (p <= 0 || p > 65535) {
+                    fprintf(stderr, "[FCI] RECOMP_FCI_NET_LAN_BCPORTS: %s is not 1-65535, skipped\n", tok);
+                    fflush(stderr);
+                    continue;
+                }
+                if (s_lan_nbcports < 8)
+                    s_lan_bcports[s_lan_nbcports++] = (uint16_t)p;
+            }
+        }
+    }
+    if (!s_lan_nbcports)
+        s_lan_bcports[s_lan_nbcports++] = port;
+    s_lan = 1;
+    lan_adapters_refresh();
+    s_lan_bc_refresh = GetTickCount64() + LAN_REFRESH_MS;
+    fci_nic_mac(m);
+    fprintf(stderr, "[FCI] network: LAN up, %02X:%02X:%02X:%02X:%02X:%02X, bound 0.0.0.0:%u\n", m[0], m[1],
+            m[2], m[3], m[4], m[5], port);
+    fflush(stderr);
+    return 1;
+}
+
+/* returns 0 when the page cannot be trapped or RECOMP_FCI_NET(_PEERS|_LIST|_LAN) cannot be used */
 int fci_nic_init(ptrdiff_t mem_offset)
 {
     DWORD old;
     const char *net = getenv("RECOMP_FCI_NET"), *peers = getenv("RECOMP_FCI_NET_PEERS");
-    const char *list = getenv("RECOMP_FCI_NET_LIST");
+    const char *list = getenv("RECOMP_FCI_NET_LIST"), *lan = getenv("RECOMP_FCI_NET_LAN");
     const char *trace = getenv("RECOMP_FCI_NET_TRACE");
-    uint8_t m[6];
-    int nset = (net && *net) + (peers && *peers) + (list && *list);
+    int nset = (net && *net) + (peers && *peers) + (list && *list) + (lan && *lan == '1');
     s_trace = trace && *trace == '1';
     s_mem_offset = mem_offset;
     if (nset > 1) {
-        fprintf(stderr, "[FCI] RECOMP_FCI_NET, _PEERS and _LIST: one link at a time\n");
+        fprintf(stderr, "[FCI] RECOMP_FCI_NET, _PEERS, _LIST and _LAN: one link at a time\n");
         return 0;
     }
     if (net && *net) {
-        if (!connect_hub(net)) {
-            fprintf(stderr, "[FCI] RECOMP_FCI_NET=%s: not <host>:<port>[/<room>], or no socket (%d)\n", net,
-                    WSAGetLastError());
+        if (!fci_nic_start_hub(net))
             return 0;
-        }
-        fci_nic_mac(m);
-        fprintf(stderr, "[FCI] network: link up through hub %s, card %02X:%02X:%02X:%02X:%02X:%02X\n", net,
-                m[0], m[1], m[2], m[3], m[4], m[5]);
-        fflush(stderr);
     } else if (peers && *peers) {
-        char err[128];
-        if (!connect_peers(peers, err, sizeof err)) {
-            fprintf(stderr, "[FCI] RECOMP_FCI_NET_PEERS=%s: %s\n", peers, err);
+        if (!fci_nic_start_peers(peers))
             return 0;
-        }
-        fci_nic_mac(m);
-        fprintf(stderr, "[FCI] network: link up to %d peers, card %02X:%02X:%02X:%02X:%02X:%02X\n", s_npeers,
-                m[0], m[1], m[2], m[3], m[4], m[5]);
-        fflush(stderr);
     } else if (list && *list) {
-        char err[128];
-        if (!connect_list(list, err, sizeof err)) {
-            fprintf(stderr, "[FCI] RECOMP_FCI_NET_LIST=%s: %s\n", list, err);
+        if (!fci_nic_start_list(list))
             return 0;
-        }
-        fci_nic_mac(m);
-        fprintf(stderr, "[FCI] network: link up (host list %s), card %02X:%02X:%02X:%02X:%02X:%02X\n", list,
-                m[0], m[1], m[2], m[3], m[4], m[5]);
-        fflush(stderr);
-        fci_net_worker_start(); /* LIST mode: the worker thread does the host-list HTTP */
-        /* leave the host list on a clean exit (quit-to-dashboard / shutdown): the toolkit calls
-         * this once, on the exiting thread, just before it exits (patches/runtime/0031-exit-hook.patch) */
-        extern void (*xbox_exit_hook)(void);
-        xbox_exit_hook = fci_net_leave;
+    } else if (lan && *lan == '1') {
+        if (!fci_nic_start_lan())
+            return 0;
     }
     return VirtualProtect((char *)mem_offset + NIC_BASE, NIC_SIZE, PAGE_NOACCESS, &old) != 0;
 }
