@@ -149,6 +149,7 @@ class Client:
             realm_val = ft.get1(rattrs, ft.A_REALM)
             realm = self.realm if realm_val is None else realm_val.decode()
             self.last_nonce = nonce
+            txn = os.urandom(12)  # the retry is a new transaction (RFC 8489 9.2.4)
             self.sock.sendto(self._auth_msg(mtype, txn, make_attrs(txn), nonce, realm), self.addr)
             mt, txn, rattrs = self._drain_for(txn)
         return mt, txn, rattrs
@@ -400,5 +401,26 @@ def test_channel_bind_rebind_different_addr_400(turn):
     assert mt1 == ft.T_CHANNEL_BIND_SUCCESS
     mt2, rattrs = c.channel_bind(0x4001, ("127.0.0.1", 2000))  # same number, different address
     assert mt2 == ft.T_CHANNEL_BIND_ERROR
+    assert c._errcode(rattrs) == 400
+    c.close()
+
+
+def test_retry_reusing_the_transaction_id_is_400(turn):
+    """After a 401, an authenticated retry under the same transaction id is a 400 (Cloudflare
+    does this; the relay client once reused the id, 2026-11-09). A byte-identical retransmit is fine."""
+    c = Client(turn.addr, "u", "p", REALM)
+    txn = os.urandom(12)
+    first = ft.build_msg(ft.T_ALLOCATE_REQ, txn, [(ft.A_REQUESTED_TRANSPORT, bytes([ft.TRANSPORT_UDP]))])
+    c.sock.sendto(first, turn.addr)
+    mt, _, rattrs = c._drain_for(txn)
+    assert c._errcode(rattrs) == 401
+    c.sock.sendto(first, turn.addr)  # a retransmit: answered as before
+    mt, _, rattrs = c._drain_for(txn)
+    assert c._errcode(rattrs) == 401
+    n = ft.get1(rattrs, ft.A_NONCE).decode()
+    make = lambda t: [(ft.A_REQUESTED_TRANSPORT, bytes([ft.TRANSPORT_UDP]))]
+    c.sock.sendto(c._auth_msg(ft.T_ALLOCATE_REQ, txn, make(txn), n, REALM), turn.addr)
+    mt, _, rattrs = c._drain_for(txn)
+    assert mt == ft.T_ALLOCATE_ERROR
     assert c._errcode(rattrs) == 400
     c.close()
