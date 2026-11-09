@@ -131,23 +131,29 @@ static void md5(const uint8_t *in, int inlen, uint8_t out[16])
                               5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20,
                               4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
                               6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21};
+    /* any length: the input's whole blocks, then a padded tail of one or two blocks. Cloudflare's
+     * user:realm:pass is about 150 bytes (an earlier 72-byte limit left the key unset) */
     uint8_t buf[128];
     uint32_t h[4] = {0x67452301u, 0xefcdab89u, 0x98badcfeu, 0x10325476u};
     uint64_t bits;
-    int i, n, total;
-    if (inlen > 72)
-        return;
-    memcpy(buf, in, (size_t)inlen);
-    buf[inlen] = 0x80;
-    total = inlen < 56 ? 64 : 128;
-    memset(buf + inlen + 1, 0, (size_t)(total - inlen - 1));
+    int i, n, total, whole, rem;
+    if (inlen < 0)
+        inlen = 0;
+    whole = inlen & ~63;
+    rem = inlen - whole;
+    memcpy(buf, in + whole, (size_t)rem);
+    buf[rem] = 0x80;
+    total = rem < 56 ? 64 : 128;
+    memset(buf + rem + 1, 0, (size_t)(total - rem - 1));
     bits = (uint64_t)inlen * 8u;
     memcpy(buf + total - 8, &bits, 8);
+    total += whole;
     for (n = 0; n < total; n += 64) {
+        const uint8_t *blk = n < whole ? in + n : buf + (n - whole);
         uint32_t M[16];
         uint32_t a, b, c, d;
         for (i = 0; i < 16; i++)
-            memcpy(&M[i], buf + n + i * 4, 4);
+            memcpy(&M[i], blk + i * 4, 4);
         a = h[0];
         b = h[1];
         c = h[2];
@@ -735,8 +741,10 @@ static void handle_error(const char *d, int n, uint16_t type, ULONGLONG now)
         state_failed(name);
         return;
     }
-    /* 401 (first) and 438: the same request again, authenticated, with a fresh clock */
+    /* 401 (first) and 438: the same request again, authenticated, with a fresh clock. A new
+     * transaction id: the retry is a new transaction (RFC 8489 9.2.4); Cloudflare answers 400 to a reuse */
     s_req.auth = 1;
+    new_txn(s_req.txn);
     req_send(&s_req, now, 1);
 }
 

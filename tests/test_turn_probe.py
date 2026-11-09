@@ -22,6 +22,10 @@ import pytest
 REPO = Path(__file__).resolve().parents[1]
 PROBE = os.environ.get("FCI_TURN_PROBE", "")
 FAKE_TURN = REPO / "tools" / "fake_turn.py"
+# Cloudflare-length credentials (64 hex each): user:realm:pass is about 150 bytes, past one MD5
+# block, which a short "probe"/"secret" pair never exercised (2026-11-09)
+USER = "5f" * 32
+PASS = "a3" * 32
 
 
 def free_port():
@@ -55,7 +59,7 @@ def test_relay_echo():
         pytest.skip("FCI_TURN_PROBE is not set")
     port = free_port()
     server = subprocess.Popen(
-        [sys.executable, str(FAKE_TURN), "--port", str(port), "--user", "probe", "--pass", "secret"],
+        [sys.executable, str(FAKE_TURN), "--port", str(port), "--user", USER, "--pass", PASS],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -70,7 +74,7 @@ def test_relay_echo():
         # the probe's Allocate retransmits (500 ms x 7) cover the server's startup; the
         # "ready relayed=" line is the real signal that the relay is up
         probe_p = subprocess.Popen(
-            [PROBE, f"127.0.0.1:{port}", "probe", "secret", "25", f"127.0.0.1:{hport}"],
+            [PROBE, f"127.0.0.1:{port}", USER, PASS, "25", f"127.0.0.1:{hport}"],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,

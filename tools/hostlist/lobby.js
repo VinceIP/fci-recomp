@@ -621,11 +621,15 @@ export class Lobby {
         }
       );
       if (resp.ok) data = await resp.json().catch(() => null);
-    } catch {
+      // status only, never the body: an operator needs to tell a bad key id (404) from a bad token (401/403)
+      else console.log("turn mint: Cloudflare answered " + resp.status);
+    } catch (e) {
+      console.log("turn mint: request failed (" + (e && e.name) + ")");
       data = null;
     }
     const cred = turnCredential(data && data.iceServers);
     if (!cred) {
+      if (data) console.log("turn mint: no usable TURN entry in Cloudflare's answer");
       this.note("norelay", ip, gid);
       return json({ error: "no relay" }, 503);
     }

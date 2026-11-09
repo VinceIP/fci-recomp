@@ -317,6 +317,7 @@ class TurnServer:
         self.by_relay_port = {}  # relay port -> Allocation
         self.relay_socks = {}  # relay port -> socket
         self.nonces = {}  # nonce -> expiry (monotonic); reusable until it expires
+        self.challenged = {}  # transaction id -> the request bytes answered with 401/438
         self._stop = False
 
     def note(self, msg):
@@ -630,6 +631,13 @@ class TurnServer:
             self.note(f"dropped unparseable packet from {src[0]}:{src[1]} ({len(data)} bytes)")
             return
         mtype_val, txn, attrs = parsed
+        # a request that changed after a 401/438 must carry a new transaction id (RFC 8489 9.2.4);
+        # Cloudflare answers 400 to a reuse (seen 2026-11-09). A byte-identical retransmit is fine.
+        if txn in self.challenged and self.challenged[txn] != data:
+            self.note(f"400: transaction id reused after a challenge, from {src[0]}:{src[1]}")
+            err = mtype_val | 0x0110
+            self.sock.sendto(self.error(txn, err, 400, "Bad Request"), src)
+            return
         if mtype_val == T_BINDING_REQ:
             out = self.handle_binding(txn, src)
         elif mtype_val == T_ALLOCATE_REQ:
@@ -649,6 +657,13 @@ class TurnServer:
             self.note(f"dropped unknown message type 0x{mtype_val:04x} from {src[0]}:{src[1]}")
             return
         if out is not None:
+            reply = parse_msg(out)
+            if reply and get1(reply[2], A_ERROR_CODE) is not None:
+                code = get1(reply[2], A_ERROR_CODE)
+                if (code[2] & 7) * 100 + code[3] in (401, 438):
+                    if len(self.challenged) > 4096:  # a test server: bounded, not clever
+                        self.challenged.clear()
+                    self.challenged[txn] = data
             self.sock.sendto(out, src)
 
 
