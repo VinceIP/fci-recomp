@@ -909,6 +909,37 @@ test("local: forwarded in the connect reply when both sides share the caller IP"
   assert.equal(cBody.local, undefined); // no local: different NAT
 });
 
+test("local: forwarded when the caller IPs differ (IPv6) but the STUN endpoint IPs match", async () => {
+  const lobby = mk();
+  const hToken = "1".repeat(64);
+  const pub = "93.184.100.10";
+  await r(lobby, req("/v1/register", {
+    method: "POST", ip: "2600:1700::1", // the host reaches the Worker over IPv6
+    body: { proto: 1, title: "evolution", version: "1", mac: "02:46:43:11:22:44",
+            endpoint: pub + ":40000", token: hToken, local: "192.168.1.144:60827" },
+  }));
+  const hid = sha16(hToken);
+  // the guest reaches it from another address (IPv4), but its STUN endpoint has the same public IP
+  let [cStatus, cBody] = await r(lobby, req("/v1/connect", {
+    method: "POST", ip: "69.235.55.220",
+    body: { id: hid, endpoint: pub + ":42455", nonce: "2".repeat(32),
+            mac: "02:46:43:aa:bb:dd", token: "3".repeat(64), local: "192.168.1.146:42455" },
+  }));
+  assert.equal(cStatus, 200);
+  assert.equal(cBody.local, "192.168.1.144:60827");
+  // the host's poll carries the guest's LAN address too
+  const [, pBody] = await r(lobby, req(`/v1/connects?id=${hid}&token=${hToken}&wait=1`, { ip: "2600:1700::1" }));
+  assert.equal(pBody.connects[0].local, "192.168.1.146:42455");
+  // a guest on another network (different caller IP and endpoint IP) gets no local
+  [cStatus, cBody] = await r(lobby, req("/v1/connect", {
+    method: "POST", ip: "1.2.3.5",
+    body: { id: hid, endpoint: "1.2.3.5:41000", nonce: "4".repeat(32),
+            mac: "02:46:43:aa:bb:ee", token: "5".repeat(64) },
+  }));
+  assert.equal(cStatus, 200);
+  assert.equal(cBody.local, undefined);
+});
+
 test("local: the guest's local is in the host's poll when IPs match; absent when they differ", async () => {
   const lobby = mk({ TTL_MS: 5000 });
   const hToken = "c".repeat(64);

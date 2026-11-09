@@ -125,9 +125,22 @@ function endpointOk(endpoint) {
   return port > 0 && port <= 65535 && publicIp(a, b, c);
 }
 
+// Same NAT: the same caller IP, or the same IP in the STUN endpoints both sides reported. The
+// endpoint test is needed because with IPv6 each device has its own caller IP (seen 2026-11-09).
+function epHost(endpoint) {
+  const s = String(endpoint || "");
+  const i = s.lastIndexOf(":");
+  return i > 0 ? s.slice(0, i) : "";
+}
+function sameNat(ipA, ipB, epA, epB) {
+  if (ipA && ipA === ipB) return true;
+  const a = epHost(epA);
+  return a !== "" && a === epHost(epB);
+}
+
 // A private IPv4 (10/8, 172.16/12, 192.168/16) with a valid port.
 // The card's LAN address: only forwarded when both sides are behind the same NAT
-// (the caller IP the Worker sees matches on both sides). 100.64/10 (CGNAT) is excluded:
+// (sameNat). 100.64/10 (CGNAT) is excluded:
 // two phones behind the same carrier share no network.
 function localOk(endpoint) {
   const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3}):(\d{1,5})$/.exec(String(endpoint));
@@ -293,9 +306,10 @@ export class Lobby {
     // only when the two match (same NAT).
     const host = this.hosts.get(id);
     const hostIp = host ? host.ip : "";
+    const hostEp = host ? host.endpoint : "";
     const q = (this.connects.get(id) || []).map(({ endpoint, nonce, mac, relay, local, ip: gip }) => {
       const e = relay ? { endpoint, nonce, mac, relay: true } : { endpoint, nonce, mac };
-      if (local && gip === hostIp) e.local = local;
+      if (local && host && sameNat(gip, hostIp, endpoint, hostEp)) e.local = local;
       return e;
     });
     this.connects.delete(id);
@@ -548,7 +562,7 @@ export class Lobby {
     // The host's LAN address is forwarded only when the guest and the host are behind the same
     // NAT (the Worker sees the same caller IP on both sides).
     const reply = { endpoint: host.endpoint, mac: host.mac };
-    if (host.local && host.ip === ip) reply.local = host.local;
+    if (host.local && sameNat(host.ip, ip, host.endpoint, msg.endpoint)) reply.local = host.local;
     return json(reply);
   }
 

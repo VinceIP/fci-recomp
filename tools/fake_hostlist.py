@@ -68,17 +68,25 @@ def local_ok(endpoint):
     return a == 10 or (a == 172 and 16 <= b <= 31) or (a == 192 and b == 168)
 
 
-def _entries(q, host_ip=""):
+def same_nat(ip_a, ip_b, ep_a, ep_b):
+    """Same NAT (lobby.js sameNat): the same caller IP, or the same IP in both STUN endpoints.
+    With IPv6 each device has its own caller IP (seen 2026-11-09)."""
+    if ip_a and ip_a == ip_b:
+        return True
+    a = str(ep_a or "").rpartition(":")[0]
+    return a != "" and a == str(ep_b or "").rpartition(":")[0]
+
+
+def _entries(q, host_ip="", host_ep=""):
     # The host sees {endpoint, nonce, mac} per connect (plus relay: true for a relayed
     # address, and local: the guest's LAN address when both sides are behind the same NAT);
-    # the guest's id is the object's business. The local is forwarded only when the
-    # guest's caller IP matches the host's caller IP (same NAT).
+    # the guest's id is the object's business. The local is forwarded only when same_nat holds.
     out = []
     for c in q:
         e = {"endpoint": c["endpoint"], "nonce": c["nonce"], "mac": c["mac"]}
         if c.get("relay"):
             e["relay"] = True
-        if c.get("local") and c.get("ip") == host_ip:
+        if c.get("local") and same_nat(c.get("ip"), host_ip, c["endpoint"], host_ep):
             e["local"] = c["local"]
         out.append(e)
     return out
@@ -254,7 +262,7 @@ class Lobby:
             q = self.connects.get(id_)
             if q:
                 del self.connects[id_]
-                return 200, {"connects": _entries(q, h["ip"])}
+                return 200, {"connects": _entries(q, h["ip"], h["endpoint"])}
             event = threading.Event()
             waiter = {"event": event, "result": None}
             old = self.waiters.pop(id_, None)
@@ -355,12 +363,12 @@ class Lobby:
             if w:
                 self.waiters.pop(id_, None)
                 del self.connects[id_]
-                w["result"] = (200, {"connects": _entries(q, h["ip"])})
+                w["result"] = (200, {"connects": _entries(q, h["ip"], h["endpoint"])})
                 w["event"].set()
         # The host's endpoint and MAC are the reply; the host's LAN address is forwarded only
-        # when the guest and the host are behind the same NAT (same caller IP).
+        # when the guest and the host are behind the same NAT (same_nat).
         reply = {"endpoint": h["endpoint"], "mac": h["mac"]}
-        if h.get("local") and h["ip"] == ip:
+        if h.get("local") and same_nat(h["ip"], ip, h["endpoint"], endpoint):
             reply["local"] = h["local"]
         return 200, reply
 
