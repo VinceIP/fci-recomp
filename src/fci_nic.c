@@ -112,6 +112,8 @@ static int s_lan_nbc;
 static int s_lan_bc_logged; /* the list was logged at start; a refresh logs only a change */
 static ULONGLONG s_lan_bc_refresh; /* next adapter refresh (GetTickCount64) */
 static void lan_adapters_refresh(void);
+int fci_nic_start_list(const char *url); /* defined below; the lazy starter (above) calls it */
+int fci_nic_start_lan(void);             /* defined below; the menu transport entry (above) calls it */
 static char s_room[33];
 static uint8_t s_cookie[COOKIE];
 static uint8_t s_mac[6];
@@ -135,6 +137,13 @@ static uint32_t s_stun_txn;           /* STUN transaction ID counter */
 static struct sockaddr_in s_stun_srv; /* the STUN server address (resolved at init) */
 static int s_stun_srv_valid;          /* 1 when the STUN server is resolved */
 static char s_list_url[512];          /* the Worker base URL (for the worker thread, round B) */
+/* menu mode (RECOMP_FCI_NET_MENU=1, fci.ini network-menu): the card reports link up at boot without
+ * a transport, so the online items in the pre-game menu are enabled; the player's pick starts the
+ * transport (fci_nic_start_menu_transport). s_up: link up without a socket (the menu, before a pick).
+ * s_menu_list_url: the LIST URL for the menu path (RECOMP_FCI_NET_LIST, overridable by fci.ini). */
+static int s_up;
+static int s_menu;
+static char s_menu_list_url[512];
 static char s_relay_spec[256];        /* RECOMP_FCI_NET_RELAY, if set */
 /* the relay fallback (RECOMP_FCI_NET_RELAY): the hub keys a member by address, so one socket per
  * relay room, opened on the first relay peer and closed when its peer expires */
@@ -249,11 +258,52 @@ static void relay_socket_close(int i)
     }
 }
 
-ULONG fci_nic_link_state(void) { return s_sock != INVALID_SOCKET ? LINK_UP : 0; }
+/* LINK_UP while a transport is up (a socket) or while the card is up in menu mode (s_up, before a
+ * pick): the online items in the pre-game menu are enabled on either. */
+ULONG fci_nic_link_state(void) { return (s_sock != INVALID_SOCKET || s_up) ? LINK_UP : 0; }
 
 /* 1 while a transport is up (a socket exists). The pacer reads it every frame (fci_xbr_glue.cpp), so
- * a transport started after boot (the menu, later) engages the 30-updates lock the moment it starts. */
+ * a transport started after boot (the menu, later) engages the 30-updates lock the moment it starts.
+ * Menu mode (s_up) does not engage the lock: no transport, no game traffic. */
 int fci_nic_transport_active(void) { return s_sock != INVALID_SOCKET; }
+
+/* 1 while menu mode is on (RECOMP_FCI_NET_MENU=1): the gate (fci_lan_menu.c) redirects the online
+ * picks and relabels the menu only in this mode. */
+int fci_nic_menu_mode(void) { return s_menu; }
+
+/* The lazy LIST starter: both the boot path (RECOMP_FCI_NET_LIST) and the menu path (the gate) call
+ * it. Idempotent: a second start logs and leaves the first transport. With no URL: the Q4 log line,
+ * no socket (s_up stays 1, the browser is empty). 1 when a socket is up. */
+int fci_nic_start_list_lazy(const char *url)
+{
+    if (s_sock != INVALID_SOCKET) {
+        fprintf(stderr, "[FCI] network: a transport is already up; the list is not started\n");
+        fflush(stderr);
+        return 0;
+    }
+    if (!url || !*url) {
+        fprintf(stderr, "[FCI] network: INTERNET: no list URL set (set network-list); no transport started\n");
+        fflush(stderr);
+        return 0;
+    }
+    return fci_nic_start_list(url);
+}
+
+/* The menu path's transport entry (the gate, fci_lan_menu.c): mode 0 = LAN (SYSTEM LINK),
+ * mode 1 = LIST (INTERNET). Idempotent: a second pick logs and leaves the first transport
+ * (\"first choice wins until restart\"). 1 when a transport is up after this call. */
+int fci_nic_start_menu_transport(int mode)
+{
+    const char *item = mode == 0 ? "SYSTEM LINK" : "INTERNET";
+    if (s_sock != INVALID_SOCKET) {
+        fprintf(stderr, "[FCI] network: transport already up; ignoring %s\n", item);
+        fflush(stderr);
+        return 1;
+    }
+    if (mode == 0)
+        return fci_nic_start_lan() ? 1 : 0;
+    return fci_nic_start_list_lazy(s_menu_list_url) ? 1 : 0;
+}
 
 /* Down before a relaunch (fci_manual.c): the next instance re-reads RECOMP_FCI_NET_PEERS and would find
  * this one's port still bound. The process is going, so no other state needs winding back. */
@@ -269,6 +319,8 @@ void fci_nic_shutdown(void)
     s_lan = 0;
     s_lan_nbc = s_lan_nbcports = 0;
     s_lan_bc_logged = 0;
+    s_up = 0;
+    s_menu = 0;
     for (i = 0; i < RELAY_MAX; i++)
         relay_socket_close(i); /* the relay rooms leave with the process */
     fci_turn_stop();           /* the relay allocation leaves with the process */
@@ -2161,10 +2213,13 @@ int fci_nic_init(ptrdiff_t mem_offset)
     DWORD old;
     const char *net = getenv("RECOMP_FCI_NET"), *peers = getenv("RECOMP_FCI_NET_PEERS");
     const char *list = getenv("RECOMP_FCI_NET_LIST"), *lan = getenv("RECOMP_FCI_NET_LAN");
-    const char *trace = getenv("RECOMP_FCI_NET_TRACE");
-    int nset = (net && *net) + (peers && *peers) + (list && *list) + (lan && *lan == '1');
+    const char *menu = getenv("RECOMP_FCI_NET_MENU"), *trace = getenv("RECOMP_FCI_NET_TRACE");
+    int nset = (net && *net) + (peers && *peers) + (list && *list && !(menu && *menu == '1')) + (lan && *lan == '1');
     s_trace = trace && *trace == '1';
     s_mem_offset = mem_offset;
+    s_menu = menu && *menu == '1';
+    if (list && *list && strlen(list) < sizeof s_menu_list_url)
+        strcpy(s_menu_list_url, list); /* the menu path's LIST URL (RECOMP_FCI_NET_LIST, overridable) */
     if (nset > 1) {
         fprintf(stderr, "[FCI] RECOMP_FCI_NET, _PEERS, _LIST and _LAN: one link at a time\n");
         return 0;
@@ -2175,12 +2230,18 @@ int fci_nic_init(ptrdiff_t mem_offset)
     } else if (peers && *peers) {
         if (!fci_nic_start_peers(peers))
             return 0;
-    } else if (list && *list) {
-        if (!fci_nic_start_list(list))
+    } else if (list && *list && !s_menu) { /* in menu mode the URL waits for the INTERNET pick */
+        if (!fci_nic_start_list_lazy(list))
             return 0;
     } else if (lan && *lan == '1') {
         if (!fci_nic_start_lan())
             return 0;
+    } else if (s_menu) {
+        /* menu mode, no transport at boot: the card is up (the online menu items are enabled) and the
+         * player's pick starts the transport. The 30-updates lock stays off until a transport is up. */
+        s_up = 1;
+        fprintf(stderr, "[FCI] network: menu mode: link up (no transport; the player's pick starts it)\n");
+        fflush(stderr);
     }
     return VirtualProtect((char *)mem_offset + NIC_BASE, NIC_SIZE, PAGE_NOACCESS, &old) != 0;
 }

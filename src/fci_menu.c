@@ -33,8 +33,8 @@ void fci_menu_log_init(void)
     menu_quit_enabled = (quit && quit[0] == '1');
 }
 
-/* guest address is safely readable: inside the guest window and mapped */
-static int guest_ok(uint32_t va, uint32_t len)
+/* guest address is safely readable: inside the guest window and mapped. Shared with fci_lan_menu.c. */
+int guest_ok(uint32_t va, uint32_t len)
 {
     MEMORY_BASIC_INFORMATION mbi;
     /* game pointers include 0x8xxxxxxx (contiguous memory); only the null page and wrap are out */
@@ -43,7 +43,8 @@ static int guest_ok(uint32_t va, uint32_t len)
     return VirtualQuery((void *)XBOX_PTR(va), &mbi, sizeof mbi) != 0 && mbi.State == MEM_COMMIT;
 }
 
-static void menu_log_line(const char *handler, const char *ev, const char *extra)
+/* JSON-lines trace line. Shared with fci_lan_menu.c. */
+void menu_log_line(const char *handler, const char *ev, const char *extra)
 {
     if (!menu_log)
         return;
@@ -55,9 +56,9 @@ static void menu_log_line(const char *handler, const char *ev, const char *extra
     ReleaseSRWLockExclusive(&menu_lock);
 }
 
-/* Read the action hash from the event object (first stack param, +4).
- * Returns 0 on failure. */
-static int read_action_hash(uint32_t *out_hash)
+/* Read the action hash from the event object (first stack param, +4). Returns 0 on failure.
+ * Shared with fci_lan_menu.c. */
+int read_action_hash(uint32_t *out_hash)
 {
     uint32_t ev_obj = MEM32(g_esp + 4);
     if (!guest_ok(ev_obj, 8))
