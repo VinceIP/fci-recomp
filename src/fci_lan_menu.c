@@ -141,6 +141,25 @@ int fci_gate_0026A628(void)
                                  MEM16(va + 18), MEM16(va + 20));
                         menu_log_line("evo-mp", "scan", extra);
                         hits++;
+                        { /* who points at it (the string's owner), in RAM and the window */
+                            static const uint32_t rng[2][2] = {{0x00010000u, 0x04000000u}, {0x80000000u, 0x84000000u}};
+                            uint32_t r, p2;
+                            int ph = 0;
+                            for (r = 0; r < 2; r++)
+                                for (p2 = rng[r][0]; p2 < rng[r][1] && ph < 6; p2 += 4) {
+                                    if ((p2 & 0xFFF) == 0 && !guest_ok(p2, 0x1000)) {
+                                        p2 += 0x1000 - 4;
+                                        continue;
+                                    }
+                                    if (MEM32(p2) == va || MEM32(p2) == va - 4 || MEM32(p2) == va - 8) {
+                                        char e2[200];
+                                        snprintf(e2, sizeof e2, ", \"str\": \"%08X\", \"ptr_at\": \"%08X\", \"val\": \"%08X\", \"ctx\": \"%08X %08X %08X %08X\"",
+                                                 va, p2, MEM32(p2), MEM32(p2 - 8), MEM32(p2 - 4), MEM32(p2 + 4), MEM32(p2 + 8));
+                                        menu_log_line("evo-mp", "owner", e2);
+                                        ph++;
+                                    }
+                                }
+                        }
                     }
                 }
             }
