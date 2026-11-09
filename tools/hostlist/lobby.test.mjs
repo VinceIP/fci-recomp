@@ -119,7 +119,7 @@ async function r(lobby, request) {
   return [response.status, await response.json().catch(() => null)];
 }
 
-test("endpoints: the four v1 routes and nothing else", async () => {
+test("endpoints: the five v1 routes and nothing else", async () => {
   const lobby = mk();
   let [status] = await r(lobby, req("/"));
   assert.equal(status, 404);
@@ -128,6 +128,8 @@ test("endpoints: the four v1 routes and nothing else", async () => {
   [status] = await r(lobby, req("/v1/nope"));
   assert.equal(status, 404);
   [status] = await r(lobby, req("/v1/register")); // the wrong method
+  assert.equal(status, 404);
+  [status] = await r(lobby, req("/v1/unregister")); // the wrong method (GET)
   assert.equal(status, 404);
 });
 
@@ -750,4 +752,91 @@ test("relay connects are capped at 3 per (gid, nonce)", async () => {
   } finally {
     restore();
   }
+});
+
+test("unregister: a leaving host removes its listing; idempotent; a bad token is 403", async () => {
+  const lobby = mk({ TTL_MS: 5000 });
+  const hToken = "c".repeat(64);
+  let [status, body] = await r(lobby, reg({ token: hToken }));
+  assert.equal(status, 200);
+  const hid = body.id;
+
+  // the host is listed before the unregister
+  [status, body] = await r(lobby, req("/v1/hosts?title=instincts&version=1"));
+  assert.deepEqual(body.hosts, [{ id: hid }]);
+
+  // unregister with the host's own token: 200, the listing is gone
+  [status, body] = await r(lobby, req("/v1/unregister", { method: "POST", body: { id: hid, token: hToken } }));
+  assert.equal(status, 200);
+  assert.deepEqual(body, { ok: true });
+  [status, body] = await r(lobby, req("/v1/hosts?title=instincts&version=1"));
+  assert.deepEqual(body.hosts, []);
+
+  // a second unregister is a no-op (idempotent): 200
+  [status, body] = await r(lobby, req("/v1/unregister", { method: "POST", body: { id: hid, token: hToken } }));
+  assert.equal(status, 200);
+  assert.deepEqual(body, { ok: true });
+
+  // a token that does not derive to the id is 403 (not 404: a wrong token is not "already gone")
+  [status, body] = await r(lobby, req("/v1/unregister", { method: "POST", body: { id: hid, token: "d".repeat(64) } }));
+  assert.equal(status, 403);
+  assert.equal(body.error, "bad token");
+
+  // a malformed token is 403
+  [status, body] = await r(lobby, req("/v1/unregister", { method: "POST", body: { id: hid, token: "xyz" } }));
+  assert.equal(status, 403);
+  assert.equal(body.error, "bad token");
+
+  // an id that was never registered (a valid token that derives to it) is a 200: idempotent
+  const otherToken = "f".repeat(64);
+  [status, body] = await r(lobby, req("/v1/unregister", { method: "POST", body: { id: sha16(otherToken), token: otherToken } }));
+  assert.equal(status, 200);
+  assert.deepEqual(body, { ok: true });
+});
+
+test("unregister releases a held long-poll with an empty poll", async () => {
+  const lobby = mk({ TTL_MS: 5000 });
+  const hToken = "c".repeat(64);
+  let [, regBody] = await r(lobby, reg({ token: hToken }));
+  const hid = regBody.id;
+
+  // the host's long-poll is held (no connect is queued, so it has nothing to deliver)
+  const pollPromise = r(lobby, req(`/v1/connects?id=${hid}&token=${hToken}&wait=10`));
+  await new Promise((res) => setTimeout(res, 50)); // the poll is now held
+
+  // the host leaves: the held poll is released with an empty, successful poll
+  let [status] = await r(lobby, req("/v1/unregister", { method: "POST", body: { id: hid, token: hToken } }));
+  assert.equal(status, 200);
+  const [pStatus, pBody] = await pollPromise;
+  assert.equal(pStatus, 200);
+  assert.deepEqual(pBody, { connects: [] });
+
+  // the listing is gone
+  let [lStatus, lBody] = await r(lobby, req("/v1/hosts?title=instincts&version=1"));
+  assert.equal(lStatus, 200);
+  assert.deepEqual(lBody.hosts, []);
+});
+
+test("unregister clears the host's queued connects", async () => {
+  const lobby = mk({ TTL_MS: 5000 });
+  const hToken = "c".repeat(64);
+  let [, regBody] = await r(lobby, reg({ token: hToken }));
+  const hid = regBody.id;
+
+  // a guest connect is queued
+  let [status] = await r(lobby, conn(hid, "93.184.100.9", "d".repeat(64)));
+  assert.equal(status, 200);
+
+  // the host leaves: the queued connect is removed with the listing
+  [status] = await r(lobby, req("/v1/unregister", { method: "POST", body: { id: hid, token: hToken } }));
+  assert.equal(status, 200);
+
+  // the listing is gone, and a re-register starts with an empty queue (the connect was not kept)
+  let [, lBody] = await r(lobby, req("/v1/hosts?title=instincts&version=1"));
+  assert.deepEqual(lBody.hosts, []);
+  let [, rBody] = await r(lobby, reg({ token: hToken }));
+  assert.equal(rBody.id, hid);
+  let [pStatus, pBody] = await r(lobby, req(`/v1/connects?id=${hid}&token=${hToken}&wait=1`));
+  assert.equal(pStatus, 200);
+  assert.deepEqual(pBody.connects, []); // the old connect was cleared by the unregister
 });

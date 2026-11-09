@@ -18,7 +18,8 @@
 #include "fci_net_worker.h"
 
 /* the NIC's worker API (fci_nic.c): called under s_lock */
-extern int fci_nic_list_add_peer(const char *endpoint, const uint8_t mac[6], const uint8_t nonce[16], int guest);
+extern int fci_nic_list_add_peer(const char *endpoint, const uint8_t mac[6], const uint8_t nonce[16],
+                                 int guest);
 extern int fci_nic_list_endpoint(char *buf, int buflen);
 extern void fci_nic_mac(uint8_t *mac);
 extern void fci_nic_mac_str(char *buf, int buflen);
@@ -206,28 +207,19 @@ static void to_wide(const char *src, wchar_t *dst, int dstlen)
         dst[0] = 0;
 }
 
-/* do a request; returns the response body in buf (up to buflen), 0 on success, -1 on error.
- * method: "GET" or "POST"; path: the URL path+query; body: POST body or NULL.
- * Returns the HTTP status code in *status. */
-static int http_request(const char *base_url, const char *method, const char *path, const char *body,
-                        char *buf, int buflen, int *status)
+/* parse a base URL ("http://host[:port]" or "https://host[:port]") into host, port and secure.
+ * 0 on success, -1 on a bad scheme; host gets up to hostlen-1 chars. */
+static int parse_base(const char *base_url, char *host, int hostlen, int *port, int *secure)
 {
-    /* parse base_url into scheme, host, port */
-    char host[256];
-    int port = 80;
-    int secure = 0;
     const char *p = base_url;
-    wchar_t wmethod[16], wpath[512], whost[256], wheaders[64];
-    HINTERNET hconnect = NULL;
-    HINTERNET hrequest = NULL;
-    DWORD bytes = 0, total = 0;
-
     if (strncmp(p, "https://", 8) == 0) {
         p += 8;
-        port = 443;
-        secure = 1;
+        *port = 443;
+        *secure = 1;
     } else if (strncmp(p, "http://", 7) == 0) {
         p += 7;
+        *port = 80;
+        *secure = 0;
     } else {
         return -1;
     }
@@ -235,25 +227,38 @@ static int http_request(const char *base_url, const char *method, const char *pa
     {
         const char *slash = strchr(p, '/');
         size_t hlen = slash ? (size_t)(slash - p) : strlen(p);
-        if (hlen >= sizeof host)
-            hlen = sizeof host - 1;
+        if (hlen >= (size_t)hostlen)
+            hlen = (size_t)hostlen - 1;
         memcpy(host, p, hlen);
         host[hlen] = 0;
         {
             char *colon = strrchr(host, ':');
             if (colon && strchr(colon + 1, '/') == NULL) {
                 *colon = 0;
-                port = atoi(colon + 1);
+                *port = atoi(colon + 1);
             }
         }
     }
+    return 0;
+}
+
+/* do a request on an open session; returns the response body in buf (up to buflen), 0 on success,
+ * -1 on error. method: "GET" or "POST"; path: the URL path+query; body: POST body or NULL.
+ * Returns the HTTP status code in *status. */
+static int http_request_on(HINTERNET session, const char *host, int port, int secure, const char *method,
+                           const char *path, const char *body, char *buf, int buflen, int *status)
+{
+    wchar_t wmethod[16], wpath[512], whost[256], wheaders[64];
+    HINTERNET hconnect = NULL;
+    HINTERNET hrequest = NULL;
+    DWORD bytes = 0, total = 0;
 
     to_wide(method, wmethod, 16);
     to_wide(path, wpath, 512);
     to_wide(host, whost, 256);
     wcscpy(wheaders, L"Content-Type: application/json\r\n"); /* the Worker answers 415 to anything else */
 
-    hconnect = WinHttpConnect(s_session, whost, (UINT)port, 0);
+    hconnect = WinHttpConnect(session, whost, (UINT)port, 0);
     if (!hconnect)
         return -1;
     hrequest = WinHttpOpenRequest(hconnect, wmethod, wpath, NULL, WINHTTP_NO_REFERER,
@@ -304,6 +309,42 @@ static int http_request(const char *base_url, const char *method, const char *pa
     WinHttpCloseHandle(hrequest);
     WinHttpCloseHandle(hconnect);
     return 0;
+}
+
+/* do a request on the worker's session; see http_request_on. */
+static int http_request(const char *base_url, const char *method, const char *path, const char *body,
+                        char *buf, int buflen, int *status)
+{
+    char host[256];
+    int port = 80, secure = 0;
+    if (parse_base(base_url, host, (int)sizeof host, &port, &secure) != 0)
+        return -1;
+    return http_request_on(s_session, host, port, secure, method, path, body, buf, buflen, status);
+}
+
+/* do a request on a fresh session bounded to about budget_ms in total: WinHttpSetTimeouts splits the
+ * budget across resolve, connect, send and receive, so the call waits at most about budget_ms. The
+ * connect phase carries the TLS handshake, so it gets the largest share. The session is closed before
+ * returning. Used on an exit path, where leaving the host list must not delay the exit (fci_net_leave). */
+static int http_request_timed(const char *base_url, const char *method, const char *path, const char *body,
+                              char *buf, int buflen, int *status, DWORD budget_ms)
+{
+    char host[256];
+    int port = 80, secure = 0;
+    HINTERNET session;
+    int r;
+
+    if (parse_base(base_url, host, (int)sizeof host, &port, &secure) != 0)
+        return -1;
+    session = WinHttpOpen(L"fci-recomp/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME,
+                          WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!session)
+        return -1;
+    /* resolve, connect (the TLS handshake), send, receive: they sum to the budget */
+    WinHttpSetTimeouts(session, budget_ms / 5, 2 * budget_ms / 5, budget_ms / 5, budget_ms / 5);
+    r = http_request_on(session, host, port, secure, method, path, body, buf, buflen, status);
+    WinHttpCloseHandle(session);
+    return r;
 }
 
 /* --- nonce generation --- */
@@ -753,6 +794,31 @@ static void host_poll(void)
     /* 204: no connects, the poll timed out; loop */
 }
 
+/* Leave the host list on any clean exit: without it the listing stays joinable until its 90-second
+ * TTL (lobby.js) and the next instance connects to a dead host. Idempotent and safe from any thread
+ * (the window thread on WM_CLOSE, the game thread on a quit-to-dashboard, the worker on stop): the
+ * leave happens once -- the InterlockedExchange hands it to a single caller -- and is bounded to
+ * about 1.5 s (http_request_timed), so no exit is delayed by more than that. It takes no NIC lock:
+ * fci_nic_list_url is lock-free, and the id and token are written once at registration and never
+ * changed. research/docs/online-architecture.md, "Leaving the list". */
+void fci_net_leave(void)
+{
+    const char *base;
+    char body[256], resp[128];
+    int status;
+
+    if (InterlockedExchange((volatile LONG *)&s_registered, 0) == 0)
+        return; /* not registered, or already left: nothing to do */
+    base = fci_nic_list_url();
+    if (!base)
+        return;
+    snprintf(body, sizeof body, "{\"id\":\"%s\",\"token\":\"%s\"}", s_host_id, s_identity);
+    if (http_request_timed(base, "POST", "/v1/unregister", body, resp, sizeof resp, &status, 1500) != 0)
+        log_line("unregister: no response (1.5 s budget)");
+    else
+        log_line("unregistered (status %d)", status);
+}
+
 /* --- thread function --- */
 
 static DWORD WINAPI worker_main(LPVOID arg)
@@ -815,6 +881,10 @@ void fci_net_worker_start(void)
 void fci_net_worker_stop(void)
 {
     if (s_stop) {
+        /* leave the host list before the session closes: the next instance must not find a dead
+         * host. Runs on this (the game's) thread, on its own session, so the worker thread's
+         * pending long-poll is untouched (research/docs/online-architecture.md, "Leaving the list") */
+        fci_net_leave();
         /* close the session first: WinHttpCloseHandle cancels pending requests, so the
          * thread unblocks from a long-poll immediately; guard the handle with the lock */
         if (s_session) {

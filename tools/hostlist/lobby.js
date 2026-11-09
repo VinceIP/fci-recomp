@@ -6,6 +6,7 @@
 //   GET  /v1/connects?id=&token=&wait=<1..60>   (long-poll; a host loops this)
 //   POST /v1/connect
 //   POST /v1/turn   (mints a Cloudflare TURN credential for a guest whose punch to `id` failed)
+//   POST /v1/unregister   (a leaving host removes its own listing; without it it lingers until its TTL)
 // and the operator's admin CLI (tools/hostlist/admin.py):
 //   GET    /admin/hosts
 //   GET    /admin/bans
@@ -77,6 +78,7 @@ const LIMITS = {
   listsPerMinute: 30,
   connectsPerMinute: 60,
   registersPerMinute: 10,
+  unregistersPerMinute: 10, // a leaving host removes its own listing (one per session, in practice)
 };
 
 const json = (body, status = 200) =>
@@ -289,6 +291,7 @@ export class Lobby {
       if (url.pathname === "/v1/connects" && request.method === "GET") return await this.poll(url, ip);
       if (url.pathname === "/v1/connect" && request.method === "POST") return await this.connect(request, ip);
       if (url.pathname === "/v1/turn" && request.method === "POST") return await this.turn(request, ip);
+      if (url.pathname === "/v1/unregister" && request.method === "POST") return await this.unregister(request, ip);
       return json({ error: "not found" }, 404);
     } catch (e) {
       return json({ error: "internal" }, 500);
@@ -360,6 +363,41 @@ export class Lobby {
     });
     this.refresh(id);
     return json({ id }); // no token back: the player's runtime already has it
+  }
+
+  // A host that is leaving (its process is shutting down) removes its own listing here, so the
+  // next instance does not connect to a dead host; without it the listing stays joinable until its
+  // 90-second TTL (a poll is the renewal). The token must derive to the id: a 403, not a 404, so a
+  // wrong token is not mistaken for "already gone". An unknown id is a 200, so a second unregister,
+  // or one after a TTL expiry, is a no-op. The long-poll waiter, if any, is released with an empty,
+  // successful poll (the host is leaving, not merely idle).
+  async unregister(request, ip) {
+    const now = Date.now();
+    if (!this.limits.take("unregister:" + ip, LIMITS.unregistersPerMinute, now)) {
+      this.note("rate", ip);
+      return json({ error: "slow down" }, 429);
+    }
+    const msg = await this.readJson(request, ip);
+    if (msg === null) return this._refusal;
+    const id = String(msg.id || "");
+    const token = String(msg.token || "");
+    if (!ID.test(id) || !TOKEN.test(token) || (await deriveId(token)) !== id) {
+      this.note("bad", ip, id);
+      return json({ error: "bad token" }, 403);
+    }
+    const h = this.hosts.get(id);
+    if (!h) return json({ ok: true }); // already gone (TTL, a second call): idempotent
+    clearTimeout(h.timer);
+    this.hosts.delete(id);
+    this.connects.delete(id);
+    this.hostConn.delete(id);
+    const w = this.waiters.get(id);
+    if (w) {
+      this.waiters.delete(id);
+      clearTimeout(w.timer);
+      w.resolve(json({ connects: [] })); // the host is leaving: an empty, successful poll
+    }
+    return json({ ok: true });
   }
 
   async poll(url, ip) {

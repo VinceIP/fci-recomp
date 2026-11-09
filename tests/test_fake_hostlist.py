@@ -530,3 +530,115 @@ def test_post_without_json_content_type_is_415():
         assert status == 415
     finally:
         server.shutdown()
+
+
+def test_unregister_removes_the_listing():
+    """A leaving host removes its own listing; a second unregister is a no-op; a bad token is 403."""
+    port, server, lobby = start_server()
+    try:
+        base = f"http://127.0.0.1:{port}"
+        host_id, host_token = register(base)
+
+        # the host is listed before the unregister
+        status, body = http_json(f"{base}/v1/hosts?title=evolution&version=3")
+        assert body["hosts"] == [{"id": host_id}]
+
+        # unregister with the host's own token: 200, the listing is gone
+        status, body = http_json(f"{base}/v1/unregister", method="POST", body={"id": host_id, "token": host_token})
+        assert status == 200, body
+        assert body == {"ok": True}
+        status, body = http_json(f"{base}/v1/hosts?title=evolution&version=3")
+        assert body["hosts"] == []
+
+        # a second unregister is a no-op (idempotent): 200
+        status, body = http_json(f"{base}/v1/unregister", method="POST", body={"id": host_id, "token": host_token})
+        assert status == 200, body
+        assert body == {"ok": True}
+
+        # a token that does not derive to the id is 403 (not 404: a wrong token is not "already gone")
+        status, body = http_json(
+            f"{base}/v1/unregister", method="POST", body={"id": host_id, "token": secrets.token_hex(32)}
+        )
+        assert status == 403, body
+        assert body["error"] == "bad token"
+
+        # a malformed token is 403
+        status, body = http_json(f"{base}/v1/unregister", method="POST", body={"id": host_id, "token": "xyz"})
+        assert status == 403, body
+        assert body["error"] == "bad token"
+
+        # an id that was never registered (a valid token that derives to it) is a 200: idempotent
+        other_token = secrets.token_hex(32)
+        status, body = http_json(
+            f"{base}/v1/unregister", method="POST", body={"id": derive_id(other_token), "token": other_token}
+        )
+        assert status == 200, body
+        assert body == {"ok": True}
+    finally:
+        server.shutdown()
+
+
+def test_unregister_releases_a_held_poll_and_clears_the_queue():
+    """A leaving host releases its held long-poll with an empty poll and clears its queued connects."""
+    port, server, lobby = start_server()
+    try:
+        base = f"http://127.0.0.1:{port}"
+        host_id, host_token = register(base)
+
+        # a guest connect is queued
+        status, _ = connect(base, host_id)
+        assert status == 200
+
+        # start a long-poll in a thread. The queued connect is delivered to it (a poll drains the
+        # queue), so start a second poll after the first returns: that one is held.
+        first = []
+
+        def do_first_poll():
+            s, b = http_json(f"{base}/v1/connects?id={host_id}&token={host_token}&wait=10")
+            first.append((s, b))
+
+        t1 = threading.Thread(target=do_first_poll, daemon=True)
+        t1.start()
+        t1.join(timeout=5)  # it returns with the queued connect
+        assert len(first) == 1, "the first poll was not released"
+        assert first[0][1]["connects"] and len(first[0][1]["connects"]) == 1
+
+        # a second poll is now held (the queue is empty)
+        second = []
+
+        def do_second_poll():
+            s, b = http_json(f"{base}/v1/connects?id={host_id}&token={host_token}&wait=10")
+            second.append((s, b))
+
+        t2 = threading.Thread(target=do_second_poll, daemon=True)
+        t2.start()
+        time.sleep(0.2)  # the poll is now held
+
+        # the host leaves: the held poll is released with an empty, successful poll
+        status, body = http_json(f"{base}/v1/unregister", method="POST", body={"id": host_id, "token": host_token})
+        assert status == 200, body
+        t2.join(timeout=5)
+        assert len(second) == 1, "the held poll was not released"
+        assert second[0] == (200, {"connects": []})
+
+        # the listing is gone, and a re-register (same token, same id) starts with an empty queue
+        status, body = http_json(f"{base}/v1/hosts?title=evolution&version=3")
+        assert body["hosts"] == []
+        status, body = http_json(
+            f"{base}/v1/register",
+            method="POST",
+            body={
+                "proto": 1,
+                "title": "evolution",
+                "version": "3",
+                "mac": "02:46:43:12:34:56",
+                "endpoint": "127.0.0.1:40000",
+                "token": host_token,
+            },
+        )
+        assert status == 200, body
+        status, body = http_json(f"{base}/v1/connects?id={host_id}&token={host_token}&wait=1")
+        assert status == 200
+        assert body["connects"] == []  # the old connect was cleared by the unregister
+    finally:
+        server.shutdown()

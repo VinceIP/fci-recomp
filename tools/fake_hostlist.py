@@ -2,9 +2,9 @@
 
 Stdlib only: ThreadingHTTPServer on 127.0.0.1. Implements the same endpoints and JSON as lobby.js:
 the token-derived id (sha256(token), first 16 bytes, hex), the id-only listing, the connect reply
-(the host's endpoint and MAC), the held long-poll, the bans, and the admin routes. It skips the
-public-address check so 127.0.0.1 registers and connects work, and it keeps the bans and the rate
-limits in memory (lobby.js keeps the bans in the object's SQLite).
+(the host's endpoint and MAC), the held long-poll, the leaving-host unregister, the bans, and the
+admin routes. It skips the public-address check so 127.0.0.1 registers and connects work, and it
+keeps the bans and the rate limits in memory (lobby.js keeps the bans in the object's SQLite).
 
 Usage: python tools/fake_hostlist.py [port] [--break-punch] [--secret S]
        [--turn-user U --turn-pass P --turn-url URL]   (default port 47801)
@@ -44,7 +44,13 @@ TURN_WINDOW_SECONDS = 600  # a mint (and a relayed connect) is valid for 10 minu
 MINTS_PER_WINDOW = 6  # mints per guest and per address, per 10-minute window
 RELAY_CONNECTS_PER_NONCE = 3  # re-POSTs of a relayed address (ICE restarts)
 DEFAULT_TURN_URL = "turn:127.0.0.1:3478?transport=udp"
-LIMITS = {"hostsPerIp": 4, "listsPerMinute": 30, "connectsPerMinute": 60, "registersPerMinute": 10}
+LIMITS = {
+    "hostsPerIp": 4,
+    "listsPerMinute": 30,
+    "connectsPerMinute": 60,
+    "registersPerMinute": 10,
+    "unregistersPerMinute": 10,  # a leaving host removes its own listing (one per session, in practice)
+}
 
 
 def _entries(q):
@@ -348,6 +354,35 @@ class Lobby:
             self._prune_turn_state(now)
             return 200, {"username": self.turn_user, "credential": self.turn_pass, "urls": [self.turn_url]}
 
+    # A host that is leaving (its process is shutting down) removes its own listing here, so the
+    # next instance does not connect to a dead host; without it the listing stays joinable until its
+    # TTL (a poll is the renewal). The token must derive to the id: a 403, not a 404, so a wrong
+    # token is not mistaken for "already gone". An unknown id is a 200, so a second unregister, or
+    # one after a TTL expiry, is a no-op. The long-poll waiter, if any, is released with an empty,
+    # successful poll (the host is leaving, not merely idle).
+    def unregister(self, body, ip):
+        now = time.time()
+        if not self.limits.take("unregister:" + ip, LIMITS["unregistersPerMinute"], now):
+            self.note("rate", ip)
+            return 429, {"error": "slow down"}
+        id_ = body.get("id", "")
+        token = body.get("token", "")
+        if not ID_RE.match(id_) or not TOKEN_RE.match(token) or derive_id(token) != id_:
+            self.note("bad", ip, id_)
+            return 403, {"error": "bad token"}
+        with self.lock:
+            h = self.hosts.get(id_)
+            if not h:
+                return 200, {"ok": True}  # already gone (TTL, a second call): idempotent
+            del self.hosts[id_]
+            self.connects.pop(id_, None)
+            self.host_conn.pop(id_, None)
+            w = self.waiters.pop(id_, None)
+            if w:
+                w["result"] = (200, {"connects": []})  # the host is leaving: an empty, successful poll
+                w["event"].set()
+        return 200, {"ok": True}
+
     # -- admin (the operator's secret is the only gate) ---------------------------------------
     def admin(self, path, method, body, query, ip):
         if not self.secret:
@@ -459,6 +494,8 @@ def make_handler(lobby):
                 status, resp = lobby.connect(body, ip)
             elif url.path == "/v1/turn":
                 status, resp = lobby.turn(body, ip)
+            elif url.path == "/v1/unregister":
+                status, resp = lobby.unregister(body, ip)
             else:
                 status, resp = 404, {"error": "not found"}
             self._send(status, resp)

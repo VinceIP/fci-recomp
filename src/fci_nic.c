@@ -1725,6 +1725,10 @@ int fci_nic_init(ptrdiff_t mem_offset)
                 m[0], m[1], m[2], m[3], m[4], m[5]);
         fflush(stderr);
         fci_net_worker_start(); /* LIST mode: the worker thread does the host-list HTTP */
+        /* leave the host list on a clean exit (quit-to-dashboard / shutdown): the toolkit calls
+         * this once, on the exiting thread, just before it exits (patches/runtime/0031-exit-hook.patch) */
+        extern void (*xbox_exit_hook)(void);
+        xbox_exit_hook = fci_net_leave;
     }
     return VirtualProtect((char *)mem_offset + NIC_BASE, NIC_SIZE, PAGE_NOACCESS, &old) != 0;
 }

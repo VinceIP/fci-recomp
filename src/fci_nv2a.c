@@ -658,6 +658,10 @@ static LRESULT CALLBACK window_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
             fci_framebuffer_key(vk, 0);
     }
     if (msg == WM_CLOSE) {
+        /* closing the window ends the session: leave the host list before the process is torn down
+         * (TerminateProcess skips every handler, so this is the only chance). Bounded to about 1.5 s. */
+        extern void fci_net_leave(void);
+        fci_net_leave();
         TerminateProcess(GetCurrentProcess(), 0);
         return 0;
     }

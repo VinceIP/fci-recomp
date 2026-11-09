@@ -55,6 +55,7 @@ int fci_guest_set_event_handle(uint32_t token);
 int fci_aspect_wide(void);                        // fci_display.c: RECOMP_FCI_ASPECT=16:9
 int fci_window_size(uint32_t* w, uint32_t* h);    // fci_display.c: RECOMP_FCI_WINDOW
 void fci_log_session_end(void);                   // fci_config.c: a clean exit, for the log
+void fci_net_leave(void);                         // fci_net_worker.c: leave the host list on a clean exit
 extern const char *fci_xbe_path, *fci_game_dir;   // fci_main.c: from the arguments or fci.ini
 }
 
@@ -372,6 +373,7 @@ LRESULT CALLBACK FrameProc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     case WM_CLOSE:   // the session ends: the first instance waits for this one's job to empty
         fci_log_session_end();
+        fci_net_leave();   // leave the host list: TerminateProcess skips every handler, so this is the only chance
         TerminateProcess(GetCurrentProcess(), 0);
         return 0;
     }
