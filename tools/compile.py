@@ -170,6 +170,20 @@ REPLACE = {
         "XNetCreateKey: only a host creates a key (a guest registers the host's), so this is host "
         "started; the worker thread registers with the host list (fci_net_worker.c)",
     ),
+    "sub_002ACAF0": (
+        "prehook",
+        "pak name→hash: logs the looked-up name for RECOMP_FCI_PAK_LOG, paired with the "
+        "following .dat read by tools/pak_pairs.py (fci_disk.c)",
+    ),
+    "sub_0014EFF0": (
+        "gate",
+        "main menu action handler: logs the action hash for RECOMP_FCI_MENU_LOG; "
+        "RECOMP_FCI_MENU_QUIT=1 intercepts B_Quit (0x8bcdf569) and exits (fci_menu.c)",
+    ),
+    "sub_00148170": (
+        "prehook",
+        "MP pause menu action handler: logs the action hash for RECOMP_FCI_MENU_LOG (fci_menu.c)",
+    ),
 }
 
 STUB = re.compile(rb"void (sub_([0-9A-F]{8}))\(void\) \{ g_esp \+= 4; /\* 0x[0-9A-F]{8}: not detected \*/ \}")
