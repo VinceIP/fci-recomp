@@ -8,6 +8,7 @@
 #include <windows.h>
 #include <winhttp.h>
 #include <bcrypt.h>
+#include <wincrypt.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -26,8 +27,9 @@ extern int fci_nic_worker_probe_take(void);
 extern const char *fci_nic_list_url(void);
 extern SRWLOCK *fci_nic_lock(void); /* the NIC's s_lock */
 
-/* the XBE certificate's Version field (fci_main.c) */
+/* the XBE certificate's Version field (fci_main.c); the data folder (fci_main.c) */
 extern uint32_t fci_xbe_version;
+extern const char *fci_save_dir;
 
 #define LIST_FETCH_INTERVAL_MS 5000
 #define POLL_WAIT_S            20
@@ -39,12 +41,21 @@ static HANDLE s_stop;
 static HINTERNET s_session;
 static volatile LONG s_host_started; /* set by fci_prehook_0051C5EA */
 
+/* the identity: 32 random bytes, hex (s_identity), stable across sessions. It lives in the data
+ * folder (fci_save_dir\fci_token: %APPDATA%\fci-recomp\profile on Windows, the Wine prefix's
+ * AppData under Proton). The player's id is the first 16 bytes of SHA-256(token), hex
+ * (s_own_id): what the lobby bans and what the listing shows. A missing or unreadable token file
+ * gets a fresh token written back; the worker never fails because of it (research/docs/
+ * online-architecture.md, "The identity token"). */
+static char s_identity[65];
+static char s_own_id[33];
+
 /* host registration state */
 static char s_host_id[64];
-static char s_host_token[64];
 static int s_registered;
 static ULONGLONG s_last_fetch;    /* last /v1/hosts fetch (GetTickCount64) */
 static ULONGLONG s_host_start_ms; /* when "host started" was set (for the endpoint-wait log) */
+static ULONGLONG s_reg_fail_ms;   /* last failed register (back off 5 s; a banned id gets 403 forever) */
 static int s_endpoint_warned;     /* logged once if the endpoint is not known 5 s after host start */
 
 static const char *net_title(void) { return strstr(FCI_TITLE_NAME, "Evolution") ? "evolution" : "instincts"; }
@@ -213,7 +224,7 @@ static int http_request(const char *base_url, const char *method, const char *pa
     to_wide(method, wmethod, 16);
     to_wide(path, wpath, 512);
     to_wide(host, whost, 256);
-    wcscpy(wheaders, L"Content-Type: application\r\n");
+    wcscpy(wheaders, L"Content-Type: application/json\r\n");
 
     hconnect = WinHttpConnect(s_session, whost, (UINT)port, 0);
     if (!hconnect)
@@ -273,82 +284,144 @@ static int http_request(const char *base_url, const char *method, const char *pa
 static void gen_nonce(uint8_t nonce[16])
 { BCryptGenRandom(NULL, nonce, 16, BCRYPT_USE_SYSTEM_PREFERRED_RNG); }
 
+/* --- the identity token (Q11) --- */
+
+/* Load the identity token from the data folder; a missing, unreadable, or wrong-sized file gets a
+ * fresh 32-byte token written back (never a failure), and the id is derived from the token. */
+static void identity_init(void)
+{
+    uint8_t raw[32], hash[32];
+    char path[MAX_PATH];
+    FILE *f = NULL;
+    int i;
+
+    if (fci_save_dir && fci_save_dir[0])
+        snprintf(path, sizeof path, "%s\\fci_token", fci_save_dir);
+    else
+        path[0] = 0;
+    if (path[0] && (f = fopen(path, "rb")) != NULL && fread(raw, 1, sizeof raw, f) == sizeof raw) {
+        fclose(f);
+    } else {
+        int wrote = 0;
+        if (f)
+            fclose(f);
+        if (BCryptGenRandom(NULL, raw, sizeof raw, BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0)
+            return; /* never: the system RNG is always available */
+        if (path[0] && (f = fopen(path, "wb")) != NULL) {
+            wrote = fwrite(raw, 1, sizeof raw, f) == sizeof raw;
+            fclose(f);
+        }
+        if (wrote)
+            log_line("new identity token written to %s", path);
+        else if (path[0])
+            log_line("new identity token: the write to %s failed; it is kept for this session only", path);
+        else
+            log_line("new identity token: no data folder; it is kept for this session only");
+    }
+    for (i = 0; i < 32; i++)
+        snprintf(s_identity + i * 2, 3, "%02x", raw[i]);
+    s_identity[64] = 0;
+
+    /* the id: the first 16 bytes of SHA-256(token), hex (lobby.js's deriveId). The server hashes
+     * the token's HEX STRING (64 chars), so we hash s_identity, not the raw bytes. CryptoAPI's
+     * SHA-256 (the CNG BCryptHash the SDK declares takes a key: this is the plain-hash API) */
+    {
+        HCRYPTPROV prov = 0;
+        HCRYPTHASH h = 0;
+        DWORD len = sizeof hash;
+        if (CryptAcquireContext(&prov, NULL, NULL, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT)
+            && CryptCreateHash(prov, CALG_SHA_256, 0, 0, &h)
+            && CryptHashData(h, (const BYTE *)s_identity, 64, 0)
+            && CryptGetHashParam(h, HP_HASHVAL, hash, &len, 0)) {
+            for (i = 0; i < 16; i++)
+                snprintf(s_own_id + i * 2, 3, "%02x", hash[i]);
+            s_own_id[32] = 0;
+        }
+        if (h)
+            CryptDestroyHash(h);
+        if (prov)
+            CryptReleaseContext(prov, 0);
+    }
+    log_line("identity %s", s_own_id);
+}
+
 /* --- guest path: fetch hosts and connect --- */
+
+/* the hosts this fetch listed (to prune s_known: a host that left the list can be joined again) */
+static char s_seen[16][33];
+static int s_seen_n;
+
+/* the hosts we are connected to, by id (the listing has no endpoints to compare) */
+static char s_known[16][33];
+static int s_known_n;
 
 static void on_host_obj(const char *obj, int len)
 {
     char id[64], endpoint[128], macstr[32], my_mac[32], my_ep[128];
-    char buf[512], nhex[33];
+    char buf[512], resp[256], nhex[33];
     uint8_t mac[6], nonce[16];
-    int n;
+    int n, status;
+    const char *base;
+    SRWLOCK *lock;
 
     (void)len;
     if (!json_str_val(obj, "id", id, sizeof id))
         return;
-    if (!json_str_val(obj, "endpoint", endpoint, sizeof endpoint))
-        return;
-    if (!json_str_val(obj, "mac", macstr, sizeof macstr))
-        return;
+    if (strcmp(id, s_own_id) == 0)
+        return; /* we are that host (the listing is ids only: no MAC to compare) */
+    if (s_seen_n < (int)(sizeof s_seen / sizeof s_seen[0]))
+        snprintf(s_seen[s_seen_n++], sizeof s_seen[0], "%s", id);
+    for (n = 0; n < s_known_n; n++)
+        if (strcmp(s_known[n], id) == 0)
+            return; /* already connected to this host */
 
-    /* parse the host's MAC */
+    base = fci_nic_list_url();
+    if (!base)
+        return;
+    lock = fci_nic_lock();
+    AcquireSRWLockExclusive(lock);
+    fci_nic_list_endpoint(my_ep, sizeof my_ep);
+    ReleaseSRWLockExclusive(lock);
+    if (!my_ep[0])
+        return; /* no endpoint of our own: nothing to offer */
+
+    fci_nic_mac_str(my_mac, sizeof my_mac);
+    gen_nonce(nonce);
+    for (n = 0; n < 16; n++)
+        snprintf(nhex + n * 2, 3, "%02x", nonce[n]);
+    nhex[32] = 0;
+    /* POST /v1/connect with the GUEST's own endpoint, MAC and token: the reply carries the
+     * host's endpoint and MAC (the listing shows ids only) */
+    snprintf(buf, sizeof buf,
+             "{\"id\":\"%s\",\"endpoint\":\"%s\",\"nonce\":\"%s\",\"mac\":\"%s\",\"token\":\"%s\"}", id,
+             my_ep, nhex, my_mac, s_identity);
+    if (http_request(base, "POST", "/v1/connect", buf, resp, sizeof resp, &status) != 0 || status != 200) {
+        log_line("connect to %s failed (status %d)", id, status);
+        return;
+    }
+    if (!json_str_val(resp, "endpoint", endpoint, sizeof endpoint))
+        return;
+    if (!json_str_val(resp, "mac", macstr, sizeof macstr))
+        return;
     if (sscanf(macstr, "%2hhx:%2hhx:%2hhx:%2hhx:%2hhx:%2hhx", &mac[0], &mac[1], &mac[2], &mac[3], &mac[4],
                &mac[5])
         != 6)
         return;
 
-    /* skip our own MAC (we are the host, not a guest of ourselves) */
-    fci_nic_mac_str(my_mac, sizeof my_mac);
-    if (strcmp(my_mac, macstr) == 0)
-        return;
+    AcquireSRWLockExclusive(lock);
+    fci_nic_list_add_peer(endpoint, mac, nonce);
+    ReleaseSRWLockExclusive(lock);
 
-    /* skip if the NIC already has this peer (pending or live) */
-    {
-        SRWLOCK *lock = fci_nic_lock();
-        AcquireSRWLockExclusive(lock);
-        int have = fci_nic_list_has_peer(endpoint);
-        ReleaseSRWLockExclusive(lock);
-        if (have)
-            return;
-    }
-
-    gen_nonce(nonce);
-
-    /* add the peer (takes s_lock) */
-    {
-        SRWLOCK *lock = fci_nic_lock();
-        AcquireSRWLockExclusive(lock);
-        fci_nic_list_add_peer(endpoint, mac, nonce);
-        ReleaseSRWLockExclusive(lock);
-    }
-
-    /* POST /v1/connect with the GUEST's own endpoint and MAC */
-    {
-        const char *base = fci_nic_list_url();
-        if (!base)
-            return;
-        {
-            SRWLOCK *lock = fci_nic_lock();
-            AcquireSRWLockExclusive(lock);
-            fci_nic_list_endpoint(my_ep, sizeof my_ep);
-            ReleaseSRWLockExclusive(lock);
-        }
-        for (n = 0; n < 16; n++)
-            sprintf(nhex + n * 2, "%02x", nonce[n]);
-        nhex[32] = 0;
-        snprintf(buf, sizeof buf, "{\"id\":\"%s\",\"endpoint\":\"%s\",\"nonce\":\"%s\",\"mac\":\"%s\"}", id,
-                 my_ep, nhex, my_mac);
-        int status;
-        char resp[64];
-        http_request(base, "POST", "/v1/connect", buf, resp, sizeof resp, &status);
-        log_line("connect posted to %s (%s)", id, status == 204 ? "ok" : "failed");
-    }
+    if (s_known_n < (int)(sizeof s_known / sizeof s_known[0]))
+        snprintf(s_known[s_known_n++], sizeof s_known[0], "%s", id);
+    log_line("connected to host %s (%s)", id, endpoint);
 }
 
 static void guest_fetch(void)
 {
     const char *base = fci_nic_list_url();
     char path[256], buf[4096];
-    int status;
+    int status, n;
 
     if (!base)
         return;
@@ -359,7 +432,21 @@ static void guest_fetch(void)
     }
     s_last_fetch = GetTickCount64();
     log_line("list fetched (%s)", net_title());
+    s_seen_n = 0;
     json_array(buf, "hosts", on_host_obj);
+    for (n = 0; n < s_known_n; n++) {
+        int keep = 0, m;
+        for (m = 0; m < s_seen_n; m++)
+            if (!strcmp(s_known[n], s_seen[m])) {
+                keep = 1;
+                break;
+            }
+        if (!keep) {
+            memmove(&s_known[n], &s_known[n + 1], (size_t)(s_known_n - n - 1) * sizeof s_known[0]);
+            s_known_n--;
+            n--;
+        }
+    }
 }
 
 /* --- host path: register and poll --- */
@@ -391,15 +478,18 @@ static void host_register(void)
 
     fci_nic_mac_str(macstr, sizeof macstr);
 
+    /* the token is ours (identity_init): the server derives the id from it and returns the id only */
     snprintf(body, sizeof body,
-             "{\"proto\":%d,\"title\":\"%s\",\"version\":\"%s\",\"mac\":\"%s\",\"endpoint\":\"%s\"}",
-             NET_PROTO, net_title(), net_version(), macstr, endpoint);
+             "{\"proto\":%d,\"title\":\"%s\",\"version\":\"%s\",\"mac\":\"%s\",\"endpoint\":\"%s\","
+             "\"token\":\"%s\"}",
+             NET_PROTO, net_title(), net_version(), macstr, endpoint, s_identity);
     if (http_request(base, "POST", "/v1/register", body, buf, sizeof buf, &status) != 0 || status != 200) {
+        s_reg_fail_ms = GetTickCount64();
         log_line("register failed (status %d)", status);
         return;
     }
+    s_reg_fail_ms = 0;
     json_str_val(buf, "id", s_host_id, sizeof s_host_id);
-    json_str_val(buf, "token", s_host_token, sizeof s_host_token);
     s_registered = 1;
     log_line("registered as host %s (endpoint %s)", s_host_id, endpoint);
 }
@@ -445,7 +535,7 @@ static void host_poll(void)
 
     if (!base || !s_registered)
         return;
-    snprintf(path, sizeof path, "/v1/connects?id=%s&token=%s&wait=%d", s_host_id, s_host_token, POLL_WAIT_S);
+    snprintf(path, sizeof path, "/v1/connects?id=%s&token=%s&wait=%d", s_host_id, s_identity, POLL_WAIT_S);
     if (http_request(base, "GET", path, NULL, buf, sizeof buf, &status) != 0) {
         log_line("connect poll failed, backing off 5 s");
         Sleep(5000);
@@ -486,7 +576,8 @@ static DWORD WINAPI worker_main(LPVOID arg)
         if (s_host_started && !s_registered) {
             if (!s_host_start_ms)
                 s_host_start_ms = GetTickCount64();
-            host_register();
+            if (!s_reg_fail_ms || GetTickCount64() - s_reg_fail_ms >= 5000)
+                host_register();
         }
         if (s_registered)
             host_poll();
@@ -507,6 +598,7 @@ static DWORD WINAPI worker_main(LPVOID arg)
 
 void fci_net_worker_start(void)
 {
+    identity_init();
     s_stop = CreateEventA(NULL, TRUE, FALSE, NULL);
     s_thread = CreateThread(NULL, 0, worker_main, NULL, 0, NULL);
     if (!s_thread) {

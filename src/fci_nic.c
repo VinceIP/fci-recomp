@@ -1292,7 +1292,7 @@ static int connect_list(const char *url, char *err, int errlen)
                 fflush(stderr);
             }
         }
-        /* resolve the STUN server (_STUN overrides, default stun.l.google.com:19302) */
+        /* resolve the STUN server (_STUN overrides, default stun.cloudflare.com:3478) */
         {
             const char *stun = getenv("RECOMP_FCI_NET_STUN");
             char shost[128], sport[16];
@@ -1307,8 +1307,8 @@ static int connect_list(const char *url, char *err, int errlen)
                 shost[colon - stun] = 0;
                 strcpy(sport, colon + 1);
             } else {
-                strcpy(shost, "stun.l.google.com");
-                strcpy(sport, "19302");
+                strcpy(shost, "stun.cloudflare.com");
+                strcpy(sport, "3478");
             }
             struct addrinfo hints, *ai = NULL;
             memset(&hints, 0, sizeof hints);
