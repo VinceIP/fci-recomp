@@ -112,13 +112,14 @@ static int relabel_entry(uint32_t entry_va)
  * relabel only matches "XBOX LIVE" which appears once in the table (the B_Live
  * label). Other lookups are unaffected.
  * --------------------------------------------------------------------------- */
-void sub_0026A628_fci_body(void); /* the lifted lookup, behind the gate (tools/compile.py "gate") */
+/* the lifted lookup behind the gate; weak because the map editor image links this file without the gate */
+__attribute__((weak)) void sub_0026A628_fci_body(void);
 
 /* the build has no posthook kind: the gate runs the lookup itself at entry (the state is the entry
  * state), fixes up the result, and returns 1 so the wrapper does not run it a second time */
 int fci_gate_0026A628(void)
 {
-    if (!fci_nic_menu_mode())
+    if (!fci_nic_menu_mode() || !sub_0026A628_fci_body)
         return 0;
     sub_0026A628_fci_body();
     if (g_eax)
