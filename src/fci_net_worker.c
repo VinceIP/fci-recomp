@@ -224,7 +224,7 @@ static int http_request(const char *base_url, const char *method, const char *pa
     to_wide(method, wmethod, 16);
     to_wide(path, wpath, 512);
     to_wide(host, whost, 256);
-    wcscpy(wheaders, L"Content-Type: application/json\r\n");
+    wcscpy(wheaders, L"Content-Type: application/json\r\n"); /* the Worker answers 415 to anything else */
 
     hconnect = WinHttpConnect(s_session, whost, (UINT)port, 0);
     if (!hconnect)
