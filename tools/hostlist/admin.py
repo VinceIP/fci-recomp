@@ -69,6 +69,7 @@ def main():
 
     req = urllib.request.Request(args.url.rstrip("/") + path, data=body, method=method)
     req.add_header("authorization", "Bearer " + args.secret)
+    req.add_header("user-agent", "fci-hostlist-admin/1")  # Cloudflare refuses urllib's default (error 1010)
     if body:
         req.add_header("content-type", "application/json")
     try:

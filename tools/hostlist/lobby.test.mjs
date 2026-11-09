@@ -9,25 +9,35 @@ import { Lobby } from "./lobby.js";
 
 const env = { TTL_MS: 200, RELAY: "hub.example:4000" };
 
-// The ban table in the fake: the Worker uses exactly these five statements.
+// The ban table in the fake, shaped like Cloudflare's SqlStorage: storage.sql.exec(query, ...bindings)
+// returns a cursor with toArray(), one() (throws unless exactly one row) and rowsWritten.
+function cursor(rows, written = 0) {
+  return {
+    toArray: () => rows,
+    one: () => {
+      if (rows.length !== 1) throw new Error("Expected exactly one result from SQL query, but got " + rows.length);
+      return rows[0];
+    },
+    rowsWritten: written,
+  };
+}
+
 function fakeStorage() {
   const bans = new Map();
-  const empty = { one: () => undefined, toArray: () => [], meta: { changes: 0 } };
   return {
-    sql(query, ...params) {
-      const q = query.trim().toUpperCase();
-      if (q.startsWith("CREATE TABLE")) return empty;
-      if (q.startsWith("INSERT OR REPLACE INTO BANS")) {
-        bans.set(params[0], { id: params[0], reason: params[1], date: params[2] });
-        return { ...empty, meta: { changes: 1 } };
-      }
-      if (q.startsWith("SELECT 1 FROM BANS WHERE ID"))
-        return { one: () => (bans.has(params[0]) ? { 1: 1 } : undefined), toArray: () => [], meta: { changes: 0 } };
-      if (q.startsWith("SELECT ID, REASON, DATE FROM BANS"))
-        return { one: () => undefined, toArray: () => [...bans.values()], meta: { changes: 0 } };
-      if (q.startsWith("DELETE FROM BANS WHERE ID"))
-        return { ...empty, meta: { changes: bans.delete(params[0]) ? 1 : 0 } };
-      throw new Error("fake storage: unknown query: " + query);
+    sql: {
+      exec(query, ...params) {
+        const q = query.trim().toUpperCase();
+        if (q.startsWith("CREATE TABLE")) return cursor([]);
+        if (q.startsWith("INSERT OR REPLACE INTO BANS")) {
+          bans.set(params[0], { id: params[0], reason: params[1], date: params[2] });
+          return cursor([], 1);
+        }
+        if (q.startsWith("SELECT 1 FROM BANS WHERE ID")) return cursor(bans.has(params[0]) ? [{ 1: 1 }] : []);
+        if (q.startsWith("SELECT ID, REASON, DATE FROM BANS")) return cursor([...bans.values()]);
+        if (q.startsWith("DELETE FROM BANS WHERE ID")) return cursor([], bans.delete(params[0]) ? 1 : 0);
+        throw new Error("fake storage: unknown query: " + query);
+      },
     },
   };
 }

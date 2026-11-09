@@ -41,8 +41,8 @@
 // (`wrangler variables put`) and ADMIN_SECRET a secret (`wrangler secret put`). Free tier.
 // The how-to is research/docs/online-architecture.md, section 7.
 
-export const PROTO = 1;
-export const LIST_MAX = 64;
+const PROTO = 1;
+const LIST_MAX = 64;
 const TITLES = new Set(["instincts", "evolution"]);
 const VERSION = /^[0-9]{1,5}$/;
 const MAC = /^02:46:43(:[0-9a-f]{2}){3}$/;
@@ -110,7 +110,7 @@ function endpointOk(endpoint) {
 }
 
 // The player's id from the identity token: the first 16 bytes of SHA-256(token), hex.
-export async function deriveId(token) {
+async function deriveId(token) {
   const h = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
   return [...new Uint8Array(h.slice(0, 16))].map((x) => x.toString(16).padStart(2, "0")).join("");
 }
@@ -167,7 +167,8 @@ export class Lobby {
     this.limits = new RateLimit();
     this.hostConn = new Map(); // id -> {minute, n} (the per-host connect budget)
     this.abuse = { byIp: new Map(), ring: [] };
-    state.storage.sql(
+    // SqlStorage (Cloudflare): storage.sql.exec(query, ...bindings) returns a cursor
+    state.storage.sql.exec(
       "CREATE TABLE IF NOT EXISTS bans (id TEXT PRIMARY KEY, reason TEXT NOT NULL DEFAULT '', date TEXT NOT NULL)"
     );
   }
@@ -184,20 +185,20 @@ export class Lobby {
   }
 
   ban(id, reason, date) {
-    this.state.storage.sql("INSERT OR REPLACE INTO bans (id, reason, date) VALUES (?, ?, ?)", id, reason, date);
+    this.state.storage.sql.exec("INSERT OR REPLACE INTO bans (id, reason, date) VALUES (?, ?, ?)", id, reason, date);
   }
 
   bans() {
-    return this.state.storage.sql("SELECT id, reason, date FROM bans ORDER BY date DESC").toArray();
+    return this.state.storage.sql.exec("SELECT id, reason, date FROM bans ORDER BY date DESC").toArray();
   }
 
   unban(id) {
-    const r = this.state.storage.sql("DELETE FROM bans WHERE id = ?", id);
-    return (r.meta && r.meta.changes) || 0;
+    return this.state.storage.sql.exec("DELETE FROM bans WHERE id = ?", id).rowsWritten;
   }
 
   isBanned(id) {
-    return this.state.storage.sql("SELECT 1 FROM bans WHERE id = ?", id).one() !== undefined;
+    // a cursor's one() throws unless exactly one row came back, so count instead
+    return this.state.storage.sql.exec("SELECT 1 FROM bans WHERE id = ?", id).toArray().length > 0;
   }
 
   refresh(id) {

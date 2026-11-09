@@ -39,3 +39,5 @@ __pycache__/
 .ruff_cache/
 launcher/src-tauri/target/
 launcher/src-tauri/gen/
+# wrangler dev's local state (tools/hostlist)
+.wrangler/
