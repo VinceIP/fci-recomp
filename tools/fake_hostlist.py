@@ -6,12 +6,15 @@ the token-derived id (sha256(token), first 16 bytes, hex), the id-only listing, 
 public-address check so 127.0.0.1 registers and connects work, and it keeps the bans and the rate
 limits in memory (lobby.js keeps the bans in the object's SQLite).
 
-Usage: python tools/fake_hostlist.py [port] [--break-punch] [--secret S]   (default 47801)
+Usage: python tools/fake_hostlist.py [port] [--break-punch] [--secret S]
+       [--turn-user U --turn-pass P --turn-url URL]   (default port 47801)
 
 --break-punch rewrites the endpoint in every connect it forwards to the host (port + 1000), so the
 host punches a dead port and ignores the guest's punches (endpoint mismatch): both 3 s windows fail
 and both sides fall back to the relay (RECOMP_FCI_NET_RELAY).
 --secret sets the admin secret (default $FAKE_HOSTLIST_SECRET, else none: admin is off).
+--turn-user / --turn-pass / --turn-url configure /v1/turn (the mint gate, the mint rate limits and
+the relay connect behave as in lobby.js); without a user and a password, /v1/turn is 503 "no relay".
 """
 
 import argparse
@@ -34,8 +37,25 @@ RELAY = os.environ.get("FAKE_HOSTLIST_RELAY", "")  # the canonical hub, if set
 MAC_RE = re.compile(r"^02:46:43(:[0-9a-f]{2}){3}$")  # the cards' own prefix (fci_nic.c)
 ID_RE = re.compile(r"^[0-9a-f]{32}$")  # 16 bytes of sha256(token), hex
 TOKEN_RE = re.compile(r"^[0-9a-f]{64}$")  # 32 random bytes, hex
+NONCE_RE = re.compile(r"^[0-9a-f]{32}$")
 
+TURN_WINDOW_SECONDS = 600  # a mint (and a relayed connect) is valid for 10 minutes after the connect
+MINTS_PER_WINDOW = 6  # mints per guest and per address, per 10-minute window
+RELAY_CONNECTS_PER_NONCE = 3  # re-POSTs of a relayed address (ICE restarts)
+DEFAULT_TURN_URL = "turn:127.0.0.1:3478?transport=udp"
 LIMITS = {"hostsPerIp": 4, "listsPerMinute": 30, "connectsPerMinute": 60, "registersPerMinute": 10}
+
+
+def _entries(q):
+    # The host sees {endpoint, nonce, mac} per connect (plus relay: true for a relayed
+    # address); the guest's id is the object's business.
+    out = []
+    for c in q:
+        e = {"endpoint": c["endpoint"], "nonce": c["nonce"], "mac": c["mac"]}
+        if c.get("relay"):
+            e["relay"] = True
+        out.append(e)
+    return out
 
 
 def derive_id(token):
@@ -48,12 +68,13 @@ def _minute(now):
 
 
 class RateLimit:
-    def __init__(self):
+    def __init__(self, span=60):
+        self.span = span
         self.lock = threading.Lock()
-        self.m = {}  # key -> (minute, n)
+        self.m = {}  # key -> (window, n)
 
     def take(self, key, max_, now):
-        minute = _minute(now)
+        minute = int(now // self.span)
         with self.lock:
             m, n = self.m.get(key, (minute, 0))
             if m != minute:
@@ -68,17 +89,23 @@ class RateLimit:
 class Lobby:
     """In-memory host list, the same shape as lobby.js's Durable Object."""
 
-    def __init__(self, break_punch=False, secret=None):
+    def __init__(self, break_punch=False, secret=None, turn_user=None, turn_pass=None, turn_url=DEFAULT_TURN_URL):
         self.lock = threading.Lock()
         self.hosts = {}  # id -> {id, ip, proto, title, version, mac, endpoint, expires}
-        self.connects = {}  # id -> [{endpoint, nonce, mac, gid}]
+        self.connects = {}  # id -> [{endpoint, nonce, mac, gid, relay}]
         self.waiters = {}  # id -> {event, result}
         self.host_conn = {}  # id -> (minute, n)
+        self.pairs = {}  # gid+":"+nonce -> {host, at}: recent guest connects (the mint gate)
+        self.mints = {}  # gid+":"+nonce -> {host, at, relay}: recent mints (the relay gate)
         self.bans = {}  # id -> {id, reason, date}
         self.limits = RateLimit()
+        self.mint_limits = RateLimit(TURN_WINDOW_SECONDS)
         self.abuse = {"byIp": {}, "ring": []}
         self.break_punch = break_punch  # rewrite the endpoint in every connect (port + 1000)
         self.secret = secret
+        self.turn_user = turn_user
+        self.turn_pass = turn_pass
+        self.turn_url = turn_url
 
     # -- abuse counters (memory only, like lobby.js) -----------------------------------------
     def note(self, kind, ip, id_=None):
@@ -86,11 +113,18 @@ class Lobby:
             self._note(kind, ip, id_)
 
     def _note(self, kind, ip, id_=None):  # the lock is already held
-        c = self.abuse["byIp"].setdefault(ip, {"ip": ip, "rate": 0, "bad": 0, "nohost": 0, "banned": 0})
+        c = self.abuse["byIp"].setdefault(ip, {"ip": ip, "rate": 0, "bad": 0, "nohost": 0, "banned": 0, "norelay": 0})
         c[kind] += 1
         self.abuse["ring"].append({"ip": ip, "kind": kind, "id": id_, "at": int(time.time() * 1000)})
         if len(self.abuse["ring"]) > 1000:
             self.abuse["ring"].pop(0)
+
+    def _prune_turn_state(self, now):  # the lock is already held
+        # The connect queue is drained by the host's poll, so the mint and relay-connect gates
+        # keep their own recent (gid, nonce) records, pruned by age (10 minutes).
+        for m in (self.pairs, self.mints):
+            for k in [k for k, v in m.items() if now - v["at"] > TURN_WINDOW_SECONDS]:
+                del m[k]
 
     # -- bans (lobby.js keeps these in SQLite; the fake keeps them in memory) ----------------
     def is_banned(self, id_):
@@ -191,8 +225,7 @@ class Lobby:
             q = self.connects.get(id_)
             if q:
                 del self.connects[id_]
-                out = [{"endpoint": c["endpoint"], "nonce": c["nonce"], "mac": c["mac"]} for c in q]
-                return 200, {"connects": out}
+                return 200, {"connects": _entries(q)}
             event = threading.Event()
             waiter = {"event": event, "result": None}
             old = self.waiters.pop(id_, None)
@@ -215,8 +248,9 @@ class Lobby:
         nonce = body.get("nonce", "")
         mac = body.get("mac", "")
         token = body.get("token", "")
+        relay = body.get("relay") is True
         # skip the public-address check on the guest's endpoint: 127.0.0.1 is fine locally
-        if not ID_RE.match(id_) or not endpoint or not re.match(r"^[0-9a-f]{32}$", nonce) or not MAC_RE.match(mac):
+        if not ID_RE.match(id_) or not endpoint or not NONCE_RE.match(nonce) or not MAC_RE.match(mac):
             self.note("bad", ip)
             return 400, {"error": "bad request"}
         if not TOKEN_RE.match(token):
@@ -243,22 +277,74 @@ class Lobby:
             if n > HOST_CONNECTS_PER_MINUTE:
                 self._note("rate", ip, id_)
                 return 429, {"error": "host busy"}
+            # A relayed address: the guest's punch failed, it ALLOCATEd through TURN, and this is
+            # its second connect with the same nonce. Only after a mint for this (gid, nonce, host)
+            # within the last 10 minutes, and at most RELAY_CONNECTS_PER_NONCE times (ICE restarts).
+            # It keeps every other check and budget above.
+            key = gid + ":" + nonce
+            mint = self.mints.get(key)
+            if relay:
+                if mint is None or mint["host"] != id_ or now - mint["at"] > TURN_WINDOW_SECONDS:
+                    self._note("bad", ip, gid)
+                    return 403, {"error": "no relay"}
+                if mint["relay"] >= RELAY_CONNECTS_PER_NONCE:
+                    self._note("rate", ip, gid)
+                    return 429, {"error": "too many relays"}
+                mint["relay"] += 1
+            self.pairs[key] = {"host": id_, "at": now}  # the mint gate: this guest reached this host
+            self._prune_turn_state(now)
             q = self.connects.setdefault(id_, [])
             i = next((j for j, c in enumerate(q) if c["gid"] == gid), -1)
             if i >= 0:
-                q[i] = {"endpoint": endpoint, "nonce": nonce, "mac": mac, "gid": gid}
+                q[i] = {"endpoint": endpoint, "nonce": nonce, "mac": mac, "gid": gid, "relay": relay}
             else:
                 if len(q) >= CONNECTS_MAX:
                     q.pop(0)
-                q.append({"endpoint": endpoint, "nonce": nonce, "mac": mac, "gid": gid})
+                q.append({"endpoint": endpoint, "nonce": nonce, "mac": mac, "gid": gid, "relay": relay})
             w = self.waiters.get(id_)
             if w:
                 self.waiters.pop(id_, None)
-                out = [{"endpoint": c["endpoint"], "nonce": c["nonce"], "mac": c["mac"]} for c in q]
                 del self.connects[id_]
-                w["result"] = (200, {"connects": out})
+                w["result"] = (200, {"connects": _entries(q)})
                 w["event"].set()
         return 200, {"endpoint": h["endpoint"], "mac": h["mac"]}  # the host's endpoint and MAC
+
+    # Mint a TURN credential for a guest, gated like the Worker: a recent connect from this
+    # guest to this host with this nonce (the connect queue is drained by the poll, so the
+    # recent pairs live in their own map), and 6 mints per guest and per address in 10 minutes.
+    # The stand-in returns its configured credential (--turn-user / --turn-pass at --turn-url)
+    # instead of calling Cloudflare; unset means 503 "no relay".
+    def turn(self, body, ip):
+        now = time.time()
+        id_ = body.get("id", "")
+        nonce = body.get("nonce", "")
+        token = body.get("token", "")
+        if not ID_RE.match(id_) or not NONCE_RE.match(nonce):
+            self.note("bad", ip)
+            return 400, {"error": "bad request"}
+        if not TOKEN_RE.match(token):
+            self.note("bad", ip)
+            return 400, {"error": "bad token"}
+        gid = derive_id(token)
+        with self.lock:
+            if self.is_banned(gid):
+                self._note("banned", ip, gid)
+                return 403, {"error": "banned"}
+            pair = self.pairs.get(gid + ":" + nonce)
+            if pair is None or pair["host"] != id_ or now - pair["at"] > TURN_WINDOW_SECONDS:
+                self._note("bad", ip, gid)
+                return 403, {"error": "no connect"}
+            if not self.mint_limits.take("gid:" + gid, MINTS_PER_WINDOW, now) or not self.mint_limits.take(
+                "ip:" + ip, MINTS_PER_WINDOW, now
+            ):
+                self._note("rate", ip, gid)
+                return 429, {"error": "slow down"}
+            if not self.turn_user or not self.turn_pass:
+                self._note("norelay", ip, gid)
+                return 503, {"error": "no relay"}
+            self.mints[gid + ":" + nonce] = {"host": id_, "at": now, "relay": 0}
+            self._prune_turn_state(now)
+            return 200, {"username": self.turn_user, "credential": self.turn_pass, "urls": [self.turn_url]}
 
     # -- admin (the operator's secret is the only gate) ---------------------------------------
     def admin(self, path, method, body, query, ip):
@@ -298,7 +384,7 @@ class Lobby:
             with self.lock:
                 by_ip = sorted(
                     self.abuse["byIp"].values(),
-                    key=lambda c: c["rate"] + c["bad"] + c["nohost"] + c["banned"],
+                    key=lambda c: c["rate"] + c["bad"] + c["nohost"] + c["banned"] + c["norelay"],
                     reverse=True,
                 )
                 return 200, {"byIp": by_ip[:100], "ring": self.abuse["ring"]}
@@ -369,6 +455,8 @@ def make_handler(lobby):
                 status, resp = lobby.register(body, ip)
             elif url.path == "/v1/connect":
                 status, resp = lobby.connect(body, ip)
+            elif url.path == "/v1/turn":
+                status, resp = lobby.turn(body, ip)
             else:
                 status, resp = 404, {"error": "not found"}
             self._send(status, resp)
@@ -421,10 +509,25 @@ def main():
         help="rewrite the endpoint in every connect to the host (port + 1000)",
     )
     ap.add_argument("--secret", default=None, help="admin secret (default $FAKE_HOSTLIST_SECRET, else admin off)")
+    ap.add_argument(
+        "--turn-user",
+        default=None,
+        help="username /v1/turn returns (default $FAKE_HOSTLIST_TURN_USER; unset: 503 no relay)",
+    )
+    ap.add_argument(
+        "--turn-pass", default=None, help="credential password /v1/turn returns (default $FAKE_HOSTLIST_TURN_PASS)"
+    )
+    ap.add_argument("--turn-url", default=DEFAULT_TURN_URL, help="the turn: URL /v1/turn returns (default %(default)s)")
     args = ap.parse_args()
     port = args.port if args.port is not None else int(os.environ.get("FAKE_HOSTLIST_PORT", "47801"))
     secret = args.secret if args.secret is not None else os.environ.get("FAKE_HOSTLIST_SECRET")
-    lobby = Lobby(break_punch=args.break_punch, secret=secret)
+    lobby = Lobby(
+        break_punch=args.break_punch,
+        secret=secret,
+        turn_user=args.turn_user if args.turn_user is not None else os.environ.get("FAKE_HOSTLIST_TURN_USER"),
+        turn_pass=args.turn_pass if args.turn_pass is not None else os.environ.get("FAKE_HOSTLIST_TURN_PASS"),
+        turn_url=args.turn_url,
+    )
     server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(lobby))
     server.daemon_threads = True
     print(f"fake host list on http://127.0.0.1:{port}" + (f" (admin secret set, relay={RELAY})" if secret else ""))

@@ -5,6 +5,7 @@
 //   POST /v1/register
 //   GET  /v1/connects?id=&token=&wait=<1..60>   (long-poll; a host loops this)
 //   POST /v1/connect
+//   POST /v1/turn   (mints a Cloudflare TURN credential for a guest whose punch to `id` failed)
 // and the operator's admin CLI (tools/hostlist/admin.py):
 //   GET    /admin/hosts
 //   GET    /admin/bans
@@ -27,7 +28,14 @@
 //   address): the harm of a hostile endpoint is bounded by per-endpoint-IP caps and the per-host
 //   budget instead, and the residual is written in section 5 of the doc.
 // - Rate limits per client address: 30 listings, 60 connects, 10 registers a minute. Per host:
-//   24 connects a minute from all addresses (flood budget, section 5).
+//   24 connects a minute from all addresses (flood budget, section 5). Mints: 6 per guest and per
+//   address in 10 minutes, and only for a (guest, nonce) that connected to that host within the
+//   last 10 minutes (the connect queue is drained by the host's poll, so the recent pairs live in
+//   their own small map). A guest that cannot hole-punch mints once, ALLOCATEs, and posts its
+//   relayed address back as a second /v1/connect with the same nonce and "relay": true (capped at
+//   3 per nonce: ICE restarts); the host receives it on its long-poll. The host never mints.
+//   The TURN key is env.TURN_KEY_API_TOKEN (a wrangler secret); the key id is env.TURN_KEY_ID
+//   (a wrangler variable). Neither is in the repo, and Cloudflare's answer is never echoed.
 // - Bans (a banned id cannot host, and cannot join anyone) persist in the object's SQLite, so they
 //   survive an eviction; the refusal counters and a ring of recent refusals are memory-only.
 //
@@ -37,8 +45,9 @@
 // out (a poll is the renewal). Nothing important survives an eviction (a host re-registers),
 // except the bans.
 //
-// Deploy: wrangler.toml (one Worker, one DO class, `Lobby`); RELAY is a plain variable
-// (`wrangler variables put`) and ADMIN_SECRET a secret (`wrangler secret put`). Free tier.
+// Deploy: wrangler.toml (one Worker, one DO class, `Lobby`); RELAY and TURN_KEY_ID are plain
+// variables (`wrangler variables put`), ADMIN_SECRET and TURN_KEY_API_TOKEN secrets
+// (`wrangler secret put`). Free tier.
 // The how-to is research/docs/online-architecture.md, section 7.
 
 const PROTO = 1;
@@ -56,6 +65,11 @@ const CONNECTS_MAX = 8; // the NIC's pending-peer cap (src/fci_nic.c)
 const HOST_CONNECTS_PER_MINUTE = 24; // per-host flood budget (section 5)
 const MESSAGE_MAX = 512; // register, connect and admin bodies
 const BANS_RING = 1000; // recent refusals kept in memory
+const TURN_WINDOW_MS = 600000; // a mint (and a relayed connect) is valid for 10 minutes after the connect
+const TURN_MAPS_MAX = 1000; // the recent-pairs and mints maps are tiny by construction; cap them anyway
+const MINTS_PER_WINDOW = 6; // mints per guest and per address, per 10-minute window
+const RELAY_CONNECTS_PER_NONCE = 3; // re-POSTs of a relayed address (ICE restarts)
+const TURN_TTL = 14400; // s; the credential must outlive the longest relayed session
 const LIMITS = {
   hostsPerIp: 4,
   hostsPerEndpointIp: 4, // live hosts that may list the same endpoint IP (a hostile endpoint is bounded)
@@ -136,11 +150,12 @@ function validRegistration(msg, ip) {
 }
 
 class RateLimit {
-  constructor() {
+  constructor(span = 60000) {
+    this.span = span;
     this.m = new Map();
   }
   take(key, max, now) {
-    const minute = Math.floor(now / 60000);
+    const minute = Math.floor(now / this.span);
     let e = this.m.get(key);
     if (!e || e.minute !== minute) {
       e = { minute, n: 0 };
@@ -148,11 +163,29 @@ class RateLimit {
     }
     e.n++;
     if (this.m.size > 4000) {
-      // drop the oldest minutes so a flood of unique addresses can't grow this without bound
+      // drop the oldest windows so a flood of unique addresses can't grow this without bound
       for (const [k, v] of this.m) if (v.minute < minute) this.m.delete(k);
     }
     return e.n <= max;
   }
+}
+
+// Cloudflare's generate-ice-servers answer: iceServers is an array (a STUN-only entry, then the
+// TURN entry with username and credential) or, in older shapes, a single object. We want the
+// turn: UDP urls only: the cards relay over plain UDP, and the tcp/turns entries are for browsers.
+function turnCredential(ice) {
+  const list = Array.isArray(ice) ? ice : ice && typeof ice === "object" ? [ice] : [];
+  for (const e of list) {
+    if (!e || typeof e !== "object") continue;
+    const username = String(e.username || "");
+    const credential = String(e.credential || "");
+    if (!username || !credential) continue;
+    const urls = (Array.isArray(e.urls) ? e.urls : [])
+      .map(String)
+      .filter((u) => u.startsWith("turn:") && (u.includes("transport=udp") || !u.includes("transport=")));
+    if (urls.length) return { username, credential, urls };
+  }
+  return null;
 }
 
 export class Lobby {
@@ -166,6 +199,9 @@ export class Lobby {
     this.waiters = new Map(); // id -> {resolve, timer}
     this.limits = new RateLimit();
     this.hostConn = new Map(); // id -> {minute, n} (the per-host connect budget)
+    this.pairs = new Map(); // gid+":"+nonce -> {host, at}: recent guest connects (the mint gate)
+    this.mints = new Map(); // gid+":"+nonce -> {host, at, relay}: recent mints (the relay-connect gate)
+    this.mintLimit = new RateLimit(TURN_WINDOW_MS); // mints per guest and per address
     this.abuse = { byIp: new Map(), ring: [] };
     // SqlStorage (Cloudflare): storage.sql.exec(query, ...bindings) returns a cursor
     state.storage.sql.exec(
@@ -177,11 +213,20 @@ export class Lobby {
   // lives in SQLite.
   note(kind, ip, id) {
     const c =
-      this.abuse.byIp.get(ip) || { ip, rate: 0, bad: 0, nohost: 0, banned: 0 };
+      this.abuse.byIp.get(ip) || { ip, rate: 0, bad: 0, nohost: 0, banned: 0, norelay: 0 };
     c[kind]++;
     this.abuse.byIp.set(ip, c);
     this.abuse.ring.push({ ip, kind, id: id || null, at: Date.now() });
     if (this.abuse.ring.length > BANS_RING) this.abuse.ring.shift();
+  }
+
+  // The connect queue is drained by the host's poll, so the mint and relay-connect gates keep
+  // their own recent (gid, nonce) records: pruned by age (10 minutes) and capped in size.
+  pruneTurnState(now) {
+    for (const [k, v] of this.pairs) if (now - v.at > TURN_WINDOW_MS) this.pairs.delete(k);
+    for (const [k, v] of this.mints) if (now - v.at > TURN_WINDOW_MS) this.mints.delete(k);
+    for (const m of [this.pairs, this.mints])
+      if (m.size > TURN_MAPS_MAX) for (const k of [...m.keys()].slice(0, m.size - TURN_MAPS_MAX)) m.delete(k);
   }
 
   ban(id, reason, date) {
@@ -222,8 +267,11 @@ export class Lobby {
   }
 
   release(id) {
-    // The host sees {endpoint, nonce, mac} per connect; the guest's id is the object's business.
-    const q = (this.connects.get(id) || []).map(({ endpoint, nonce, mac }) => ({ endpoint, nonce, mac }));
+    // The host sees {endpoint, nonce, mac} per connect (plus relay: true for a relayed address);
+    // the guest's id is the object's business.
+    const q = (this.connects.get(id) || []).map(({ endpoint, nonce, mac, relay }) =>
+      relay ? { endpoint, nonce, mac, relay: true } : { endpoint, nonce, mac }
+    );
     this.connects.delete(id);
     return json({ connects: q });
   }
@@ -240,6 +288,7 @@ export class Lobby {
       if (url.pathname === "/v1/register" && request.method === "POST") return await this.register(request, ip);
       if (url.pathname === "/v1/connects" && request.method === "GET") return await this.poll(url, ip);
       if (url.pathname === "/v1/connect" && request.method === "POST") return await this.connect(request, ip);
+      if (url.pathname === "/v1/turn" && request.method === "POST") return await this.turn(request, ip);
       return json({ error: "not found" }, 404);
     } catch (e) {
       return json({ error: "internal" }, 500);
@@ -383,22 +432,45 @@ export class Lobby {
       this.note("rate", ip, msg.id);
       return json({ error: "host busy" }, 429);
     }
+    // A relayed address: the guest's punch failed, it ALLOCATEd through Cloudflare TURN, and this
+    // is its second connect with the same nonce. It is only accepted after a mint for this
+    // (gid, nonce, host) within the last 10 minutes, and at most RELAY_CONNECTS_PER_NONCE times
+    // (ICE restarts re-POST a new address). It skips the per-endpoint-IP cap (many guests' relayed
+    // addresses share Cloudflare's IPs) and keeps every other check and budget.
+    const relay = msg.relay === true;
+    const key = gid + ":" + msg.nonce;
+    let mint = null;
+    if (relay) {
+      mint = this.mints.get(key);
+      if (!mint || mint.host !== msg.id || now - mint.at > TURN_WINDOW_MS) {
+        this.note("bad", ip, gid);
+        return json({ error: "no relay" }, 403);
+      }
+      if (mint.relay >= RELAY_CONNECTS_PER_NONCE) {
+        this.note("rate", ip, gid);
+        return json({ error: "too many relays" }, 429);
+      }
+    }
     // The guest's endpoint IP is where the host will punch: cap how many pending connects target
-    // one IP (a hostile guest endpoint is bounded), excluding this guest's own queued entry.
+    // one IP (a hostile guest endpoint is bounded), excluding this guest's own queued entry. A
+    // relayed connect skips the cap (its endpoint is Cloudflare's, shared by every relayed guest).
     const geip = endpointIp(msg.endpoint);
     let pendingAtIp = 0;
     for (const q of this.connects.values())
       for (const c of q) if (c.gid !== gid && endpointIp(c.endpoint) === geip) pendingAtIp++;
-    if (pendingAtIp >= LIMITS.connectsPerEndpointIp) {
+    if (!relay && pendingAtIp >= LIMITS.connectsPerEndpointIp) {
       this.note("rate", ip, gid);
       return json({ error: "too many connects at this endpoint" }, 429);
     }
+    if (relay) mint.relay++;
+    this.pairs.set(key, { host: msg.id, at: now }); // the mint gate: this guest reached this host
+    this.pruneTurnState(now);
     const q = this.connects.get(msg.id) || [];
     const i = q.findIndex((c) => c.gid === gid);
-    if (i >= 0) q[i] = { endpoint: msg.endpoint, nonce: msg.nonce, mac: msg.mac, gid };
+    if (i >= 0) q[i] = { endpoint: msg.endpoint, nonce: msg.nonce, mac: msg.mac, gid, relay };
     else {
       if (q.length >= CONNECTS_MAX) q.shift(); // drop the oldest: the NIC can only hold 8 pending
-      q.push({ endpoint: msg.endpoint, nonce: msg.nonce, mac: msg.mac, gid });
+      q.push({ endpoint: msg.endpoint, nonce: msg.nonce, mac: msg.mac, gid, relay });
     }
     this.connects.set(msg.id, q);
     const w = this.waiters.get(msg.id);
@@ -409,6 +481,76 @@ export class Lobby {
     }
     // The host's endpoint and MAC are the reply: the listing shows ids only.
     return json({ endpoint: host.endpoint, mac: host.mac });
+  }
+
+  // Mint a Cloudflare TURN credential for a guest. The guest must have connected to `id` with
+  // this `nonce` within the last 10 minutes (the pair map, kept because the connect queue is
+  // drained by the host's poll). The TURN key never leaves the Worker: it signs the call to
+  // Cloudflare's credential API, and Cloudflare's body is never echoed to the caller.
+  async turn(request, ip) {
+    const now = Date.now();
+    const msg = await this.readJson(request, ip);
+    if (msg === null) return this._refusal;
+    if (!ID.test(String(msg.id)) || !NONCE.test(String(msg.nonce))) {
+      this.note("bad", ip);
+      return json({ error: "bad request" }, 400);
+    }
+    if (!TOKEN.test(String(msg.token))) {
+      this.note("bad", ip);
+      return json({ error: "bad token" }, 400);
+    }
+    const gid = await deriveId(msg.token);
+    if (this.isBanned(gid)) {
+      this.note("banned", ip, gid);
+      return json({ error: "banned" }, 403);
+    }
+    const pair = this.pairs.get(gid + ":" + msg.nonce);
+    const host = this.hosts.get(String(msg.id));
+    if (!host || this.isBanned(String(msg.id))) {
+      this.note("nohost", ip, msg.id);
+      return json({ error: "no such host" }, 404);
+    }
+    if (!pair || pair.host !== String(msg.id) || now - pair.at > TURN_WINDOW_MS) {
+      this.note("bad", ip, gid);
+      return json({ error: "no connect" }, 403);
+    }
+    if (
+      !this.mintLimit.take("gid:" + gid, MINTS_PER_WINDOW, now) ||
+      !this.mintLimit.take("ip:" + ip, MINTS_PER_WINDOW, now)
+    ) {
+      this.note("rate", ip, gid);
+      return json({ error: "slow down" }, 429);
+    }
+    const keyId = String((this.env && this.env.TURN_KEY_ID) || "");
+    const apiToken = String((this.env && this.env.TURN_KEY_API_TOKEN) || "");
+    if (!keyId || !apiToken) {
+      this.note("norelay", ip, gid);
+      return json({ error: "no relay" }, 503);
+    }
+    let data = null;
+    try {
+      const resp = await fetch(
+        "https://rtc.live.cloudflare.com/v1/turn/keys/" + keyId + "/credentials/generate-ice-servers",
+        {
+          method: "POST",
+          headers: { authorization: "Bearer " + apiToken, "content-type": "application/json" },
+          body: JSON.stringify({ ttl: TURN_TTL }),
+        }
+      );
+      if (resp.ok) data = await resp.json().catch(() => null);
+    } catch {
+      data = null;
+    }
+    const cred = turnCredential(data && data.iceServers);
+    if (!cred) {
+      this.note("norelay", ip, gid);
+      return json({ error: "no relay" }, 503);
+    }
+    // a re-mint keeps the nonce's relay-connect count: the 3-per-nonce cap is per nonce, not per mint
+    const prev = this.mints.get(gid + ":" + msg.nonce);
+    this.mints.set(gid + ":" + msg.nonce, { host: String(msg.id), at: now, relay: prev ? prev.relay : 0 });
+    this.pruneTurnState(now);
+    return json({ username: cred.username, credential: cred.credential, urls: cred.urls });
   }
 
   // The shared body check: JSON, at most MESSAGE_MAX bytes. Refusals are counted.
@@ -481,8 +623,8 @@ export class Lobby {
     }
     if (url.pathname === "/admin/abuse" && request.method === "GET") {
       const byIp = [...this.abuse.byIp.values()].sort((a, b) => {
-        const ta = a.rate + a.bad + a.nohost + a.banned;
-        const tb = b.rate + b.bad + b.nohost + b.banned;
+        const ta = a.rate + a.bad + a.nohost + a.banned + a.norelay;
+        const tb = b.rate + b.bad + b.nohost + b.banned + b.norelay;
         return tb - ta;
       });
       return json({ byIp: byIp.slice(0, 100), ring: this.abuse.ring });

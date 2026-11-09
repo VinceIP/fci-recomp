@@ -77,6 +77,43 @@ function conn(id, ip, token, endpoint) {
 
 const sha16 = (s) => createHash("sha256").update(s).digest("hex").slice(0, 32);
 
+// The Worker mints through the global fetch; the tests stub it the way they fake the storage
+// (a test-local stand-in, no package). The shape mirrors Cloudflare's 201 (generate-ice-servers):
+// an array with a STUN-only entry and a TURN entry (the urls mix udp, tcp and turns).
+const STUN_ENTRY = { urls: ["stun:stun.cloudflare.com:3478"] };
+const TURN_ENTRY = {
+  urls: [
+    "turn:turn.cloudflare.com:3478?transport=udp",
+    "turn:turn.cloudflare.com:443?transport=udp",
+    "turn:turn.cloudflare.com:3478?transport=tcp",
+    "turn:turn.cloudflare.com:80?transport=tcp",
+    "turns:turn.cloudflare.com:5349?transport=tcp",
+  ],
+  username: "u1".repeat(32),
+  credential: "c2".repeat(32),
+};
+const TURN_ENV = { TURN_KEY_ID: "keyid", TURN_KEY_API_TOKEN: "apitoken" };
+const cfOk = (ice) => new Response(JSON.stringify({ iceServers: ice }), { status: 201 });
+const cfBad = (status, text) => new Response(text, { status });
+
+function stubFetch(impl) {
+  const old = globalThis.fetch;
+  globalThis.fetch = impl;
+  return () => {
+    globalThis.fetch = old;
+  };
+}
+
+// A host with a token, a guest token, and one connect by the guest to the host with `nonce`.
+async function hostAndConn(lobby, { nonce, gToken, ip = "93.184.100.9", endpoint } = {}) {
+  const hToken = "c".repeat(64);
+  const [, regBody] = await r(lobby, reg({ token: hToken }));
+  const hid = regBody.id;
+  const [s] = await r(lobby, conn(hid, ip, gToken || "d".repeat(64), endpoint));
+  if (s !== 200) throw new Error("connect refused: " + s);
+  return { hToken, hid, nonce: nonce || "e".repeat(32) };
+}
+
 async function r(lobby, request) {
   const response = await lobby.fetch(request);
   return [response.status, await response.json().catch(() => null)];
@@ -475,4 +512,242 @@ test("the admin routes: the secret gates everything; bans and the abuse counters
   assert.equal(status, 200);
   assert.ok(body.ring.some((e) => e.kind === "bad"));
   assert.ok(body.byIp.length >= 1);
+});
+
+test("mint without a prior connect is 403", async () => {
+  const lobby = mk(TURN_ENV);
+  const [, regBody] = await r(lobby, reg({ token: "c".repeat(64) }));
+  const hid = regBody.id;
+  const restore = stubFetch(async () => cfOk([STUN_ENTRY, TURN_ENTRY]));
+  try {
+    let [status, body] = await r(lobby, req("/v1/turn", { method: "POST", body: { id: hid, nonce: "e".repeat(32), token: "d".repeat(64) } }));
+    assert.equal(status, 403);
+    assert.equal(body.error, "no connect");
+    // a connect for another host does not open this one
+    await r(lobby, conn(hid, "93.184.100.9", "d".repeat(64)));
+    const other = (await r(lobby, reg({ token: "a".repeat(64) }, "8.8.8.11")))[1].id;
+    [status, body] = await r(lobby, req("/v1/turn", { method: "POST", body: { id: other, nonce: "e".repeat(32), token: "d".repeat(64) } }));
+    assert.equal(status, 403);
+  } finally {
+    restore();
+  }
+});
+
+test("mint after connect: 200, the turn: UDP urls only, and a usable reply", async () => {
+  const lobby = mk(TURN_ENV);
+  let calls = [];
+  const restore = stubFetch(async (url, init) => {
+    calls.push([String(url), init && init.headers && init.headers.authorization]);
+    return cfOk([STUN_ENTRY, TURN_ENTRY]);
+  });
+  try {
+    const { hid, nonce } = await hostAndConn(lobby, {});
+    const [status, body] = await r(lobby, req("/v1/turn", { method: "POST", body: { id: hid, nonce, token: "d".repeat(64) } }));
+    assert.equal(status, 200);
+    assert.equal(body.username, TURN_ENTRY.username);
+    assert.equal(body.credential, TURN_ENTRY.credential);
+    assert.deepEqual(body.urls, [
+      "turn:turn.cloudflare.com:3478?transport=udp",
+      "turn:turn.cloudflare.com:443?transport=udp",
+    ]); // no stun, no tcp, no turns
+    // the Worker called Cloudflare with the key id and the bearer token (the key never reaches the caller)
+    assert.equal(calls.length, 1);
+    assert.ok(calls[0][0].includes("/v1/turn/keys/keyid/credentials/generate-ice-servers"));
+    assert.equal(calls[0][1], "Bearer apitoken");
+    const text = JSON.stringify(body);
+    assert.ok(!text.includes("apitoken") && !text.includes("keyid"), "no key material in the reply");
+  } finally {
+    restore();
+  }
+});
+
+test("unset TURN env: 503 no relay, and Cloudflare is never called", async () => {
+  const lobby = mk(); // no TURN_KEY_ID / TURN_KEY_API_TOKEN
+  let called = false;
+  const restore = stubFetch(async () => {
+    called = true;
+    return cfOk([STUN_ENTRY, TURN_ENTRY]);
+  });
+  try {
+    const { hid, nonce } = await hostAndConn(lobby, {});
+    const [status, body] = await r(lobby, req("/v1/turn", { method: "POST", body: { id: hid, nonce, token: "d".repeat(64) } }));
+    assert.equal(status, 503);
+    assert.deepEqual(body, { error: "no relay" });
+    assert.ok(!called);
+  } finally {
+    restore();
+  }
+});
+
+test("Cloudflare 500: 503 no relay, the body is not echoed", async () => {
+  const lobby = mk(TURN_ENV);
+  const secret = "CF-BODY-MUST-NOT-LEAK";
+  const restore = stubFetch(async () => cfBad(500, JSON.stringify({ error: secret, detail: "boom" })));
+  try {
+    const { hid, nonce } = await hostAndConn(lobby, {});
+    const [status, body] = await r(lobby, req("/v1/turn", { method: "POST", body: { id: hid, nonce, token: "d".repeat(64) } }));
+    assert.equal(status, 503);
+    assert.equal(JSON.stringify(body), JSON.stringify({ error: "no relay" }));
+    assert.ok(!JSON.stringify(body).includes(secret));
+    // a malformed 201 is refused the same way (no credential to hand over)
+    const restore2 = stubFetch(async () => cfOk("not-an-object"));
+    try {
+      const [s2, b2] = await r(lobby, req("/v1/turn", { method: "POST", body: { id: hid, nonce, token: "d".repeat(64) } }));
+      assert.equal(s2, 503);
+      assert.deepEqual(b2, { error: "no relay" });
+    } finally {
+      restore2();
+    }
+  } finally {
+    restore();
+  }
+});
+
+test("mint rate limits: 6 per guest in 10 minutes, 6 per address in 10 minutes", async () => {
+  // per guest: one connect, seven mints for the same (gid, nonce) -> the 7th is 429
+  const lobby = mk(TURN_ENV);
+  const restore = stubFetch(async () => cfOk([STUN_ENTRY, TURN_ENTRY]));
+  try {
+    const { hid, nonce } = await hostAndConn(lobby, {});
+    let status;
+    for (let i = 0; i < 6; i++) {
+      [status] = await r(lobby, req("/v1/turn", { method: "POST", body: { id: hid, nonce, token: "d".repeat(64) } }));
+      assert.equal(status, 200, `mint ${i + 1} accepted`);
+    }
+    [status] = await r(lobby, req("/v1/turn", { method: "POST", body: { id: hid, nonce, token: "d".repeat(64) } }));
+    assert.equal(status, 429);
+  } finally {
+    restore();
+  }
+  // per address: seven guests (each with its own connect) from one address -> the 7th mint is 429
+  const lobby2 = mk(TURN_ENV);
+  const restore2 = stubFetch(async () => cfOk([STUN_ENTRY, TURN_ENTRY]));
+  try {
+    const { hid } = await hostAndConn(lobby2, {});
+    let status2;
+    for (let i = 0; i < 7; i++) {
+      const g = ("d" + i).repeat(32); // 'd' + 0-6 are all hex
+      const nonce = ("e" + i).repeat(16); // a nonce is 32 hex chars
+      const [cs] = await r(lobby2, conn(hid, "93.184.100.9", g));
+      assert.equal(cs, 200);
+      // the conn() helper's nonce is fixed; re-post with the guest's own nonce
+      [status2] = await r(lobby2, req("/v1/connect", {
+        method: "POST",
+        ip: "93.184.100.9",
+        body: { id: hid, endpoint: "93.184.100.9:41000", nonce, mac: "02:46:43:aa:bb:cc", token: g },
+      }));
+      assert.equal(status2, 200);
+      [status2] = await r(lobby2, req("/v1/turn", { method: "POST", body: { id: hid, nonce, token: g } }));
+      assert.equal(status2, i < 6 ? 200 : 429, `mint ${i + 1} for guest ${i}`);
+    }
+  } finally {
+    restore2();
+  }
+});
+
+test("relay connect without a mint is 403", async () => {
+  const lobby = mk(TURN_ENV);
+  const { hid, nonce } = await hostAndConn(lobby, {});
+  const [status, body] = await r(lobby, req("/v1/connect", {
+    method: "POST",
+    ip: "93.184.100.9",
+    body: { id: hid, endpoint: "198.41.200.1:30000", nonce, mac: "02:46:43:aa:bb:cc", token: "d".repeat(64), relay: true },
+  }));
+  assert.equal(status, 403);
+  assert.equal(body.error, "no relay");
+});
+
+test("relay connect after a mint: 200, skips the endpoint-IP cap, the host's poll shows relay:true", async () => {
+  const lobby = mk(TURN_ENV);
+  const restore = stubFetch(async () => cfOk([STUN_ENTRY, TURN_ENTRY]));
+  try {
+    // fill the pending-connects-per-endpoint-IP cap (8) with eight other guests at a Cloudflare IP
+    const CF_IP = "198.41.200.1";
+    const hids = [];
+    for (let i = 0; i < 9; i++) {
+      const t = ("a" + i).repeat(32);
+      const [s, b] = await r(lobby, reg({ token: t, endpoint: "8.8.4." + (10 + i) + ":40000" }, "8.8.4." + (10 + i)));
+      assert.equal(s, 200);
+      hids.push(b.id);
+    }
+    for (let i = 0; i < 8; i++) {
+      const [s] = await r(lobby, conn(hids[i], "93.184.100." + (20 + i), ("b" + i).repeat(32), CF_IP + ":" + (50000 + i)));
+      assert.equal(s, 200, `guest ${i + 1} accepted`);
+    }
+    // a ninth non-relay connect at that IP is refused (the cap is live)
+    let [status, body] = await r(lobby, conn(hids[8], "93.184.100.99", ("b" + 8).repeat(32), CF_IP + ":59999"));
+    assert.equal(status, 429);
+    assert.equal(body.error, "too many connects at this endpoint");
+    // our guest: connect, mint, relay at the same (saturated) IP -> accepted
+    const gToken = "d".repeat(64);
+    const nonce = "e".repeat(32);
+    [status] = await r(lobby, conn(hids[8], "93.184.100.9", gToken));
+    assert.equal(status, 200);
+    [status, body] = await r(lobby, req("/v1/turn", { method: "POST", body: { id: hids[8], nonce, token: gToken } }));
+    assert.equal(status, 200);
+    [status, body] = await r(lobby, req("/v1/connect", {
+      method: "POST",
+      ip: "93.184.100.9",
+      body: { id: hids[8], endpoint: CF_IP + ":30000", nonce, mac: "02:46:43:aa:bb:cc", token: gToken, relay: true },
+    }));
+    assert.equal(status, 200, "the relayed connect skips the endpoint-IP cap");
+    // the host's long-poll shows the relayed address with relay:true (polled from the host's
+    // own address: the poll is the id and token bound to the registration address)
+    const hToken = ("a" + 8).repeat(32);
+    [status, body] = await r(lobby, req(`/v1/connects?id=${hids[8]}&token=${hToken}&wait=1`, { ip: "8.8.4.18" }));
+    assert.equal(status, 200);
+    assert.equal(body.connects.length, 1);
+    assert.deepEqual(body.connects[0], {
+      endpoint: CF_IP + ":30000",
+      nonce,
+      mac: "02:46:43:aa:bb:cc",
+      relay: true,
+    });
+  } finally {
+    restore();
+  }
+});
+
+test("relay connects are capped at 3 per (gid, nonce)", async () => {
+  const lobby = mk(TURN_ENV);
+  const restore = stubFetch(async () => cfOk([STUN_ENTRY, TURN_ENTRY]));
+  try {
+    const { hid, nonce } = await hostAndConn(lobby, {});
+    const [ms] = await r(lobby, req("/v1/turn", { method: "POST", body: { id: hid, nonce, token: "d".repeat(64) } }));
+    assert.equal(ms, 200);
+    let status, body;
+    for (let i = 0; i < 3; i++) {
+      [status] = await r(lobby, req("/v1/connect", {
+        method: "POST",
+        ip: "93.184.100.9",
+        body: { id: hid, endpoint: "198.41.200.1:" + (30000 + i), nonce, mac: "02:46:43:aa:bb:cc", token: "d".repeat(64), relay: true },
+      }));
+      assert.equal(status, 200, `relay ${i + 1} accepted`);
+    }
+    [status, body] = await r(lobby, req("/v1/connect", {
+      method: "POST",
+      ip: "93.184.100.9",
+      body: { id: hid, endpoint: "198.41.200.1:30003", nonce, mac: "02:46:43:aa:bb:cc", token: "d".repeat(64), relay: true },
+    }));
+    assert.equal(status, 429);
+    assert.equal(body.error, "too many relays");
+    // a fresh nonce mints fresh and relays again (the cap is per nonce, not per guest)
+    const nonce2 = "f".repeat(32);
+    [status] = await r(lobby, req("/v1/connect", {
+      method: "POST",
+      ip: "93.184.100.9",
+      body: { id: hid, endpoint: "93.184.100.9:41000", nonce: nonce2, mac: "02:46:43:aa:bb:cc", token: "d".repeat(64) },
+    }));
+    assert.equal(status, 200);
+    [status] = await r(lobby, req("/v1/turn", { method: "POST", body: { id: hid, nonce: nonce2, token: "d".repeat(64) } }));
+    assert.equal(status, 200);
+    [status] = await r(lobby, req("/v1/connect", {
+      method: "POST",
+      ip: "93.184.100.9",
+      body: { id: hid, endpoint: "198.41.200.1:30004", nonce: nonce2, mac: "02:46:43:aa:bb:cc", token: "d".repeat(64), relay: true },
+    }));
+    assert.equal(status, 200);
+  } finally {
+    restore();
+  }
 });

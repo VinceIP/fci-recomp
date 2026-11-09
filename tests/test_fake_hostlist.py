@@ -15,12 +15,18 @@ import urllib.error
 import urllib.request
 
 # tools/ is on the path (conftest); a `tools.` import hides the toolkit's
-from fake_hostlist import Lobby, derive_id, make_handler
+from fake_hostlist import DEFAULT_TURN_URL, Lobby, derive_id, make_handler
 
 
-def start_server(break_punch=False, secret=None):
+def start_server(break_punch=False, secret=None, turn_user=None, turn_pass=None, turn_url=None):
     """Start the fake host list on a random port; return (port, server, lobby)."""
-    lobby = Lobby(break_punch=break_punch, secret=secret)
+    lobby = Lobby(
+        break_punch=break_punch,
+        secret=secret,
+        turn_user=turn_user,
+        turn_pass=turn_pass,
+        turn_url=turn_url or DEFAULT_TURN_URL,
+    )
     server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(lobby))
     server.daemon_threads = True
     port = server.server_address[1]
@@ -44,6 +50,29 @@ def http_json(url, method="GET", body=None, headers=None):
     except urllib.error.HTTPError as e:
         raw = e.read()
         return e.code, json.loads(raw) if raw else None
+
+
+def connect(base, host_id, gtoken=None, endpoint="127.0.0.1:50000", nonce=None, relay=None):
+    """POST a guest connect; return (status, body)."""
+    body = {
+        "id": host_id,
+        "endpoint": endpoint,
+        "nonce": nonce or "0123456789abcdef0123456789abcdef",
+        "mac": "02:46:43:aa:bb:cc",
+        "token": gtoken or secrets.token_hex(32),
+    }
+    if relay is not None:
+        body["relay"] = relay
+    return http_json(f"{base}/v1/connect", method="POST", body=body)
+
+
+def mint(base, host_id, gtoken, nonce):
+    """POST a TURN mint; return (status, body)."""
+    return http_json(
+        f"{base}/v1/turn",
+        method="POST",
+        body={"id": host_id, "nonce": nonce, "token": gtoken},
+    )
 
 
 def register(base, title="evolution", version="3", endpoint="127.0.0.1:40000", token=None):
@@ -339,6 +368,119 @@ def test_connect_bad_mac_is_rejected():
             },
         )
         assert status == 400, body
+    finally:
+        server.shutdown()
+
+
+def test_turn_unconfigured_is_503_no_relay():
+    """Without --turn-user / --turn-pass, /v1/turn is 503 no relay (like unset Worker secrets)."""
+    port, server, lobby = start_server()
+    try:
+        base = f"http://127.0.0.1:{port}"
+        host_id, _ = register(base)
+        gtoken = secrets.token_hex(32)
+        nonce = "0123456789abcdef0123456789abcdef"
+        status, body = connect(base, host_id, gtoken, nonce=nonce)
+        assert status == 200, body
+        status, body = mint(base, host_id, gtoken, nonce)
+        assert status == 503, body
+        assert body == {"error": "no relay"}
+    finally:
+        server.shutdown()
+
+
+def test_turn_requires_a_recent_connect():
+    """A mint without a recent connect from this guest to this host is 403."""
+    port, server, lobby = start_server(turn_user="user", turn_pass="pass")
+    try:
+        base = f"http://127.0.0.1:{port}"
+        host_id, _ = register(base)
+        gtoken = secrets.token_hex(32)
+        nonce = "0123456789abcdef0123456789abcdef"
+        status, body = mint(base, host_id, gtoken, nonce)
+        assert status == 403, body
+        assert body["error"] == "no connect"
+        # a connect to another host does not open this one
+        host_id2, _ = register(base, endpoint="127.0.0.1:40001")
+        connect(base, host_id2, gtoken, nonce=nonce)
+        status, body = mint(base, host_id, gtoken, nonce)
+        assert status == 403, body
+    finally:
+        server.shutdown()
+
+
+def test_turn_after_connect_and_relay_flow():
+    """connect → mint → relay connect: the configured credential is returned, and the host's
+    poll shows the relayed address with relay: true."""
+    port, server, lobby = start_server(turn_user="user", turn_pass="pass")
+    try:
+        base = f"http://127.0.0.1:{port}"
+        host_id, host_token = register(base)
+        gtoken = secrets.token_hex(32)
+        nonce = "0123456789abcdef0123456789abcdef"
+
+        status, body = connect(base, host_id, gtoken, nonce=nonce)
+        assert status == 200, body
+
+        status, body = mint(base, host_id, gtoken, nonce)
+        assert status == 200, body
+        assert body == {
+            "username": "user",
+            "credential": "pass",
+            "urls": ["turn:127.0.0.1:3478?transport=udp"],  # the default --turn-url
+        }
+
+        # the relay connect is accepted after the mint
+        status, body = connect(base, host_id, gtoken, endpoint="127.0.0.1:3478", nonce=nonce, relay=True)
+        assert status == 200, body
+
+        # the host's poll shows the relayed address with relay: true
+        status, body = http_json(f"{base}/v1/connects?id={host_id}&token={host_token}&wait=1")
+        assert status == 200
+        assert body["connects"] == [
+            {"endpoint": "127.0.0.1:3478", "nonce": nonce, "mac": "02:46:43:aa:bb:cc", "relay": True}
+        ]
+    finally:
+        server.shutdown()
+
+
+def test_relay_requires_a_mint_and_is_capped_per_nonce():
+    """A relay connect without a mint is 403; after a mint, at most 3 per (gid, nonce); the
+    mint rate limit is 6 per guest in 10 minutes."""
+    port, server, lobby = start_server(turn_user="user", turn_pass="pass")
+    try:
+        base = f"http://127.0.0.1:{port}"
+        host_id, _ = register(base)
+        gtoken = secrets.token_hex(32)
+        nonce = "0123456789abcdef0123456789abcdef"
+
+        status, body = connect(base, host_id, gtoken, nonce=nonce)
+        assert status == 200, body
+
+        # no mint yet: the relay connect is refused
+        status, body = connect(base, host_id, gtoken, endpoint="127.0.0.1:3478", nonce=nonce, relay=True)
+        assert status == 403, body
+        assert body["error"] == "no relay"
+
+        status, body = mint(base, host_id, gtoken, nonce)
+        assert status == 200, body
+
+        for i in range(3):
+            status, body = connect(base, host_id, gtoken, endpoint=f"127.0.0.1:347{i}", nonce=nonce, relay=True)
+            assert status == 200, body
+        status, body = connect(base, host_id, gtoken, endpoint="127.0.0.1:3499", nonce=nonce, relay=True)
+        assert status == 429, body
+        assert body["error"] == "too many relays"
+
+        # the mint rate limit: 6 per guest in 10 minutes (one more mint for a fresh nonce is the 7th)
+        status, _ = connect(base, host_id, gtoken, nonce="f" * 32)
+        assert status == 200
+        for i in range(5):
+            status, _ = mint(base, host_id, gtoken, nonce)
+            assert status == 200, f"mint {i + 2} should be accepted"
+        status, body = mint(base, host_id, gtoken, nonce)
+        assert status == 429, body
+        assert body["error"] == "slow down"
     finally:
         server.shutdown()
 
