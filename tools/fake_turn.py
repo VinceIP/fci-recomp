@@ -36,10 +36,10 @@ import zlib
 MAGIC = 0x2112A442
 MAGIC_BYTES = struct.pack("!I", MAGIC)
 
-# STUN message classes (low 3 bits of the 16-bit message type).
+# STUN message classes (the two interleaved class bits of the 16-bit message type).
 CLS_REQ, CLS_IND, CLS_SUCCESS, CLS_ERROR = 0, 1, 2, 3
 
-# STUN methods (high 13 bits).
+# STUN methods (RFC 8489 2, RFC 8656).
 M_BINDING = 0x001
 M_ALLOCATE = 0x003
 M_REFRESH = 0x004
@@ -50,7 +50,19 @@ M_CHANNEL_BIND = 0x009
 
 
 def mtype(method, cls):
-    return (method << 3) | cls
+    """STUN message type (RFC 8489 5): the two class bits are interleaved with the method
+    bits, so Allocate is 0x0003/0x0103/0x0113 and the Data indication is 0x0017."""
+    return ((method & 0x0F80) << 2) | ((method & 0x0070) << 1) | (method & 0x000F) | ((cls & 2) << 7) | ((cls & 1) << 4)
+
+
+def type_method(mtype_val):
+    """The method of a STUN message type (RFC 8489 5)."""
+    return (((mtype_val & 0x3E00) >> 9) << 7) | (((mtype_val & 0x0060) >> 5) << 4) | (mtype_val & 0x000F)
+
+
+def type_class(mtype_val):
+    """The class of a STUN message type (RFC 8489 5)."""
+    return ((mtype_val & 0x0100) >> 7) | ((mtype_val & 0x0010) >> 4)
 
 
 T_BINDING_REQ = mtype(M_BINDING, CLS_REQ)
@@ -96,8 +108,9 @@ MAX_DATAGRAM = 65535
 
 
 def attr_value(code, phrase=""):
-    """Build an ERROR-CODE attribute value: [0][class][number] + reason phrase."""
-    return bytes([0, code // 100, code % 100]) + phrase.encode()
+    """Build an ERROR-CODE attribute value (RFC 8489 14.8): two zero bytes, then the class
+    (hundreds) and the number, then the reason phrase."""
+    return bytes([0, 0, code // 100, code % 100]) + phrase.encode()
 
 
 def enc_attr(atype, value):
@@ -297,6 +310,7 @@ class TurnServer:
         self.lifetime = lifetime
         self.nonce_life = nonce_life
         self.log = log
+        self.log_lines = []  # every note(), for the --log assertions in the tests
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.bind(("0.0.0.0", port))
         self.allocations = {}  # 5-tuple -> Allocation
@@ -306,8 +320,10 @@ class TurnServer:
         self._stop = False
 
     def note(self, msg):
+        line = f"fake_turn: {msg}"
+        self.log_lines.append(line)
         if self.log:
-            print(f"fake_turn: {msg}", flush=True)
+            print(line, flush=True)
 
     def mint_nonce(self):
         n = os.urandom(16).hex()
@@ -394,7 +410,9 @@ class TurnServer:
 
     def handle_allocate(self, data, src, txn, attrs):
         transport = get1(attrs, A_REQUESTED_TRANSPORT)
-        if transport is not None and transport[0] != TRANSPORT_UDP:
+        if transport is None:
+            return self.error(txn, T_ALLOCATE_ERROR, 400, "REQUESTED-TRANSPORT required")
+        if transport[0] != TRANSPORT_UDP:
             return self.error(txn, T_ALLOCATE_ERROR, 442, "Unsupported transport")
         ft = (src[0], src[1], self.relay_ip, self.port, TRANSPORT_UDP)
         existing = self.allocations.get(ft)
@@ -468,6 +486,7 @@ class TurnServer:
             return self.error(txn, T_CREATE_PERM_ERROR, 400, "Bad peer address")
         alloc.permissions.add(decoded[0])
         alloc.perm_deadlines[decoded[0]] = time.monotonic() + PERMISSION_LIFETIME
+        self.note(f"CreatePermission from {src[0]}:{src[1]} -> peer {decoded[0]}:{decoded[1]}")
         return self.success(txn, T_CREATE_PERM_SUCCESS, [], res, A_FINGERPRINT in attrs)
 
     def handle_channel_bind(self, data, src, txn, attrs):
@@ -488,8 +507,11 @@ class TurnServer:
         decoded = dec_addr(peer, txn)
         if decoded is None:
             return self.error(txn, T_CHANNEL_BIND_ERROR, 400, "Bad peer address")
+        if num in alloc.channels and alloc.channels[num] != decoded:
+            return self.error(txn, T_CHANNEL_BIND_ERROR, 400, "Channel bound to a different address")
         alloc.channels[num] = decoded
         alloc.chan_deadlines[num] = time.monotonic() + CHANNEL_LIFETIME
+        self.note(f"ChannelBind 0x{num:04x} from {src[0]}:{src[1]} -> peer {decoded[0]}:{decoded[1]}")
         return self.success(txn, T_CHANNEL_BIND_SUCCESS, [], res, A_FINGERPRINT in attrs)
 
     def _forward(self, alloc, peer, payload):
@@ -499,21 +521,27 @@ class TurnServer:
         ft = (src[0], src[1], self.relay_ip, self.port, TRANSPORT_UDP)
         alloc = self.allocations.get(ft)
         if alloc is None:
+            self.note(f"drop Send from {src[0]}:{src[1]}: no allocation")
             return  # indication with no allocation: silently ignore
         peer = get1(attrs, A_XOR_PEER)
         data = get1(attrs, A_DATA)
         if peer is None or data is None:
+            self.note(f"drop Send from {src[0]}:{src[1]}: missing XOR-PEER-ADDRESS or DATA")
             return
         decoded = dec_addr(peer, txn)
         if decoded is None:
+            self.note(f"drop Send from {src[0]}:{src[1]}: bad peer address")
             return
         if decoded[0] not in alloc.permissions:
+            self.note(f"drop Send to {decoded[0]}:{decoded[1]} from {src[0]}:{src[1]}: no permission")
             return  # no permission: drop (RFC 8656 Figure 3)
+        self.note(f"Send from {src[0]}:{src[1]} -> {decoded[0]}:{decoded[1]} ({len(data)} bytes)")
         self._forward(alloc, decoded, data)
 
     def handle_channel_data(self, src, data):
         # ChannelData is not STUN-formatted: 2-byte channel + 2-byte length + payload.
         if len(data) < 4:
+            self.note(f"drop ChannelData from {src[0]}:{src[1]}: shorter than the 4-byte header")
             return
         num = struct.unpack("!H", data[:2])[0]
         length = struct.unpack("!H", data[2:4])[0]
@@ -521,10 +549,13 @@ class TurnServer:
         ft = (src[0], src[1], self.relay_ip, self.port, TRANSPORT_UDP)
         alloc = self.allocations.get(ft)
         if alloc is None:
+            self.note(f"drop ChannelData 0x{num:04x} from {src[0]}:{src[1]}: no allocation")
             return  # ChannelData with no allocation: silently ignore
         peer = alloc.channels.get(num)
         if peer is None:
+            self.note(f"drop ChannelData 0x{num:04x} from {src[0]}:{src[1]}: channel not bound")
             return  # no such channel: silently ignore
+        self.note(f"ChannelData 0x{num:04x} from {src[0]}:{src[1]} -> {peer[0]}:{peer[1]} ({len(payload)} bytes)")
         self._forward(alloc, peer, payload)
 
     # -- incoming relayed data -> Data indication / ChannelData ---------------
@@ -627,7 +658,7 @@ def main(argv=None):
     p.add_argument("--relay-ip", default="127.0.0.1")
     p.add_argument("--user", required=True)
     p.add_argument("--pass", dest="password", required=True)
-    p.add_argument("--realm", default="cloudflare.com")
+    p.add_argument("--realm", default="turn.cloudflare.com")
     p.add_argument("--lifetime", type=int, default=600)
     p.add_argument("--nonce-life", type=int, default=600)
     p.add_argument("--log", action="store_true")

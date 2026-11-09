@@ -15,6 +15,8 @@ import pytest
 
 import fake_turn as ft
 
+REALM = "turn.cloudflare.com"
+
 
 def free_port():
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -25,7 +27,7 @@ def free_port():
 
 
 class Server:
-    def __init__(self, user="u", password="p", realm="cloudflare.com", lifetime=600, nonce_life=600):
+    def __init__(self, user="u", password="p", realm=REALM, lifetime=600, nonce_life=600):
         self.port = free_port()
         self.server = ft.TurnServer(self.port, "127.0.0.1", user, password, realm, lifetime, nonce_life, log=False)
         self.addr = ("127.0.0.1", self.port)
@@ -100,7 +102,7 @@ class Client:
     @staticmethod
     def _errcode(attrs):
         v = ft.get1(attrs, ft.A_ERROR_CODE)
-        return None if v is None else v[1] * 100 + v[2]
+        return None if v is None else v[2] * 100 + v[3]
 
     def _auth_msg(self, mtype, txn, attrs, nonce, realm):
         key = ft.cred_key(self.user, realm, self.password)
@@ -206,7 +208,7 @@ class Client:
 
 
 def test_binding(turn):
-    c = Client(turn.addr, "u", "p", "cloudflare.com")
+    c = Client(turn.addr, "u", "p", REALM)
     mt, txn, rattrs = c.binding()
     assert mt == ft.T_BINDING_SUCCESS
     ip, port = ft.dec_addr(ft.get1(rattrs, ft.A_XOR_MAPPED), txn)
@@ -215,7 +217,7 @@ def test_binding(turn):
 
 
 def test_allocate_long_term_auth(turn):
-    c = Client(turn.addr, "u", "p", "cloudflare.com")
+    c = Client(turn.addr, "u", "p", REALM)
     mt, rattrs = c.allocate()
     assert mt == ft.T_ALLOCATE_SUCCESS
     assert c.relay is not None and c.relay[0] == "127.0.0.1"
@@ -225,7 +227,7 @@ def test_allocate_long_term_auth(turn):
 
 
 def test_allocate_wrong_password(turn):
-    c = Client(turn.addr, "u", "wrong-password", "cloudflare.com")
+    c = Client(turn.addr, "u", "wrong-password", REALM)
     mt, rattrs = c.allocate()
     assert mt == ft.T_ALLOCATE_ERROR
     assert c._errcode(rattrs) == 401  # re-challenged, never succeeds
@@ -233,7 +235,7 @@ def test_allocate_wrong_password(turn):
 
 
 def test_second_allocate_mismatch(turn):
-    c = Client(turn.addr, "u", "p", "cloudflare.com")
+    c = Client(turn.addr, "u", "p", REALM)
     mt1, _ = c.allocate()
     assert mt1 == ft.T_ALLOCATE_SUCCESS
     mt2, rattrs = c.allocate()  # new transaction id -> 437
@@ -244,7 +246,7 @@ def test_second_allocate_mismatch(turn):
 
 def test_nonce_reuse(turn):
     """One nonce, reused across Allocate, CreatePermission, ChannelBind, Refresh: no 438."""
-    c = Client(turn.addr, "u", "p", "cloudflare.com")
+    c = Client(turn.addr, "u", "p", REALM)
     mt, _ = c.allocate()  # 401 -> auth with the challenge nonce -> success
     assert mt == ft.T_ALLOCATE_SUCCESS
     n = c.last_nonce
@@ -254,37 +256,37 @@ def test_nonce_reuse(turn):
         (ft.A_XOR_PEER, ft.enc_addr(1, "127.0.0.1", 1, txn)),
     ]
     rf = lambda txn: [(ft.A_LIFETIME, struct.pack("!I", 600))]
-    assert c._send_auth(ft.T_CREATE_PERM_REQ, cp, n, "cloudflare.com")[0] == ft.T_CREATE_PERM_SUCCESS
-    assert c._send_auth(ft.T_CHANNEL_BIND_REQ, cb, n, "cloudflare.com")[0] == ft.T_CHANNEL_BIND_SUCCESS
-    assert c._send_auth(ft.T_REFRESH_REQ, rf, n, "cloudflare.com")[0] == ft.T_REFRESH_SUCCESS
+    assert c._send_auth(ft.T_CREATE_PERM_REQ, cp, n, REALM)[0] == ft.T_CREATE_PERM_SUCCESS
+    assert c._send_auth(ft.T_CHANNEL_BIND_REQ, cb, n, REALM)[0] == ft.T_CHANNEL_BIND_SUCCESS
+    assert c._send_auth(ft.T_REFRESH_REQ, rf, n, REALM)[0] == ft.T_REFRESH_SUCCESS
     c.close()
 
 
 def test_stale_nonce_expires(turn_short):
     """A nonce older than --nonce-life is 438 carrying REALM and NONCE; the retry succeeds."""
-    c = Client(turn_short.addr, "u", "p", "cloudflare.com")
+    c = Client(turn_short.addr, "u", "p", REALM)
     c.allocate()
     stale = c.last_nonce
     time.sleep(1.5)  # let the nonce (nonce-life=1s) expire; the allocation (600s) survives
     rf = lambda txn: [(ft.A_LIFETIME, struct.pack("!I", 600))]
     txn = os.urandom(12)
-    c.sock.sendto(c._auth_msg(ft.T_REFRESH_REQ, txn, rf(txn), stale, "cloudflare.com"), turn_short.addr)
+    c.sock.sendto(c._auth_msg(ft.T_REFRESH_REQ, txn, rf(txn), stale, REALM), turn_short.addr)
     mt, _, rattrs = c._drain_for(txn)
     assert mt == ft.T_REFRESH_ERROR
     assert c._errcode(rattrs) == 438
     assert ft.get1(rattrs, ft.A_REALM) is not None  # 438 carries REALM
     fresh = ft.get1(rattrs, ft.A_NONCE).decode()
-    assert c._send_auth(ft.T_REFRESH_REQ, rf, fresh, "cloudflare.com")[0] == ft.T_REFRESH_SUCCESS
+    assert c._send_auth(ft.T_REFRESH_REQ, rf, fresh, REALM)[0] == ft.T_REFRESH_SUCCESS
     c.close()
 
 
 def test_fingerprint_auth(turn):
     """A request carrying MESSAGE-INTEGRITY then FINGERPRINT authenticates."""
-    c = Client(turn.addr, "u", "p", "cloudflare.com")
+    c = Client(turn.addr, "u", "p", REALM)
     n = c._get_nonce()
     make = lambda txn: [(ft.A_REQUESTED_TRANSPORT, bytes([ft.TRANSPORT_UDP]))]
     txn = os.urandom(12)
-    c.sock.sendto(c._auth_msg_fp(ft.T_ALLOCATE_REQ, txn, make(txn), n, "cloudflare.com"), turn.addr)
+    c.sock.sendto(c._auth_msg_fp(ft.T_ALLOCATE_REQ, txn, make(txn), n, REALM), turn.addr)
     mt, txn, rattrs = c._drain_for(txn)
     assert mt == ft.T_ALLOCATE_SUCCESS
     c.close()
@@ -292,11 +294,11 @@ def test_fingerprint_auth(turn):
 
 def test_bad_fingerprint(turn):
     """A corrupt FINGERPRINT is a 400 Bad Request."""
-    c = Client(turn.addr, "u", "p", "cloudflare.com")
+    c = Client(turn.addr, "u", "p", REALM)
     n = c._get_nonce()
     make = lambda txn: [(ft.A_REQUESTED_TRANSPORT, bytes([ft.TRANSPORT_UDP]))]
     txn = os.urandom(12)
-    msg = c._auth_msg_fp(ft.T_ALLOCATE_REQ, txn, make(txn), n, "cloudflare.com")
+    msg = c._auth_msg_fp(ft.T_ALLOCATE_REQ, txn, make(txn), n, REALM)
     c.sock.sendto(msg[:-4] + b"\xde\xad\xbe\xef", turn.addr)  # corrupt the FINGERPRINT value
     mt, _, rattrs = c._drain_for(txn)
     assert mt == ft.T_ALLOCATE_ERROR
@@ -306,14 +308,14 @@ def test_bad_fingerprint(turn):
 
 def test_attr_after_integrity(turn):
     """An attribute after MESSAGE-INTEGRITY other than FINGERPRINT is a 400."""
-    c = Client(turn.addr, "u", "p", "cloudflare.com")
+    c = Client(turn.addr, "u", "p", REALM)
     n = c._get_nonce()
     make = lambda txn: [(ft.A_REQUESTED_TRANSPORT, bytes([ft.TRANSPORT_UDP]))]
     txn = os.urandom(12)
-    key = ft.cred_key("u", "cloudflare.com", "p")
+    key = ft.cred_key("u", REALM, "p")
     auth_attrs = make(txn) + [
         (ft.A_USERNAME, b"u"),
-        (ft.A_REALM, b"cloudflare.com"),
+        (ft.A_REALM, REALM.encode()),
         (ft.A_NONCE, n.encode()),
     ]
     msg = ft.build_msg(ft.T_ALLOCATE_REQ, txn, auth_attrs)
@@ -330,8 +332,8 @@ def test_attr_after_integrity(turn):
 
 
 def test_send_relay(turn):
-    a = Client(turn.addr, "u", "p", "cloudflare.com")
-    b = Client(turn.addr, "u", "p", "cloudflare.com")
+    a = Client(turn.addr, "u", "p", REALM)
+    b = Client(turn.addr, "u", "p", REALM)
     a.allocate()
     b.allocate()
     mt, _ = a.create_permission(b.relay)
@@ -346,8 +348,8 @@ def test_send_relay(turn):
 
 
 def test_channel_data_relay(turn):
-    a = Client(turn.addr, "u", "p", "cloudflare.com")
-    b = Client(turn.addr, "u", "p", "cloudflare.com")
+    a = Client(turn.addr, "u", "p", REALM)
+    b = Client(turn.addr, "u", "p", REALM)
     a.allocate()
     b.allocate()
     # Both sides bind channel 0x4001 to each other.
@@ -363,7 +365,7 @@ def test_channel_data_relay(turn):
 
 
 def test_tcp_transport_rejected(turn):
-    c = Client(turn.addr, "u", "p", "cloudflare.com")
+    c = Client(turn.addr, "u", "p", REALM)
     mt, rattrs = c.allocate(transport=ft.TRANSPORT_TCP)
     assert mt == ft.T_ALLOCATE_ERROR
     assert c._errcode(rattrs) == 442
@@ -371,9 +373,32 @@ def test_tcp_transport_rejected(turn):
 
 
 def test_bad_channel_number(turn):
-    c = Client(turn.addr, "u", "p", "cloudflare.com")
+    c = Client(turn.addr, "u", "p", REALM)
     c.allocate()
     mt, rattrs = c.channel_bind(0x5000, ("127.0.0.1", 1))  # 0x5000 is outside 0x4000-0x4FFF
     assert mt == ft.T_CHANNEL_BIND_ERROR
+    assert c._errcode(rattrs) == 400
+    c.close()
+
+
+def test_chandata_before_bind_dropped(turn):
+    """ChannelData on a channel that was never bound is dropped and logged (RFC 8656 12)."""
+    c = Client(turn.addr, "u", "p", REALM)
+    c.allocate()
+    c.channel_data(0x4001, b"early")  # 0x4001 was never bound
+    time.sleep(0.3)  # let the server process the drop
+    drops = [line for line in turn.server.log_lines if "drop ChannelData" in line and "not bound" in line]
+    assert drops, "no drop logged for ChannelData before ChannelBind:\n" + "\n".join(turn.server.log_lines)
+    c.close()
+
+
+def test_channel_bind_rebind_different_addr_400(turn):
+    """Re-binding a channel number to a different address is a 400 (RFC 8656 12)."""
+    c = Client(turn.addr, "u", "p", REALM)
+    c.allocate()
+    mt1, _ = c.channel_bind(0x4001, ("127.0.0.1", 1000))
+    assert mt1 == ft.T_CHANNEL_BIND_SUCCESS
+    mt2, rattrs = c.channel_bind(0x4001, ("127.0.0.1", 2000))  # same number, different address
+    assert mt2 == ft.T_CHANNEL_BIND_ERROR
     assert c._errcode(rattrs) == 400
     c.close()

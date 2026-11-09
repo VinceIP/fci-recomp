@@ -135,3 +135,110 @@ def test_rfc5769_2_4_longterm_roundtrip():
 def test_rfc5769_2_4_verify():
     ok, bad_after, has_fp = ft.verify_integrity(V24_KEY, V24_FULL)
     assert (ok, bad_after, has_fp) == (True, False, False)
+
+
+# --- STUN message type layout (RFC 8489 5) ------------------------------------
+# The two class bits are interleaved with the method bits. These are the published
+# values for every method/class pair the TURN client and the stand-in use.
+TYPE_TABLE = [
+    (1, 0, 0x0001),  # Binding request
+    (1, 2, 0x0101),  # Binding success
+    (1, 3, 0x0111),  # Binding error
+    (3, 0, 0x0003),  # Allocate request
+    (3, 2, 0x0103),  # Allocate success
+    (3, 3, 0x0113),  # Allocate error
+    (4, 0, 0x0004),  # Refresh request
+    (4, 2, 0x0104),  # Refresh success
+    (4, 3, 0x0114),  # Refresh error
+    (6, 1, 0x0016),  # Send indication
+    (7, 1, 0x0017),  # Data indication
+    (8, 0, 0x0008),  # CreatePermission request
+    (8, 2, 0x0108),  # CreatePermission success
+    (8, 3, 0x0118),  # CreatePermission error
+    (9, 0, 0x0009),  # ChannelBind request
+    (9, 2, 0x0109),  # ChannelBind success
+    (9, 3, 0x0119),  # ChannelBind error
+]
+
+
+def test_message_type_layout():
+    for method, cls, expected in TYPE_TABLE:
+        assert ft.mtype(method, cls) == expected
+        assert ft.type_method(expected) == method
+        assert ft.type_class(expected) == cls
+
+
+# --- The Cloudflare 401 captured from turn.cloudflare.com:3478 ----------------
+# An unauthenticated Allocate and the server's 401 challenge. Ground truth for the
+# message type layout, the ERROR-CODE encoding, and the realm.
+CF401_REQUEST = bytes.fromhex("000300082112a44219dc66a046d7e0e067f8742c0019000411000000")
+CF401_RESPONSE = bytes.fromhex(
+    "0113003c2112a44219dc66a046d7e0e067f8742c"
+    "0009000400000401"  # ERROR-CODE 401
+    "00150018335352365a5642344252584734324d31314e4a52584f3357"  # NONCE (24 bytes)
+    "001400137475726e2e636c6f7564666c6172652e636f6d00"  # REALM "turn.cloudflare.com"
+)
+
+
+def _errcode(attrs):
+    v = ft.get1(attrs, ft.A_ERROR_CODE)
+    return None if v is None else v[2] * 100 + v[3]
+
+
+def test_captured_cloudflare_401():
+    parsed = ft.parse_msg(CF401_RESPONSE)
+    assert parsed is not None
+    mtype_val, txn, attrs = parsed
+    assert mtype_val == 0x0113  # Allocate error
+    assert ft.type_method(mtype_val) == ft.M_ALLOCATE
+    assert ft.type_class(mtype_val) == ft.CLS_ERROR
+    assert _errcode(attrs) == 401
+    assert ft.get1(attrs, ft.A_REALM) == b"turn.cloudflare.com"
+    nonce = ft.get1(attrs, ft.A_NONCE)
+    assert nonce is not None and len(nonce) == 24
+    # The request is an Allocate carrying REQUESTED-TRANSPORT 17 (the first byte).
+    r = ft.parse_msg(CF401_REQUEST)
+    assert r is not None
+    assert r[0] == 0x0003  # Allocate request
+    transport = ft.get1(r[2], ft.A_REQUESTED_TRANSPORT)
+    assert transport is not None and transport[0] == 17
+
+
+def test_standin_401_matches_capture():
+    """The stand-in's own 401 to the captured request has the same type, code and realm."""
+    import socket
+    import threading
+    import time
+
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    server = ft.TurnServer(port, "127.0.0.1", "u", "p", "turn.cloudflare.com", 600, 600, log=False)
+    t = threading.Thread(target=server.run, daemon=True)
+    t.start()
+    try:
+        c = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        c.bind(("127.0.0.1", 0))
+        c.settimeout(5.0)
+        c.sendto(CF401_REQUEST, ("127.0.0.1", port))
+        txn = CF401_REQUEST[8:20]
+        parsed = None
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            data, _ = c.recvfrom(65535)
+            p = ft.parse_msg(data)
+            if p is not None and p[1] == txn:
+                parsed = p
+                break
+        assert parsed is not None, "no 401 for the captured request"
+        mtype_val, _, attrs = parsed
+        assert mtype_val == 0x0113
+        assert ft.type_method(mtype_val) == ft.M_ALLOCATE
+        assert ft.type_class(mtype_val) == ft.CLS_ERROR
+        assert _errcode(attrs) == 401
+        assert ft.get1(attrs, ft.A_REALM) == b"turn.cloudflare.com"
+        c.close()
+    finally:
+        server.close()
+        t.join(timeout=2)
