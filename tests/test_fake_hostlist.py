@@ -350,6 +350,37 @@ def test_break_punch_rewrites_connect_endpoint():
         server.shutdown()
 
 
+def test_break_punch_leaves_the_relay_connect_untouched():
+    """With --break-punch, a direct connect is rewritten (port + 1000) but the relay connect — the
+    guest's real TURN address — is forwarded untouched: the host punches it for real."""
+    port, server, lobby = start_server(break_punch=True, turn_user="user", turn_pass="pass")
+    try:
+        base = f"http://127.0.0.1:{port}"
+        host_id, host_token = register(base)
+        gtoken = secrets.token_hex(32)
+        nonce = "0123456789abcdef0123456789abcdef"
+
+        # a direct connect is rewritten (port + 1000): the host punches a dead port
+        status, body = connect(base, host_id, gtoken, nonce=nonce, endpoint="127.0.0.1:50000")
+        assert status == 200, body
+
+        status, body = mint(base, host_id, gtoken, nonce)
+        assert status == 200, body
+
+        # the relay connect carries the guest's real TURN address: forwarded untouched
+        status, body = connect(base, host_id, gtoken, endpoint="127.0.0.1:3478", nonce=nonce, relay=True)
+        assert status == 200, body
+
+        # the host's poll shows the relay address untouched (NOT 127.0.0.1:3478 + 1000)
+        status, body = http_json(f"{base}/v1/connects?id={host_id}&token={host_token}&wait=1")
+        assert status == 200
+        relayed = [c for c in body["connects"] if c.get("relay")]
+        assert len(relayed) == 1, body["connects"]
+        assert relayed[0]["endpoint"] == "127.0.0.1:3478", relayed[0]
+    finally:
+        server.shutdown()
+
+
 def test_connect_bad_mac_is_rejected():
     """A connect with a MAC without the cards' prefix is rejected."""
     port, server, lobby = start_server()

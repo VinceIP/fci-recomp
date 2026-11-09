@@ -13,6 +13,7 @@
 
 #include "mmio_decode.h"
 #include "fci_net_worker.h"
+#include "fci_turn.h"
 
 #define NIC_BASE   0xFEF00000u
 #define NIC_SIZE   0x1000u /* one page; the card's BAR is 1 KiB */
@@ -59,7 +60,7 @@
 #define STUN_PERIOD_MS   60000
 #define STUN_MAGIC       0x2112A442u
 
-typedef enum { LP_PENDING, LP_LIVE, LP_RELAY } lp_state;
+typedef enum { LP_PENDING, LP_LIVE, LP_RELAY, LP_TURN_WAIT } lp_state;
 
 typedef struct {
     struct sockaddr_in endpoint;
@@ -67,6 +68,10 @@ typedef struct {
     uint8_t nonce[16];
     lp_state state;
     int relay;            /* the relay socket (s_relsock) when in the relay room; -1 otherwise */
+    int turn_ch;          /* the TURN channel (fci_turn) when the guest relays to this peer; -1 else */
+    int guest;            /* 1 on the guest side (we connected to this host): only a guest asks for TURN */
+    int via_turn;         /* 1 when this peer's frames arrive over a TURN relay (the host side):
+                              the source is the TURN server, so they are matched by MAC, not address */
     ULONGLONG next_punch; /* next punch deadline (GetTickCount64) */
     ULONGLONG punch_end;  /* stop punching, transition or drop */
     ULONGLONG last_frame; /* last frame received (expiry) */
@@ -123,6 +128,12 @@ static uint8_t s_relcookie[RELAY_MAX][COOKIE];
 static char s_relroom[RELAY_MAX][33];   /* the room name: the peer's nonce in hex (32) */
 static ULONGLONG s_relhello[RELAY_MAX]; /* next hello deadline per socket */
 static volatile LONG s_probe; /* the game broadcast in LIST mode: the worker should fetch the list */
+/* the TURN relay (guest side): a failed punch moves the peer to LP_TURN_WAIT, the worker mints a
+ * credential (POST /v1/turn) and starts the allocation; when it is ready the peer is relayed over
+ * it and the worker posts the relayed connect (research/qwen/notes/q17-turn-design.md) */
+static volatile LONG s_turn_need;  /* a peer is in LP_TURN_WAIT: the worker should mint a credential */
+static volatile LONG s_turn_ready; /* the allocation is ready: the worker should post the relayed connect */
+static int s_turn_ok;              /* RECOMP_FCI_NET_TURN != "0" */
 
 #define TRACE(...)                                                                                           \
     do {                                                                                                     \
@@ -234,6 +245,7 @@ void fci_nic_shutdown(void)
     }
     for (i = 0; i < RELAY_MAX; i++)
         relay_socket_close(i); /* the relay rooms leave with the process */
+    fci_turn_stop();           /* the relay allocation leaves with the process */
     ReleaseSRWLockExclusive(&s_lock);
 }
 
@@ -254,6 +266,21 @@ static void send_datagram(char kind, const void *data, int len) { send_datagram_
 
 /* a frame from the guest: unicast to the peer whose card it names, broadcast (DHCP included, as the hub
    relays it) to every peer; returns 1 if it went out, 0 if dropped */
+/* a frame out over the relay: TURN channel (the guest's relay) or the hub's room socket (fallback) */
+static void relay_out(const lpeer_t *p, const uint8_t *f, uint32_t len)
+{
+    if (p->turn_ch >= 0) {
+        /* through TURN the payload is the card datagram (FCN1 'F' + frame): the host reads it
+         * on its card socket from our relayed address, like a direct peer's */
+        char buf[FRAME_MAX + 8];
+        memcpy(buf, MAGIC, 4);
+        buf[4] = 'F';
+        memcpy(buf + 5, f, (size_t)len);
+        fci_turn_send(p->turn_ch, buf, (int)len + 5);
+    } else
+        relay_send_frame(p->relay, f, len);
+}
+
 static int route_frame(const uint8_t *f, uint32_t len)
 {
     int i;
@@ -273,7 +300,7 @@ static int route_frame(const uint8_t *f, uint32_t len)
                            sizeof p->endpoint);
                     sent = 1;
                 } else if (p->state == LP_RELAY) {
-                    relay_send_frame(p->relay, f, len);
+                    relay_out(p, f, len);
                     sent = 1;
                 }
             }
@@ -292,7 +319,7 @@ static int route_frame(const uint8_t *f, uint32_t len)
                 sendto(s_sock, buf, (int)len + 5, 0, (const struct sockaddr *)&p->endpoint,
                        sizeof p->endpoint);
             } else {
-                relay_send_frame(p->relay, f, len);
+                relay_out(p, f, len);
             }
             return 1;
         }
@@ -491,7 +518,7 @@ static void lpeer_remove(int i)
 }
 
 /* add a pending peer (called by the worker under s_lock, no I/O); returns 0 on cap */
-int fci_nic_list_add_peer(const char *endpoint, const uint8_t mac[6], const uint8_t nonce[16])
+int fci_nic_list_add_peer(const char *endpoint, const uint8_t mac[6], const uint8_t nonce[16], int guest)
 {
     struct addrinfo hints, *ai = NULL;
     char host[128], port[16];
@@ -533,6 +560,10 @@ int fci_nic_list_add_peer(const char *endpoint, const uint8_t mac[6], const uint
         memcpy(p->mac, mac, 6);
         memcpy(p->nonce, nonce, 16);
         p->state = LP_PENDING;
+        p->guest = guest;
+        p->relay = -1;
+        p->turn_ch = -1;
+        p->via_turn = 0;
         now = GetTickCount64();
         p->next_punch = now;
         p->punch_end = now + PUNCH_WINDOW_MS;
@@ -577,6 +608,136 @@ int fci_nic_list_has_peer(const char *endpoint)
         }
     freeaddrinfo(ai);
     return have;
+}
+
+/* --- the TURN relay (guest side; called by the worker under s_lock) --- */
+
+static int turn_wait_fallback(int i, ULONGLONG now); /* the hub room if set, else drop (below) */
+
+/* a peer is in LP_TURN_WAIT (its punch failed): the worker should mint a credential. Cleared on read. */
+int fci_nic_list_turn_need_take(void) { return InterlockedExchange(&s_turn_need, 0); }
+
+/* the TURN allocation is ready and the peer is relayed: the worker should post the relayed
+ * connect. Cleared on read. */
+int fci_nic_list_turn_ready_take(void) { return InterlockedExchange(&s_turn_ready, 0); }
+
+/* the nonce of the first LP_TURN_WAIT peer (the one the allocation is for); 0 if none */
+int fci_nic_list_turn_wait(uint8_t nonce[16])
+{
+    int i;
+    for (i = 0; i < s_nlpeers; i++)
+        if (s_lpeers[i].state == LP_TURN_WAIT) {
+            memcpy(nonce, s_lpeers[i].nonce, 16);
+            return 1;
+        }
+    return 0;
+}
+
+/* start the allocation for the waiting peer (the worker's POST /v1/turn answered). The resolve is
+ * the module's only blocking call; from the worker thread that is fine. 1 when the Allocate went out. */
+int fci_nic_list_turn_start(const char *hostport, const char *user, const char *pass)
+{
+    int i;
+    if (!s_turn_ok || fci_turn_state() != FCI_TURN_IDLE)
+        return 0;
+    for (i = 0; i < s_nlpeers; i++)
+        if (s_lpeers[i].state == LP_TURN_WAIT)
+            break;
+    if (i >= s_nlpeers)
+        return 0;
+    return fci_turn_start(hostport, user, pass);
+}
+
+/* 0: allocating, 1: ready (the relayed address in ep), 2: failed. The ready/failed outcome is also
+ * applied to the waiting peer by the tick (fci_turn_stop on failure). */
+int fci_nic_list_turn_poll(char *ep, int len)
+{
+    struct sockaddr_in a;
+    int st = fci_turn_state();
+    if (st == FCI_TURN_READY && fci_turn_relayed(&a)) {
+        snprintf(ep, (size_t)len, "%s:%u", inet_ntoa(a.sin_addr), ntohs(a.sin_port));
+        return 1;
+    }
+    return st == FCI_TURN_FAILED ? 2 : 0;
+}
+
+/* the mint was refused (503/403/429): the waiting peer falls back to the hub relay, if set */
+void fci_nic_list_turn_fail(void)
+{
+    int i;
+    for (i = 0; i < s_nlpeers; i++)
+        if (s_lpeers[i].state == LP_TURN_WAIT) {
+            turn_wait_fallback(i, GetTickCount64());
+            return;
+        }
+}
+
+/* the guest's relayed connect arrived (the host side): the peer with this nonce is live at the
+ * relayed address. It may be punching (LP_PENDING), waiting (LP_TURN_WAIT) or in a hub room
+ * (LP_RELAY, which it leaves); a nonce no peer has is added as a live peer. 1 when it is live. */
+int fci_nic_list_turn_peer(const uint8_t nonce[16], const uint8_t mac[6], const char *endpoint)
+{
+    struct addrinfo hints, *ai = NULL;
+    char host[128], port[16];
+    const char *colon;
+    ULONGLONG now = GetTickCount64();
+    int i;
+    colon = strrchr(endpoint, ':');
+    if (!colon || (size_t)(colon - endpoint) >= sizeof host || strlen(colon + 1) >= sizeof port)
+        return 0;
+    memcpy(host, endpoint, (size_t)(colon - endpoint));
+    host[colon - endpoint] = 0;
+    strcpy(port, colon + 1);
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_DGRAM;
+    if (getaddrinfo(host, port, &hints, &ai) || !ai)
+        return 0;
+    for (i = 0; i < s_nlpeers; i++) {
+        lpeer_t *p = &s_lpeers[i];
+        struct sockaddr_in ep;
+        if (memcmp(p->nonce, nonce, 16))
+            continue;
+        ep = *(const struct sockaddr_in *)ai->ai_addr;
+        if (p->state == LP_PENDING)
+            s_lpending--;
+        if (p->state == LP_RELAY && p->relay >= 0) /* it had fallen back to a hub room: leave it */
+            relay_socket_close(p->relay);
+        memcpy(&p->endpoint, &ep, sizeof p->endpoint);
+        memcpy(p->mac, mac, 6);
+        p->state = LP_LIVE;
+        p->relay = -1;
+        p->turn_ch = -1;
+        p->via_turn = 1; /* its endpoint is the guest's relayed address */
+        p->last_frame = now;
+        freeaddrinfo(ai);
+        fprintf(stderr, "[FCI] network: guest now at relay %s:%u (nonce %02x%02x%02x%02x)\n", inet_ntoa(ep.sin_addr),
+                ntohs(ep.sin_port), nonce[0], nonce[1], nonce[2], nonce[3]);
+        fflush(stderr);
+        return 1;
+    }
+    if (s_nlpeers >= LIST_PEER_MAX) {
+        freeaddrinfo(ai);
+        return 0;
+    }
+    {
+        lpeer_t *p = &s_lpeers[s_nlpeers];
+        memcpy(&p->endpoint, ai->ai_addr, sizeof p->endpoint);
+        freeaddrinfo(ai);
+        memcpy(p->mac, mac, 6);
+        memcpy(p->nonce, nonce, 16);
+        p->state = LP_LIVE;
+        p->guest = 0;
+        p->relay = -1;
+        p->turn_ch = -1;
+        p->via_turn = 1; /* its endpoint is the guest's relayed address */
+        p->last_frame = now;
+        s_nlpeers++;
+        fprintf(stderr, "[FCI] network: guest now at relay %s (nonce %02x%02x%02x%02x)\n", endpoint, nonce[0], nonce[1],
+                nonce[2], nonce[3]);
+        fflush(stderr);
+        return 1;
+    }
 }
 
 /* the relay fallback (RECOMP_FCI_NET_RELAY): the hub keys a member by address, so one socket per
@@ -700,6 +861,64 @@ static void receive_relays(void)
     }
 }
 
+/* relayed frames over TURN (the guest side): drain the module's queue into the card's rx queue,
+ * accepted only from the relayed peer with its pre-seeded source MAC (as the hub rooms do) */
+static void receive_turn(void)
+{
+    uint8_t d[FRAME_MAX + 8];
+    struct sockaddr_in from;
+    int n;
+    while ((n = fci_turn_recv(d, sizeof d, &from)) > 0) {
+        int i, ok = 0;
+        const uint8_t *f = d + 5;
+        /* the host's card datagram (FCN1 'F' + frame); its punches ('P'/'A') don't apply here */
+        if (n < 5 + 14 || n > 5 + ETHER_MAX || memcmp(d, MAGIC, 4) || d[4] != 'F')
+            continue;
+        n -= 5;
+        for (i = 0; i < s_nlpeers; i++) {
+            lpeer_t *p = &s_lpeers[i];
+            if (p->state != LP_RELAY || p->turn_ch < 0)
+                continue;
+            /* the peer's address as fci_turn reports it (the host's real address; a NAT rebind may
+             * move the port), then the pre-seeded source MAC, as receive_relays does */
+            p->endpoint = from;
+            if (!(f[6] & 1) && !memcmp(p->mac, f + 6, 6)) { /* the source: no card sends from a group address */
+                ok = 1;
+                p->last_frame = GetTickCount64();
+            }
+            break; /* the guest has one relayed peer */
+        }
+        if (!ok) {
+            if (!s_stray++) {
+                int k, st = -1;
+                const uint8_t *pm = NULL;
+                for (k = 0; k < s_nlpeers; k++)
+                    if (s_lpeers[k].turn_ch >= 0) {
+                        st = s_lpeers[k].state;
+                        pm = s_lpeers[k].mac;
+                    }
+                fprintf(stderr,
+                        "[FCI] network: a relayed frame from no TURN peer, dropped (logged once): src "
+                        "%02X:%02X:%02X:%02X:%02X:%02X, turn peer state %d mac %02X:%02X:%02X:%02X:%02X:%02X\n",
+                        f[6], f[7], f[8], f[9], f[10], f[11], st, pm ? pm[0] : 0, pm ? pm[1] : 0, pm ? pm[2] : 0,
+                        pm ? pm[3] : 0, pm ? pm[4] : 0, pm ? pm[5] : 0);
+            }
+            fflush(stderr);
+            continue;
+        }
+        if (s_rxq_count == RX_QUEUE) {
+            s_rxq_head = (s_rxq_head + 1) % RX_QUEUE;
+            s_rxq_count--;
+        }
+        {
+            int slot = (s_rxq_head + s_rxq_count) % RX_QUEUE;
+            memcpy(s_rxq[slot], f, (size_t)n);
+            s_rxq_len[slot] = n;
+            s_rxq_count++;
+        }
+    }
+}
+
 /* --- end LIST mode --- */
 
 /* send every complete frame the driver has queued; it marks a frame's last fragment before its first */
@@ -808,33 +1027,35 @@ static void receive(void)
             }
             if (buf[4] != 'F' || n < 5 + 14 || n > 5 + ETHER_MAX)
                 continue;
-            /* a frame: only from a live peer, with that peer's MAC */
+            /* a frame: only from a live peer's endpoint, with that peer's MAC. A relayed guest's
+             * endpoint is its relayed address, which is where the TURN server sends its frames from. */
             {
                 int i;
                 lpeer_t *lp = NULL;
-                for (i = 0; i < s_nlpeers; i++)
-                    if (s_lpeers[i].state == LP_LIVE
-                        && s_lpeers[i].endpoint.sin_addr.s_addr == from.sin_addr.s_addr
-                        && s_lpeers[i].endpoint.sin_port == from.sin_port) {
-                        lp = &s_lpeers[i];
+                const uint8_t *src = (const uint8_t *)buf + 5 + 6;
+                for (i = 0; i < s_nlpeers; i++) {
+                    lpeer_t *c = &s_lpeers[i];
+                    if (c->state != LP_LIVE)
+                        continue;
+                    if (c->endpoint.sin_addr.s_addr == from.sin_addr.s_addr
+                        && c->endpoint.sin_port == from.sin_port) {
+                        lp = c; /* a direct peer: the source is its endpoint */
                         break;
                     }
+                }
                 if (!lp) {
                     stray(&from);
                     continue;
                 }
-                {
-                    const uint8_t *src = (const uint8_t *)buf + 5 + 6;
-                    if (src[0] & 1) { /* no card sends from a group address */
-                        stray(&from);
-                        continue;
-                    }
-                    if (memcmp(lp->mac, src, 6)) {
-                        stray(&from);
-                        continue;
-                    }
-                    lp->last_frame = GetTickCount64();
+                if (src[0] & 1) { /* no card sends from a group address */
+                    stray(&from);
+                    continue;
                 }
+                if (memcmp(lp->mac, src, 6)) {
+                    stray(&from);
+                    continue;
+                }
+                lp->last_frame = GetTickCount64();
             }
         } else if (n < 5 || memcmp(buf, MAGIC, 4)) {
             continue;
@@ -880,10 +1101,56 @@ static void receive(void)
     }
 }
 
-/* LIST mode: the punch schedule, STUN refresh, and peer expiries (called under s_lock in the tick) */
+/* a TURN_WAIT peer that never got its relay: the hub room if set (a broken hub socket puts it
+ * back to punching, as the punch path does), else dropped. 1 when the peer is kept at i, 0 when
+ * it was removed (the table shifted: the caller steps back). */
+static int turn_wait_fallback(int i, ULONGLONG now)
+{
+    lpeer_t *p = &s_lpeers[i];
+    if (s_relay_spec[0]) {
+        int r = relay_socket_new(p);
+        if (r == -1) {
+            fprintf(stderr,
+                    "[FCI] network: relay socket cap (%d) reached, "
+                    "dropping peer %s:%u\n",
+                    RELAY_MAX, inet_ntoa(p->endpoint.sin_addr), ntohs(p->endpoint.sin_port));
+            fflush(stderr);
+            lpeer_remove(i);
+            return 0;
+        }
+        if (r == -2) {
+            /* no socket: back to punching, try again at the next window */
+            p->state = LP_PENDING;
+            p->punch_end = now + PUNCH_WINDOW_MS;
+            p->next_punch = now;
+            s_lpending++;
+            fprintf(stderr, "[FCI] network: turn relay for %s:%u failed, no hub socket: back to punching\n",
+                    inet_ntoa(p->endpoint.sin_addr), ntohs(p->endpoint.sin_port));
+            fflush(stderr);
+            return 1;
+        }
+        p->state = LP_RELAY;
+        p->relay = r;
+        p->last_frame = now;
+        fprintf(stderr, "[FCI] network: turn relay for %s:%u failed, using relay room %.8s\n",
+                inet_ntoa(p->endpoint.sin_addr), ntohs(p->endpoint.sin_port), relay_room_hex(p));
+        fflush(stderr);
+        return 1;
+    }
+    fprintf(stderr, "[FCI] network: turn relay for %s:%u failed, no relay set: peer dropped\n",
+            inet_ntoa(p->endpoint.sin_addr), ntohs(p->endpoint.sin_port));
+    fflush(stderr);
+    lpeer_remove(i);
+    return 0;
+}
+
+/* LIST mode: the punch schedule, the TURN relay, STUN refresh, and peer expiries (called under
+ * s_lock in the tick) */
 static void list_tick(ULONGLONG now)
 {
     int i;
+    /* TURN: retransmits, the half-LIFETIME refresh, the permission and channel re-issues, the drain */
+    fci_turn_tick(now);
     /* STUN: at link-up and every 60 s (skipped when _ENDPOINT set s_stun_known at init) */
     if (s_stun_srv_valid && now >= s_stun_next) {
         stun_send();
@@ -900,6 +1167,30 @@ static void list_tick(ULONGLONG now)
         lpeer_t *p = &s_lpeers[i];
         if (p->state == LP_PENDING) {
             if (now >= p->punch_end) {
+                /* 3 s with no answer: the TURN relay (the guest asks the list for a credential) */
+                if (s_turn_ok && p->guest) {
+                    p->state = LP_TURN_WAIT;
+                    p->relay = -1;
+                    p->turn_ch = -1;
+                    s_lpending--;
+                    p->last_frame = now;
+                    p->punch_end = now + PEER_EXPIRE_MS;
+                    fprintf(stderr, "[FCI] network: punch to %s:%u failed, asking the list for a relay\n",
+                            inet_ntoa(p->endpoint.sin_addr), ntohs(p->endpoint.sin_port));
+                    fflush(stderr);
+                    InterlockedExchange(&s_turn_need, 1);
+                    continue;
+                }
+                /* the host side, online: the guest asks for the relay and its relayed connect brings
+                 * the peer back (fci_nic_list_turn_peer), so this attempt just ends */
+                if (s_turn_ok && !p->guest && !s_relay_spec[0]) {
+                    fprintf(stderr, "[FCI] network: punch to %s:%u failed, waiting for the guest's relay\n",
+                            inet_ntoa(p->endpoint.sin_addr), ntohs(p->endpoint.sin_port));
+                    fflush(stderr);
+                    lpeer_remove(i);
+                    i--;
+                    continue;
+                }
                 /* 3 s with no answer: the relay fallback, if set, keeps the peer in its nonce room */
                 if (s_relay_spec[0]) {
                     int r = relay_socket_new(p);
@@ -939,13 +1230,24 @@ static void list_tick(ULONGLONG now)
                 punch_send(p);
                 p->next_punch += PUNCH_PERIOD_MS;
             }
+        } else if (p->state == LP_TURN_WAIT) {
+            /* the mint and the allocation had 15 s; the outcome is applied below (READY/FAILED) */
+            if (now >= p->punch_end && fci_turn_state() != FCI_TURN_READY
+                && fci_turn_state() != FCI_TURN_FAILED) {
+                if (!turn_wait_fallback(i, now))
+                    i--;
+                continue;
+            }
         } else if (now - p->last_frame > PEER_EXPIRE_MS) {
             /* LP_LIVE and LP_RELAY: expire after 15 s without a frame */
-            if (p->state == LP_RELAY) {
+            if (p->state == LP_RELAY && p->relay >= 0) {
                 fprintf(stderr, "[FCI] network: relay room %.8s: no frame in 15 s, peer expired\n",
                         relay_room_hex(p));
                 relay_socket_close(p->relay);
                 p->relay = -1;
+            } else if (p->state == LP_RELAY && p->turn_ch >= 0) {
+                fprintf(stderr, "[FCI] network: turn relay to %s:%u: no frame in 15 s, peer expired\n",
+                        inet_ntoa(p->endpoint.sin_addr), ntohs(p->endpoint.sin_port));
             } else {
                 fprintf(stderr, "[FCI] network: peer %s:%u: no frame in 15 s, expired\n",
                         inet_ntoa(p->endpoint.sin_addr), ntohs(p->endpoint.sin_port));
@@ -953,6 +1255,47 @@ static void list_tick(ULONGLONG now)
             fflush(stderr);
             lpeer_remove(i);
             i--;
+        }
+    }
+    /* the TURN outcome: ready moves the waiting peer to the relay (the worker posts the relayed
+     * connect); failed falls back to the hub room, if set */
+    {
+        int st = fci_turn_state();
+        if (st == FCI_TURN_READY || st == FCI_TURN_FAILED) {
+            int i, j, used = 0;
+            for (i = 0; i < s_nlpeers; i++)
+                if (s_lpeers[i].state == LP_TURN_WAIT)
+                    break;
+            for (j = 0; j < s_nlpeers; j++)
+                if (s_lpeers[j].state == LP_RELAY && s_lpeers[j].turn_ch >= 0)
+                    used = 1;
+            if (i >= s_nlpeers) {
+                /* nobody waits; the allocation lives while a relayed peer uses it */
+                if (!used)
+                    fci_turn_stop();
+            } else if (st == FCI_TURN_READY) {
+                lpeer_t *p = &s_lpeers[i];
+                struct sockaddr_in a;
+                int ch = fci_turn_add_peer(&p->endpoint);
+                if (ch < 0 || !fci_turn_relayed(&a)) {
+                    fci_turn_stop();
+                    if (!turn_wait_fallback(i, now))
+                        i--;
+                } else {
+                    p->state = LP_RELAY;
+                    p->turn_ch = ch;
+                    p->relay = -1;
+                    p->last_frame = now;
+                    fprintf(stderr, "[FCI] network: turn ready, relayed %s:%u\n", inet_ntoa(a.sin_addr),
+                            ntohs(a.sin_port));
+                    fflush(stderr);
+                    InterlockedExchange(&s_turn_ready, 1);
+                }
+            } else {
+                fci_turn_stop();
+                if (!turn_wait_fallback(i, now))
+                    i--;
+            }
         }
     }
 }
@@ -972,6 +1315,7 @@ int fci_nic_tick(void)
         if (s_list) {
             list_tick(now);
             receive_relays(); /* before receive(): the relay queue shares s_rxq */
+            receive_turn();   /* the TURN relay: the same queue */
         }
         receive();
     }
@@ -1172,7 +1516,8 @@ static int connect_list(const char *url, char *err, int errlen)
 {
     WSADATA wsa;
     u_long nb = 1;
-    const char *endpoint = getenv("RECOMP_FCI_NET_ENDPOINT"), *relay = getenv("RECOMP_FCI_NET_RELAY");
+    const char *endpoint = getenv("RECOMP_FCI_NET_ENDPOINT"), *relay = getenv("RECOMP_FCI_NET_RELAY"),
+               *turn = getenv("RECOMP_FCI_NET_TURN");
     if (strlen(url) >= sizeof s_list_url) {
         snprintf(err, errlen, "URL too long");
         return 0;
@@ -1212,6 +1557,9 @@ static int connect_list(const char *url, char *err, int errlen)
         fprintf(stderr, "[FCI] network: relay hub %s (fallback when a punch fails)\n", relay);
         fflush(stderr);
     }
+    s_turn_ok = !(turn && turn[0] == '0'); /* the TURN relay, on unless disabled */
+    if (!s_turn_ok)
+        fprintf(stderr, "[FCI] network: TURN relay disabled (RECOMP_FCI_NET_TURN=0)\n");
     /* the card socket: bound to a local port, unconnected (punches and STUN go to any address) */
     s_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (s_sock == INVALID_SOCKET) {

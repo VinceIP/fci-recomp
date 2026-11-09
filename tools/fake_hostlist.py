@@ -9,9 +9,10 @@ limits in memory (lobby.js keeps the bans in the object's SQLite).
 Usage: python tools/fake_hostlist.py [port] [--break-punch] [--secret S]
        [--turn-user U --turn-pass P --turn-url URL]   (default port 47801)
 
---break-punch rewrites the endpoint in every connect it forwards to the host (port + 1000), so the
-host punches a dead port and ignores the guest's punches (endpoint mismatch): both 3 s windows fail
-and both sides fall back to the relay (RECOMP_FCI_NET_RELAY).
+--break-punch rewrites the endpoint in every direct connect it forwards to the host (port + 1000),
+so the host punches a dead port and ignores the guest's punches (endpoint mismatch): both 3 s
+windows fail and both sides fall back to the relay. A relayed connect (relay: true, the guest's
+TURN address) is forwarded untouched: the host punches that address for real.
 --secret sets the admin secret (default $FAKE_HOSTLIST_SECRET, else none: admin is off).
 --turn-user / --turn-pass / --turn-url configure /v1/turn (the mint gate, the mint rate limits and
 the relay connect behave as in lobby.js); without a user and a password, /v1/turn is 503 "no relay".
@@ -101,7 +102,7 @@ class Lobby:
         self.limits = RateLimit()
         self.mint_limits = RateLimit(TURN_WINDOW_SECONDS)
         self.abuse = {"byIp": {}, "ring": []}
-        self.break_punch = break_punch  # rewrite the endpoint in every connect (port + 1000)
+        self.break_punch = break_punch  # rewrite the endpoint in direct connects (port + 1000)
         self.secret = secret
         self.turn_user = turn_user
         self.turn_pass = turn_pass
@@ -260,7 +261,8 @@ class Lobby:
         if self.is_banned(gid):
             self.note("banned", ip, gid)
             return 403, {"error": "banned"}
-        if self.break_punch:
+        if self.break_punch and not relay:
+            # the relayed address is the guest's real TURN address: the host punches it for real
             host, port = endpoint.rsplit(":", 1)
             endpoint = f"{host}:{int(port) + 1000}"
         with self.lock:
@@ -506,7 +508,7 @@ def main():
     ap.add_argument(
         "--break-punch",
         action="store_true",
-        help="rewrite the endpoint in every connect to the host (port + 1000)",
+        help="rewrite the endpoint in every direct connect to the host (port + 1000); relayed connects are untouched",
     )
     ap.add_argument("--secret", default=None, help="admin secret (default $FAKE_HOSTLIST_SECRET, else admin off)")
     ap.add_argument(

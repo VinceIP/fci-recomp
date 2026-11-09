@@ -18,7 +18,7 @@
 #include "fci_net_worker.h"
 
 /* the NIC's worker API (fci_nic.c): called under s_lock */
-extern int fci_nic_list_add_peer(const char *endpoint, const uint8_t mac[6], const uint8_t nonce[16]);
+extern int fci_nic_list_add_peer(const char *endpoint, const uint8_t mac[6], const uint8_t nonce[16], int guest);
 extern int fci_nic_list_endpoint(char *buf, int buflen);
 extern void fci_nic_mac(uint8_t *mac);
 extern void fci_nic_mac_str(char *buf, int buflen);
@@ -26,6 +26,14 @@ extern int fci_nic_list_has_peer(const char *endpoint);
 extern int fci_nic_worker_probe_take(void);
 extern const char *fci_nic_list_url(void);
 extern SRWLOCK *fci_nic_lock(void); /* the NIC's s_lock */
+/* the TURN relay (fci_nic.c): the worker mints and posts, the NIC owns the allocation */
+extern int fci_nic_list_turn_need_take(void);
+extern int fci_nic_list_turn_ready_take(void);
+extern int fci_nic_list_turn_wait(uint8_t *nonce);
+extern int fci_nic_list_turn_start(const char *hostport, const char *user, const char *pass);
+extern int fci_nic_list_turn_poll(char *ep, int len);
+extern void fci_nic_list_turn_fail(void);
+extern int fci_nic_list_turn_peer(const uint8_t nonce[16], const uint8_t mac[6], const char *endpoint);
 
 /* the XBE certificate's Version field (fci_main.c); the data folder (fci_main.c) */
 extern uint32_t fci_xbe_version;
@@ -116,6 +124,25 @@ static int json_str_val(const char *buf, const char *key, char *out, int buflen)
         out[n] = 0;
         return n > 0;
     }
+}
+
+/* extract a boolean value: 1 for true, 0 for false, -1 when absent */
+static int json_bool(const char *buf, const char *key)
+{
+    char pat[64];
+    const char *p;
+    snprintf(pat, sizeof pat, "\"%s\":", key);
+    p = strstr(buf, pat);
+    if (!p)
+        return -1;
+    p += strlen(pat);
+    while (*p == ' ' || *p == '\t')
+        p++;
+    if (strncmp(p, "true", 4) == 0)
+        return 1;
+    if (strncmp(p, "false", 5) == 0)
+        return 0;
+    return -1;
 }
 
 /* extract an array of objects: calls fn(obj_buf, obj_len) for each '{...}' in the array */
@@ -360,6 +387,11 @@ static int s_seen_n;
 static char s_known[16][33];
 static int s_known_n;
 
+/* the connects this worker made, by nonce: the TURN mint needs the host id of a waiting peer */
+static char s_conn_id[8][33];
+static uint8_t s_conn_nonce[8][16];
+static int s_conn_n;
+
 static void on_host_obj(const char *obj, int len)
 {
     char id[64], endpoint[128], macstr[32], my_mac[32], my_ep[128];
@@ -414,12 +446,163 @@ static void on_host_obj(const char *obj, int len)
         return;
 
     AcquireSRWLockExclusive(lock);
-    fci_nic_list_add_peer(endpoint, mac, nonce);
+    fci_nic_list_add_peer(endpoint, mac, nonce, 1); /* we joined: the guest side */
     ReleaseSRWLockExclusive(lock);
 
     if (s_known_n < (int)(sizeof s_known / sizeof s_known[0]))
         snprintf(s_known[s_known_n++], sizeof s_known[0], "%s", id);
+    if (s_conn_n < (int)(sizeof s_conn_id / sizeof s_conn_id[0])) {
+        snprintf(s_conn_id[s_conn_n], sizeof s_conn_id[0], "%s", id);
+        memcpy(s_conn_nonce[s_conn_n], nonce, 16);
+        s_conn_n++;
+    }
     log_line("connected to host %s (%s)", id, endpoint);
+}
+
+/* --- guest TURN: mint the credential when a punch fails, post the relayed connect when ready --- */
+
+static char s_turn_host_id[33];  /* the host the in-flight mint is for */
+static uint8_t s_turn_nonce[16]; /* the nonce the in-flight mint is under (the relayed connect reuses it) */
+
+/* a peer is in LP_TURN_WAIT: POST /v1/turn for its credential and start the allocation. The mint
+ * is keyed by host id and nonce (fake_hostlist.py): the relayed connect, with the same nonce and
+ * relay:true, is accepted only for a minted guest. */
+static void turn_mint(void)
+{
+    SRWLOCK *lock = fci_nic_lock();
+    uint8_t nonce[16];
+    char buf[256], resp[1024], hostport[128], user[128], pass[128], nhex[33];
+    int n, status, found = 0;
+    const char *base;
+
+    AcquireSRWLockExclusive(lock);
+    if (!fci_nic_list_turn_wait(nonce)) {
+        ReleaseSRWLockExclusive(lock);
+        return; /* the peer expired in the meantime: nothing to mint for */
+    }
+    ReleaseSRWLockExclusive(lock);
+
+    for (n = 0; n < s_conn_n; n++) /* the host id: the connect that seeded this nonce */
+        if (!memcmp(s_conn_nonce[n], nonce, 16)) {
+            snprintf(s_turn_host_id, sizeof s_turn_host_id, "%s", s_conn_id[n]);
+            memcpy(s_turn_nonce, nonce, 16);
+            found = 1;
+            break;
+        }
+    if (!found) {
+        log_line("turn mint: no host id for the waiting peer's nonce");
+        AcquireSRWLockExclusive(lock);
+        fci_nic_list_turn_fail();
+        ReleaseSRWLockExclusive(lock);
+        return;
+    }
+    for (n = 0; n < 16; n++)
+        snprintf(nhex + n * 2, 3, "%02x", nonce[n]);
+    nhex[32] = 0;
+
+    base = fci_nic_list_url();
+    if (!base)
+        return;
+    snprintf(buf, sizeof buf, "{\"id\":\"%s\",\"nonce\":\"%s\",\"token\":\"%s\"}", s_turn_host_id, nhex,
+             s_identity);
+    if (http_request(base, "POST", "/v1/turn", buf, resp, sizeof resp, &status) != 0) {
+        log_line("turn mint failed (no response)");
+        AcquireSRWLockExclusive(lock);
+        fci_nic_list_turn_fail();
+        ReleaseSRWLockExclusive(lock);
+        return;
+    }
+    if (status != 200) {
+        /* 503 (at capacity) / 403 (banned) / 429 (too many): the NIC falls back to the hub */
+        log_line("turn mint refused (status %d), the relay fallback applies", status);
+        AcquireSRWLockExclusive(lock);
+        fci_nic_list_turn_fail();
+        ReleaseSRWLockExclusive(lock);
+        return;
+    }
+    if (!json_str_val(resp, "username", user, sizeof user)
+        || !json_str_val(resp, "credential", pass, sizeof pass)) {
+        log_line("turn mint: a malformed reply");
+        AcquireSRWLockExclusive(lock);
+        fci_nic_list_turn_fail();
+        ReleaseSRWLockExclusive(lock);
+        return;
+    }
+    /* urls[0]: "turn:<host>:<port>?transport=udp" -> "<host>:<port>" */
+    {
+        /* urls is an array of strings, so json_str (string values only) can't find it */
+        const char *u = strstr(resp, "\"urls\""), *url = NULL, *q;
+        int len = 0;
+        if (u) {
+            u += 6;
+            while (*u == ' ' || *u == '\t' || *u == ':')
+                u++;
+            if (*u != '[')
+                u = "";
+            while (*u && *u != '"')
+                u++;
+            if (*u == '"')
+                url = u + 1;
+        }
+        if (url) {
+            if (strncmp(url, "turn:", 5) == 0)
+                url += 5;
+            for (q = url; *q && *q != '"' && *q != '?' && len < (int)sizeof hostport - 1; q++)
+                hostport[len++] = *q;
+            hostport[len] = 0;
+        }
+        if (!hostport[0]) {
+            log_line("turn mint: no server url");
+            AcquireSRWLockExclusive(lock);
+            fci_nic_list_turn_fail();
+            ReleaseSRWLockExclusive(lock);
+            return;
+        }
+    }
+    AcquireSRWLockExclusive(lock);
+    if (!fci_nic_list_turn_start(hostport, user, pass)) {
+        /* the allocation is already in flight, or the waiting peer is gone */
+        ReleaseSRWLockExclusive(lock);
+        return;
+    }
+    ReleaseSRWLockExclusive(lock);
+    log_line("turn mint ok (%s)", hostport);
+}
+
+/* the allocation is ready and the peer is relayed: POST /v1/connect with the relayed address and
+ * relay:true. The host's worker turns its peer live at that address (fci_nic_list_turn_peer). */
+static void turn_post_relay(void)
+{
+    SRWLOCK *lock = fci_nic_lock();
+    char ep[64], buf[512], resp[256], macstr[32], nhex[33];
+    int n, status;
+    const char *base;
+
+    AcquireSRWLockExclusive(lock);
+    n = fci_nic_list_turn_poll(ep, sizeof ep);
+    ReleaseSRWLockExclusive(lock);
+    if (n != 1) {
+        log_line("relay connect not posted: the allocation is not ready (%d)", n);
+        return;
+    }
+    base = fci_nic_list_url();
+    if (!base) {
+        log_line("relay connect not posted: no list url");
+        return;
+    }
+    fci_nic_mac_str(macstr, sizeof macstr);
+    for (n = 0; n < 16; n++)
+        snprintf(nhex + n * 2, 3, "%02x", s_turn_nonce[n]);
+    nhex[32] = 0;
+    snprintf(buf, sizeof buf,
+             "{\"id\":\"%s\",\"endpoint\":\"%s\",\"nonce\":\"%s\",\"mac\":\"%s\",\"token\":\"%s\","
+             "\"relay\":true}",
+             s_turn_host_id, ep, nhex, macstr, s_identity);
+    if (http_request(base, "POST", "/v1/connect", buf, resp, sizeof resp, &status) != 0 || status != 200) {
+        log_line("relay connect to %s failed (status %d)", s_turn_host_id, status);
+        return;
+    }
+    log_line("relay connect posted (%s at %s)", s_turn_host_id, ep);
 }
 
 static void guest_fetch(void)
@@ -503,8 +686,7 @@ static void on_connect_obj(const char *obj, int len)
 {
     char endpoint[128], nonce_hex[64], macstr[32];
     uint8_t mac[6], nonce[16];
-    int n;
-
+    int n, relay;
     (void)len;
     if (!json_str_val(obj, "endpoint", endpoint, sizeof endpoint))
         return;
@@ -523,13 +705,25 @@ static void on_connect_obj(const char *obj, int len)
         if (sscanf(nonce_hex + n * 2, "%2hhx", &nonce[n]) != 1)
             return;
 
+    relay = json_bool(obj, "relay");
+    if (relay < 0)
+        relay = 0;
+
     {
         SRWLOCK *lock = fci_nic_lock();
         AcquireSRWLockExclusive(lock);
-        fci_nic_list_add_peer(endpoint, mac, nonce);
+        if (relay) {
+            /* the guest's relayed connect: its peer is live at the relayed address (TURN) */
+            fci_nic_list_turn_peer(nonce, mac, endpoint);
+        } else {
+            fci_nic_list_add_peer(endpoint, mac, nonce, 0); /* a guest joined us */
+        }
         ReleaseSRWLockExclusive(lock);
     }
-    log_line("connect received from %s", endpoint);
+    if (relay)
+        log_line("connect received from %s (relay, nonce %.8s)", endpoint, nonce_hex);
+    else
+        log_line("connect received from %s", endpoint);
 }
 
 static void host_poll(void)
@@ -590,6 +784,11 @@ static DWORD WINAPI worker_main(LPVOID arg)
             guest_fetch();
         /* if the probe is set but the list is fresh, clear it (the list is current) */
         fci_nic_worker_probe_take();
+        /* the TURN relay: a punch failed (mint), or the allocation is ready (post the relayed connect) */
+        if (fci_nic_list_turn_need_take())
+            turn_mint();
+        if (fci_nic_list_turn_ready_take())
+            turn_post_relay();
     }
 
     if (s_session) {
