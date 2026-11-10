@@ -1273,3 +1273,37 @@ test("relay budget: a month with no relay traffic yet (empty usage list) mints",
     restore();
   }
 });
+
+test("relay budget: /admin/relay reports the usage, the budget and the reason; the refusal line names it", async () => {
+  const lobby = mk({ ...QUOTA_ENV, ADMIN_SECRET: "s3cret" }); // budget 100 GB
+  const auth = { headers: { authorization: "Bearer s3cret" } };
+  const lines = [];
+  const log = console.log;
+  console.log = (m) => lines.push(String(m));
+  let t = stubTurnUsage({ usage: () => usageOk(101e9) });
+  try {
+    let [status, body] = await r(lobby, req("/admin/relay"));
+    assert.equal(status, 401);
+    [status, body] = await r(lobby, req("/admin/relay", auth));
+    assert.equal(status, 200);
+    assert.equal(body.allow, false);
+    assert.equal(body.why, "budget reached");
+    assert.equal(body.usedBytes, 101e9);
+    assert.equal(body.budgetBytes, 100e9);
+    const { hid, nonce } = await hostAndConn(lobby, {});
+    [status] = await r(lobby, req("/v1/turn", { method: "POST", body: { id: hid, nonce, token: "d".repeat(64) } }));
+    assert.equal(status, 503);
+    assert.ok(lines.some((l) => l.includes("relay mint refused: budget reached") && l.includes("used 101.000 GB of 100.000 GB")), lines.join("\n"));
+    t.restore();
+    // a failed read with nothing cached is a different reason
+    const lobby2 = mk({ ...QUOTA_ENV, ADMIN_SECRET: "s3cret" });
+    t = stubTurnUsage({ usage: () => new Response("no", { status: 500 }) });
+    [status, body] = await r(lobby2, req("/admin/relay", auth));
+    assert.equal(body.allow, false);
+    assert.equal(body.why, "usage read failed, nothing cached");
+    assert.equal(body.usedBytes, undefined);
+  } finally {
+    console.log = log;
+    t.restore();
+  }
+});

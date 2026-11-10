@@ -13,6 +13,7 @@
 //   POST   /admin/bans
 //   DELETE /admin/bans?id=
 //   GET    /admin/abuse
+//   GET    /admin/relay
 //
 // What the object stores, and why it is safe to run for strangers:
 // - A host registers with the identity token the player's runtime generated (32 random bytes, hex;
@@ -394,25 +395,34 @@ export class Lobby {
   // and with nothing that fresh the mint is refused (fail closed: the budget must hold even
   // while the usage API is down).
   async quotaAllows(now) {
+    return (await this.quotaCheck(now)).allow;
+  }
+
+  // The same decision with its reason and numbers, for the mint's log line and GET /admin/relay.
+  async quotaCheck(now) {
     const q = this.quotaConfig();
+    const month = this.monthKey(now);
     if (!q.on) {
       if (!this.quotaOffLogged) {
         this.quotaOffLogged = true;
         console.log("relay quota off: " + q.why);
       }
-      return true;
+      return { allow: true, why: "quota off: " + q.why, month };
     }
-    if (this.relayKilled()) return false;
-    const month = this.monthKey(now);
+    const out = { month, budgetBytes: q.budgetBytes };
+    if (this.relayKilled()) return { ...out, allow: false, why: "kill switch (RELAY_KILL) set" };
     let u = this.cachedUsage();
     if (!u || u.month !== month) u = null;
     if (!u || now - u.at > USAGE_READ_EVERY_MS) {
       const fresh = await this.readUsage(now);
       if (fresh && fresh.month === month) u = fresh;
     }
-    if (!u) return false; // nothing cached and the read failed
-    if (now - u.at > USAGE_STALE_MS) return false; // older than 1 h and the read failed
-    return u.bytes < q.budgetBytes;
+    if (!u) return { ...out, allow: false, why: "usage read failed, nothing cached" };
+    out.usedBytes = u.bytes;
+    out.readAt = new Date(u.at).toISOString();
+    if (now - u.at > USAGE_STALE_MS) return { ...out, allow: false, why: "usage read failed, cache over 1 h old" };
+    if (u.bytes >= q.budgetBytes) return { ...out, allow: false, why: "budget reached" };
+    return { ...out, allow: true, why: "under budget" };
   }
 
   // The connect queue is drained by the host's poll, so the mint and relay-connect gates keep
@@ -777,9 +787,15 @@ export class Lobby {
       this.note("norelay", ip, gid);
       return json({ error: "no relay" }, 503);
     }
-    if (!(await this.quotaAllows(now))) {
+    const quota = await this.quotaCheck(now);
+    if (!quota.allow) {
       this.note("norelay", ip, gid);
-      console.log("relay budget reached (" + this.monthKey(now) + "): mint refused");
+      // the reason and the numbers: an operator must tell a spent budget from a failed read
+      console.log(
+        "relay mint refused: " + quota.why + " (" + quota.month +
+          (quota.usedBytes === undefined ? "" : ", used " + (quota.usedBytes / 1e9).toFixed(3) + " GB") +
+          (quota.budgetBytes === undefined ? "" : " of " + (quota.budgetBytes / 1e9).toFixed(3) + " GB") + ")"
+      );
       return json({ error: "no relay" }, 503);
     }
     let data = null;
@@ -863,6 +879,10 @@ export class Lobby {
     }
     if (url.pathname === "/admin/bans" && request.method === "GET") {
       return json({ bans: this.bans() });
+    }
+    if (url.pathname === "/admin/relay" && request.method === "GET") {
+      // the month's relay usage against the budget, and whether a mint would be allowed now
+      return json(await this.quotaCheck(Date.now()));
     }
     if (url.pathname === "/admin/bans" && request.method === "POST") {
       const msg = await this.adminJson(request);

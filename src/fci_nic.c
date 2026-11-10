@@ -130,6 +130,38 @@ static int s_mac_made;
 static uint8_t s_rxq[RX_QUEUE][FRAME_MAX];
 static int s_rxq_len[RX_QUEUE], s_rxq_head, s_rxq_count;
 static unsigned long s_sent, s_received, s_dropped;
+/* traffic by path, for the operator's relay cost: datagram payload bytes (FCN1 'F' + frame) */
+enum { TP_DIRECT, TP_TURN, TP_HUB, TP_N };
+static unsigned long long s_tfc[TP_N][4]; /* tx frames, tx bytes, rx frames, rx bytes */
+static unsigned long long s_tfc_logged;   /* the frame total at the last traffic line */
+static ULONGLONG s_tfc_next;
+#define TRAFFIC_LOG_MS 60000
+static void traffic_tx(int path, uint32_t len) { s_tfc[path][0]++, s_tfc[path][1] += len + 5; }
+static void traffic_rx(int path, int len) { s_tfc[path][2]++, s_tfc[path][3] += (unsigned)len + 5; }
+
+/* the cumulative traffic line: once a minute while frames flow, and at shutdown (force) */
+static void traffic_summary(ULONGLONG now, int force)
+{
+    static const char *const name[TP_N] = { "direct", "relay", "hub" };
+    unsigned long long total = 0;
+    int i, shown = 0;
+    for (i = 0; i < TP_N; i++)
+        total += s_tfc[i][0] + s_tfc[i][2];
+    if (total == s_tfc_logged || (!force && now < s_tfc_next))
+        return;
+    s_tfc_next = now + TRAFFIC_LOG_MS;
+    s_tfc_logged = total;
+    fprintf(stderr, "[FCI] network: traffic:");
+    for (i = 0; i < TP_N; i++) {
+        if (!(s_tfc[i][0] + s_tfc[i][2]))
+            continue;
+        fprintf(stderr, "%s %s tx %llu frames %llu bytes, rx %llu frames %llu bytes", shown++ ? ";" : "", name[i],
+                s_tfc[i][0], s_tfc[i][1], s_tfc[i][2], s_tfc[i][3]);
+    }
+    fprintf(stderr, "
+");
+    fflush(stderr);
+}
 /* q24: the gate between the wire and the guest's RX queue. Every frame (card socket, relay rooms,
  * TURN relay) passes the sanity check (src/fci_frame.c) and the per-source-MAC rate cap before it
  * is enqueued; the envelope's drops (no FCN1 magic, an unknown kind, an out-of-size datagram) are
@@ -356,6 +388,7 @@ void fci_nic_shutdown(void)
     for (i = 0; i < RELAY_MAX; i++)
         relay_socket_close(i); /* the relay rooms leave with the process */
     fci_turn_stop();           /* the relay allocation leaves with the process */
+    traffic_summary(0, 1);
     ReleaseSRWLockExclusive(&s_lock);
 }
 
@@ -400,8 +433,11 @@ static void relay_out(const lpeer_t *p, const uint8_t *f, uint32_t len)
         buf[4] = 'F';
         memcpy(buf + 5, f, (size_t)len);
         fci_turn_send(p->turn_ch, buf, (int)len + 5);
-    } else
+        traffic_tx(TP_TURN, len);
+    } else {
         relay_send_frame(p->relay, f, len);
+        traffic_tx(TP_HUB, len);
+    }
 }
 
 static int route_frame(const uint8_t *f, uint32_t len)
@@ -421,6 +457,7 @@ static int route_frame(const uint8_t *f, uint32_t len)
                     memcpy(buf + 5, f, (size_t)len);
                     sendto(s_sock, buf, (int)len + 5, 0, (const struct sockaddr *)&p->endpoint,
                            sizeof p->endpoint);
+                    traffic_tx(p->via_turn ? TP_TURN : TP_DIRECT, len);
                     sent = 1;
                 } else if (p->state == LP_RELAY) {
                     relay_out(p, f, len);
@@ -441,6 +478,7 @@ static int route_frame(const uint8_t *f, uint32_t len)
                 memcpy(buf + 5, f, (size_t)len);
                 sendto(s_sock, buf, (int)len + 5, 0, (const struct sockaddr *)&p->endpoint,
                        sizeof p->endpoint);
+                traffic_tx(p->via_turn ? TP_TURN : TP_DIRECT, len);
             } else {
                 relay_out(p, f, len);
             }
@@ -1410,7 +1448,8 @@ static void receive_relays(void)
                     continue;
                 }
             }
-            rx_enqueue((const uint8_t *)buf + 5, n - 5, &from);
+            if (rx_enqueue((const uint8_t *)buf + 5, n - 5, &from))
+                traffic_rx(TP_HUB, n - 5);
         }
     }
 }
@@ -1465,7 +1504,8 @@ static void receive_turn(void)
             fflush(stderr);
             continue;
         }
-        rx_enqueue(f, n, &from);
+        if (rx_enqueue(f, n, &from))
+            traffic_rx(TP_TURN, n);
     }
 }
 
@@ -1542,6 +1582,17 @@ static void rx_run(void)
         if (!s_received++)
             fprintf(stderr, "[FCI] network: first frame received (%u bytes)\n", len), fflush(stderr);
     }
+}
+
+/* 1 when the datagram's source is a relayed guest's address (the host side of a TURN relay) */
+static int from_relayed(const struct sockaddr_in *from)
+{
+    int i;
+    for (i = 0; s_list && i < s_nlpeers; i++)
+        if (s_lpeers[i].via_turn && s_lpeers[i].endpoint.sin_addr.s_addr == from->sin_addr.s_addr
+            && s_lpeers[i].endpoint.sin_port == from->sin_port)
+            return 1;
+    return 0;
 }
 
 static void receive(void)
@@ -1716,7 +1767,8 @@ static void receive(void)
                 continue;
             }
         }
-        rx_enqueue((const uint8_t *)buf + 5, n - 5, &from);
+        if (rx_enqueue((const uint8_t *)buf + 5, n - 5, &from))
+            traffic_rx(from_relayed(&from) ? TP_TURN : TP_DIRECT, n - 5);
     }
 }
 
@@ -1949,6 +2001,7 @@ int fci_nic_tick(void)
             direct_knock(); /* the fixed peers admit us on it, as we admit them */
             s_dir_knock_next = now + LAN_KNOCK_MS;
         }
+        traffic_summary(now, 0);
         if (s_list) {
             list_tick(now);
             receive_relays(); /* before receive(): the relay queue shares s_rxq */
