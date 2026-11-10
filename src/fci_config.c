@@ -253,7 +253,8 @@ void fci_config_load(int *argc, char ***argv)
 {
     static char exe_dir[MAX_PATH], xbe[MAX_PATH], game[MAX_PATH], save[MAX_PATH], log_dir[MAX_PATH];
     static char fixed_log[MAX_PATH], shader_cache[MAX_PATH], shader_cache_arg[MAX_PATH + 32];
-    static char lines[96][512], rate_arg[64], hub_arg[300], lan_arg[40], list_arg[300], peers_arg[300], menu_arg[40];
+    static char lines[96][512], rate_arg[64], hub_arg[300], lan_arg[40], list_arg[300], peers_arg[300],
+            menu_arg[40], punch_arg[40];
     static char *args[128];
     int n = 0, opts = 0, i, have_ini = 0, verbosity = 1, limit = 20, cap = 1;
     double rate = 30;
@@ -329,6 +330,10 @@ void fci_config_load(int *argc, char ***argv)
                  * starts the transport. Default on for Evolution; 0 turns it off. (fci_nic.c) */
                 if (v[0] && strcmp(v, "0"))
                     snprintf(menu_arg, sizeof menu_arg, "RECOMP_FCI_NET_MENU=1");
+            } else if (!_stricmp(key, "network-punch")) {
+                /* a test switch: 0 disables hole punching so every pair uses the relay (fci_nic.c) */
+                if (!strcmp(v, "0"))
+                    snprintf(punch_arg, sizeof punch_arg, "RECOMP_FCI_NET_PUNCH=0");
             } else if (opts < 96 && translate(key, v, lines[opts], sizeof lines[0]))
                 opts++;
         }
@@ -367,9 +372,9 @@ void fci_config_load(int *argc, char ***argv)
     /* the network keys: one link at a time (the card refuses two and says so). network-menu is not a
      * link (no transport at boot): it does not set cap, the 30-updates lock engages on the pick. */
     {
-        char *nets[] = {hub_arg, lan_arg, list_arg, peers_arg, menu_arg};
+        char *nets[] = {hub_arg, lan_arg, list_arg, peers_arg, menu_arg, punch_arg};
         int k;
-        for (k = 0; k < 5; k++)
+        for (k = 0; k < 6; k++)
             if (nets[k][0]) {
                 args[n++] = nets[k];
                 if (k < 4)

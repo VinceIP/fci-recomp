@@ -224,6 +224,7 @@ static volatile LONG s_probe; /* the game broadcast in LIST mode: the worker sho
 static volatile LONG s_turn_need;  /* a peer is in LP_TURN_WAIT: the worker should mint a credential */
 static volatile LONG s_turn_ready; /* the allocation is ready: the worker should post the relayed connect */
 static int s_turn_ok;              /* RECOMP_FCI_NET_TURN != "0" */
+static int s_punch_off;            /* RECOMP_FCI_NET_PUNCH == "0": a test switch, every pair goes to the relay */
 
 #define TRACE(...)                                                                                           \
     do {                                                                                                     \
@@ -998,6 +999,8 @@ static int stun_recv(const char *buf, int n, const struct sockaddr_in *from)
 static void punch_send(const lpeer_t *p)
 {
     char buf[21];
+    if (s_punch_off && !p->via_turn) /* the host's opener to a relayed guest still goes */
+        return;
     memcpy(buf, MAGIC, 4);
     buf[4] = 'P';
     memcpy(buf + 5, p->nonce, 16);
@@ -1009,6 +1012,8 @@ static void punch_send(const lpeer_t *p)
 static void punch_answer_send(const lpeer_t *p)
 {
     char buf[21];
+    if (s_punch_off)
+        return;
     memcpy(buf, MAGIC, 4);
     buf[4] = 'A';
     memcpy(buf + 5, p->nonce, 16);
@@ -1021,6 +1026,8 @@ static void punch_answer_send(const lpeer_t *p)
 static void punch_recv(const char *buf, char type, const struct sockaddr_in *from)
 {
     int i;
+    if (s_punch_off)
+        return;
     for (i = 0; i < s_nlpeers; i++) {
         lpeer_t *p = &s_lpeers[i];
         if (p->state != LP_PENDING && p->state != LP_LIVE)
@@ -2249,6 +2256,12 @@ static int connect_list(const char *url, char *err, int errlen)
         fflush(stderr);
     }
     s_turn_ok = !(turn && turn[0] == '0'); /* the TURN relay, on unless disabled */
+    {
+        const char *punch = getenv("RECOMP_FCI_NET_PUNCH");
+        s_punch_off = punch && punch[0] == '0';
+        if (s_punch_off)
+            fprintf(stderr, "[FCI] network: hole punching disabled (RECOMP_FCI_NET_PUNCH=0): a test of the relay\n");
+    }
     if (!s_turn_ok)
         fprintf(stderr, "[FCI] network: TURN relay disabled (RECOMP_FCI_NET_TURN=0)\n");
     /* the card socket: bound to a local port, unconnected (punches and STUN go to any address) */
