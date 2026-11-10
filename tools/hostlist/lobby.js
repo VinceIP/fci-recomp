@@ -51,7 +51,7 @@
 // (`wrangler secret put`). Free tier.
 // The how-to is research/docs/online-architecture.md, section 7.
 
-const PROTO = 1;
+const PROTO = 2; // the net protocol (src/fci_net.h): title + version + this must all match
 const LIST_MAX = 64;
 const TITLES = new Set(["instincts", "evolution"]);
 const VERSION = /^[0-9]{1,5}$/;

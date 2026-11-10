@@ -206,7 +206,7 @@ class Lobby:
         mac = body.get("mac", "")
         endpoint = body.get("endpoint", "")
         # skip the public-address check: 127.0.0.1 is fine for a local test
-        if proto != 1 or title not in ("instincts", "evolution") or not re.match(r"^[0-9]{1,5}$", version):
+        if proto != 2 or title not in ("instincts", "evolution") or not re.match(r"^[0-9]{1,5}$", version):
             self.note("bad", ip)
             return 400, {"error": "bad registration"}
         if not MAC_RE.match(mac) or not endpoint:
@@ -240,10 +240,10 @@ class Lobby:
             found = [
                 {"id": h["id"]}  # ids only: no endpoint, MAC or token in a listing
                 for h in self.hosts.values()
-                if h["title"] == title and h["version"] == version and h["proto"] == 1 and not self.is_banned(h["id"])
+                if h["title"] == title and h["version"] == version and h["proto"] == 2 and not self.is_banned(h["id"])
             ]
             found.sort(key=lambda x: x["id"])
-            body = {"proto": 1, "hosts": found[:max_]}
+            body = {"proto": 2, "hosts": found[:max_]}
             if RELAY:
                 body["relay"] = RELAY
             return 200, body

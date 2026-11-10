@@ -56,7 +56,7 @@ function reg(over = {}, ip) {
     method: "POST",
     ip,
     body: {
-      proto: 1,
+      proto: 2,
       title: "instincts",
       version: "1",
       mac: "02:46:43:11:22:33",
@@ -119,6 +119,34 @@ async function r(lobby, request) {
   return [response.status, await response.json().catch(() => null)];
 }
 
+test("net protocol: a registration with the old proto is refused, and a proto-1 host is hidden", async () => {
+  const lobby = mk();
+  // a registration with the old net protocol (1) is refused
+  let [status, body] = await r(lobby, reg({ proto: 1 }));
+  assert.equal(status, 400, JSON.stringify(body));
+
+  // a host that got into the table with proto 1 (an older build) is not listed to a proto-2 fetch
+  const hToken = "c".repeat(64);
+  [status, body] = await r(lobby, reg({ token: hToken }));
+  assert.equal(status, 200);
+  const hid = body.id;
+  lobby.hosts.set("f".repeat(32), {
+    id: "f".repeat(32),
+    ip: "93.184.100.9",
+    proto: 1, // an older build
+    title: "instincts",
+    version: "1",
+    mac: "02:46:43:44:55:66",
+    endpoint: "93.184.100.9:40000",
+    local: null,
+    expires: Date.now() + 60000,
+  });
+  [status, body] = await r(lobby, req("/v1/hosts?title=instincts&version=1"));
+  assert.equal(status, 200);
+  assert.equal(body.proto, 2);
+  assert.deepEqual(body.hosts, [{ id: hid }]); // the proto-1 host is hidden
+});
+
 test("endpoints: the five v1 routes and nothing else", async () => {
   const lobby = mk();
   let [status] = await r(lobby, req("/"));
@@ -144,7 +172,7 @@ test("the whole flow: register, id-only listing, connect, long-poll delivery", a
 
   [status, body] = await r(lobby, req("/v1/hosts?title=instincts&version=1"));
   assert.equal(status, 200);
-  assert.equal(body.proto, 1);
+  assert.equal(body.proto, 2);
   assert.equal(body.relay, "hub.example:4000"); // the canonical hub in the listing
   assert.deepEqual(body.hosts, [{ id: hid }]); // ids only
 
@@ -270,7 +298,7 @@ test("a replayed connect is not queued twice", async () => {
 test("hostile bodies: oversized, bad JSON, the wrong content type, a bad token", async () => {
   const lobby = mk();
   const bigReg = {
-    proto: 1, title: "instincts", version: "1", mac: "02:46:43:11:22:33",
+    proto: 2, title: "instincts", version: "1", mac: "02:46:43:11:22:33",
     endpoint: "8.8.8.7:40000", token: "0".repeat(64), padding: "x".repeat(600),
   };
   let [status] = await r(lobby, req("/v1/register", { method: "POST", body: bigReg }));
@@ -369,7 +397,7 @@ test("an IPv6 caller may register an IPv4 endpoint (the endpoint need not equal 
       method: "POST",
       ip: "2600:1f18:90e:6e01::1",
       body: {
-        proto: 1,
+        proto: 2,
         title: "instincts",
         version: "1",
         mac: "02:46:43:11:22:33",
@@ -858,7 +886,7 @@ test("local: a private IPv4 is stored on register; a public one is ignored", asy
   const hToken2 = "e".repeat(64);
   [status, body] = await r(lobby, req("/v1/register", {
     method: "POST", ip: "8.8.8.8",
-    body: { proto: 1, title: "instincts", version: "1", mac: "02:46:43:44:55:66",
+    body: { proto: 2, title: "instincts", version: "1", mac: "02:46:43:44:55:66",
             endpoint: "8.8.8.8:40001", token: hToken2, local: "8.8.8.8:3074" },
   }));
   assert.equal(status, 200);
@@ -868,7 +896,7 @@ test("local: a private IPv4 is stored on register; a public one is ignored", asy
   const hToken3 = "f".repeat(64);
   [status, body] = await r(lobby, req("/v1/register", {
     method: "POST", ip: "8.8.8.9",
-    body: { proto: 1, title: "instincts", version: "1", mac: "02:46:43:77:88:99",
+    body: { proto: 2, title: "instincts", version: "1", mac: "02:46:43:77:88:99",
             endpoint: "8.8.8.9:40002", token: hToken3, local: "not-an-address" },
   }));
   assert.equal(status, 200);
@@ -882,7 +910,7 @@ test("local: forwarded in the connect reply when both sides share the caller IP"
   // register with a local address
   let [status] = await r(lobby, req("/v1/register", {
     method: "POST", ip,
-    body: { proto: 1, title: "instincts", version: "1", mac: "02:46:43:11:22:33",
+    body: { proto: 2, title: "instincts", version: "1", mac: "02:46:43:11:22:33",
             endpoint: ip + ":40000", token: hToken, local: "192.168.1.50:3074" },
   }));
   assert.equal(status, 200);
@@ -915,7 +943,7 @@ test("local: forwarded when the caller IPs differ (IPv6) but the STUN endpoint I
   const pub = "93.184.100.10";
   await r(lobby, req("/v1/register", {
     method: "POST", ip: "2600:1700::1", // the host reaches the Worker over IPv6
-    body: { proto: 1, title: "evolution", version: "1", mac: "02:46:43:11:22:44",
+    body: { proto: 2, title: "evolution", version: "1", mac: "02:46:43:11:22:44",
             endpoint: pub + ":40000", token: hToken, local: "192.168.1.144:60827" },
   }));
   const hid = sha16(hToken);
@@ -946,7 +974,7 @@ test("local: the guest's local is in the host's poll when IPs match; absent when
   const ip = "93.184.100.9";
   let [status] = await r(lobby, req("/v1/register", {
     method: "POST", ip,
-    body: { proto: 1, title: "instincts", version: "1", mac: "02:46:43:11:22:33",
+    body: { proto: 2, title: "instincts", version: "1", mac: "02:46:43:11:22:33",
             endpoint: ip + ":40000", token: hToken, local: "192.168.1.50:3074" },
   }));
   assert.equal(status, 200);
@@ -991,7 +1019,7 @@ test("local: 100.64/10 (CGNAT) is rejected", async () => {
   const hToken = "c".repeat(64);
   let [status, body] = await r(lobby, req("/v1/register", {
     method: "POST", ip: "8.8.8.7",
-    body: { proto: 1, title: "instincts", version: "1", mac: "02:46:43:11:22:33",
+    body: { proto: 2, title: "instincts", version: "1", mac: "02:46:43:11:22:33",
             endpoint: "8.8.8.7:40000", token: hToken, local: "100.64.1.2:3074" },
   }));
   assert.equal(status, 200);

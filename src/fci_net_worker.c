@@ -17,6 +17,7 @@
 #include <string.h>
 
 #include "fci_image.h"
+#include "fci_net.h"
 #include "fci_net_worker.h"
 
 /* the NIC's worker API (fci_nic.c): called under s_lock */
@@ -46,7 +47,6 @@ extern const char *fci_save_dir;
 #define LIST_FETCH_INTERVAL_MS 5000
 #define POLL_WAIT_S            20
 #define WORKER_TICK_MS         500
-#define NET_PROTO              1 /* the host list protocol version (lobby.js, fake_hostlist.py) */
 
 static HANDLE s_thread;
 static HANDLE s_stop;
@@ -836,12 +836,12 @@ static void host_register(void)
         snprintf(body, sizeof body,
                  "{\"proto\":%d,\"title\":\"%s\",\"version\":\"%s\",\"mac\":\"%s\",\"endpoint\":\"%s\","
                  "\"local\":\"%s\",\"token\":\"%s\"}",
-                 NET_PROTO, net_title(), net_version(), macstr, endpoint, s_local_addr, s_identity);
+                 FCI_NET_PROTO, net_title(), net_version(), macstr, endpoint, s_local_addr, s_identity);
     else
         snprintf(body, sizeof body,
                  "{\"proto\":%d,\"title\":\"%s\",\"version\":\"%s\",\"mac\":\"%s\",\"endpoint\":\"%s\","
                  "\"token\":\"%s\"}",
-                 NET_PROTO, net_title(), net_version(), macstr, endpoint, s_identity);
+                 FCI_NET_PROTO, net_title(), net_version(), macstr, endpoint, s_identity);
     if (http_request(base, "POST", "/v1/register", body, buf, sizeof buf, &status) != 0 || status != 200) {
         s_reg_fail_ms = GetTickCount64();
         log_line("register failed (status %d)", status);

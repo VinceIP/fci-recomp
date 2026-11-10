@@ -149,6 +149,26 @@ def test_room_limit_rates_and_status(hub):
     assert 8 <= got <= 25  # --broadcast-rate 10
 
 
+def scoped_room(room, triple_hex):
+    # the card's room name (fci_nic.c room_scope): the room cut to fit + '~' + the 12 hex chars
+    return room[: 32 - 1 - len(triple_hex)] + "~" + triple_hex
+
+
+def test_room_scoped_by_the_version(hub):
+    # the room name carries the version triple: two cards with the same triple share the room, a
+    # card with an old net protocol lands in a different room and never sees the others
+    addr, status = hub
+    same = scoped_room("lobby", "000300000002")
+    old = scoped_room("lobby", "000300000001")
+    a = Card(addr, "024600000001", room=same)
+    b = Card(addr, "024600000002", room=same)
+    o = Card(addr, "024600000003", room=old)
+    time.sleep(0.2)
+    a.send("ffffffffffff")
+    assert len(b.received()) == 1 and o.received() == []
+    assert rooms(status) == {same: 2, old: 1}
+
+
 def test_per_address_limit():
     proc, addr, status = start_hub("--per-ip", "2")
     try:

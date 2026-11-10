@@ -13,8 +13,12 @@
 #include <string.h>
 
 #include "mmio_decode.h"
+#include "fci_image.h"
+#include "fci_net.h"
 #include "fci_net_worker.h"
 #include "fci_turn.h"
+
+extern uint32_t fci_xbe_version; /* the XBE certificate's Version (fci_main.c): the triple's version */
 
 #define NIC_BASE   0xFEF00000u
 #define NIC_SIZE   0x1000u /* one page; the card's BAR is 1 KiB */
@@ -49,7 +53,8 @@
 #define FRAME_MAX 1536
 #define RX_QUEUE  64
 #define ETHER_MAX 1514 /* the largest frame without its checksum */
-#define MAGIC  "FCN1"  /* hub datagrams: magic, kind ('H' hello: MAC, cookie, room; 'C' cookie; 'F' frame) */
+#define MAGIC  "FCN1"  /* datagrams: magic, kind ('H' hello: MAC, cookie, room (version-scoped) or knock:
+                          * MAC, triple; 'C' cookie; 'F' frame; 'P'/'A' punch) */
 #define COOKIE 8       /* the hub's proof that this address is ours (tools/fci_hub.py) */
 
 /* LIST mode: the internet host list (RECOMP_FCI_NET_LIST) */
@@ -90,9 +95,10 @@ static SOCKET s_sock = INVALID_SOCKET;
 #define PEERS_MAX 32
 typedef struct {
     struct sockaddr_in addr;
-    uint8_t mac[6]; /* the card at that endpoint, from its first frame */
+    uint8_t mac[6]; /* the card at that endpoint, from its knock (direct) or admission (LAN) */
     int has_mac;
     ULONGLONG last_heard; /* the last frame from addr: the endpoint is alive while this is recent */
+    ULONGLONG last_knock; /* the last knock from the card (its admission, LAN and direct) */
 } peer_t;
 static peer_t s_peers[PEERS_MAX];
 static int s_npeers, s_direct; /* s_direct: frames go to s_peers, not to a hub */
@@ -111,10 +117,11 @@ static struct in_addr s_lan_bc[8]; /* the subnet broadcast of each up IPv4 adapt
 static int s_lan_nbc;
 static int s_lan_bc_logged; /* the list was logged at start; a refresh logs only a change */
 static ULONGLONG s_lan_bc_refresh; /* next adapter refresh (GetTickCount64) */
+static ULONGLONG s_lan_knock_next, s_dir_knock_next; /* next knock (GetTickCount64) */
 static void lan_adapters_refresh(void);
 int fci_nic_start_list(const char *url); /* defined below; the lazy starter (above) calls it */
 int fci_nic_start_lan(void);             /* defined below; the menu transport entry (above) calls it */
-static char s_room[33];
+static char s_room[33]; /* the hub's room name, scoped by the triple (room_scope) */
 static uint8_t s_cookie[COOKIE];
 static uint8_t s_mac[6];
 static int s_mac_made;
@@ -319,6 +326,7 @@ void fci_nic_shutdown(void)
     s_lan = 0;
     s_lan_nbc = s_lan_nbcports = 0;
     s_lan_bc_logged = 0;
+    s_lan_knock_next = s_dir_knock_next = 0;
     s_up = 0;
     s_menu = 0;
     for (i = 0; i < RELAY_MAX; i++)
@@ -328,16 +336,29 @@ void fci_nic_shutdown(void)
 }
 
 /* to the hub (to == NULL) or to one peer; a lost datagram is a lost frame, as on a wire */
-static void send_datagram_to(const peer_t *to, char kind, const void *data, int len)
+static void send_datagram(char kind, const void *data, int len);
+
+static void send_datagram_addr(const struct sockaddr_in *to, char kind, const void *data, int len)
 {
     char buf[FRAME_MAX + 8];
     memcpy(buf, MAGIC, 4);
     buf[4] = kind;
     memcpy(buf + 5, data, (size_t)len);
-    if (to)
-        sendto(s_sock, buf, len + 5, 0, (const struct sockaddr *)&to->addr, sizeof to->addr);
-    else
+    sendto(s_sock, buf, len + 5, 0, (const struct sockaddr *)to, sizeof *to);
+}
+
+/* with no peer: the connected socket (the hub). Not send_datagram, which comes back here */
+static void send_datagram_to(const peer_t *to, char kind, const void *data, int len)
+{
+    if (to) {
+        send_datagram_addr(&to->addr, kind, data, len);
+    } else {
+        char buf[FRAME_MAX + 8];
+        memcpy(buf, MAGIC, 4);
+        buf[4] = kind;
+        memcpy(buf + 5, data, (size_t)len);
         send(s_sock, buf, len + 5, 0);
+    }
 }
 
 static void send_datagram(char kind, const void *data, int len) { send_datagram_to(NULL, kind, data, len); }
@@ -486,42 +507,160 @@ static peer_t *peer_at(const struct sockaddr_in *a)
     return NULL;
 }
 
-/* LAN mode: learn a card's endpoint from its frames, de-duplicated by MAC (a card reachable on two
- * adapters is one entry). The learned endpoint is kept while it is alive; it moves to a new source
- * only after 3 s of silence from the current one (an adapter change). NULL when the table is full. */
-static peer_t *lan_learn(const uint8_t *mac, const struct sockaddr_in *from)
+#define LAN_KNOCK_MS        1000  /* the knock: every second, as the game's discovery broadcast */
+#define LAN_KNOCK_EXPIRE_MS 5000  /* a card quiet for 5 s (four lost knocks) is no longer admitted */
+
+static peer_t *lan_find(const uint8_t *mac)
+{
+    int i;
+    for (i = 0; i < PEERS_MAX; i++)
+        if (s_peers[i].has_mac && !memcmp(s_peers[i].mac, mac, 6))
+            return &s_peers[i];
+    return NULL;
+}
+
+/* LAN mode: the knock admits a card's MAC (its triple is checked by the caller) and records its
+ * endpoint, de-duplicated by MAC (a card reachable on two adapters is one entry). NULL when the
+ * table is full. */
+static peer_t *lan_admit(const uint8_t *mac, const struct sockaddr_in *from)
 {
     ULONGLONG now = GetTickCount64();
     int i, free = -1;
-    for (i = 0; i < PEERS_MAX; i++) {
-        if (s_peers[i].has_mac && !memcmp(s_peers[i].mac, mac, 6)) {
-            if (s_peers[i].addr.sin_addr.s_addr == from->sin_addr.s_addr
-                && s_peers[i].addr.sin_port == from->sin_port)
-                s_peers[i].last_heard = now; /* the endpoint is alive: keep it */
-            else if (now - s_peers[i].last_heard >= 3000) {
-                /* quiet for 3 s (an adapter change): the card moved, the new source wins */
-                s_peers[i].addr = *from;
-                s_peers[i].last_heard = now;
-                fprintf(stderr, "[FCI] network: LAN learn %02X:%02X:%02X:%02X:%02X:%02X <- %s:%u (moved)\n",
-                        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], inet_ntoa(from->sin_addr),
-                        ntohs(from->sin_port));
-                fflush(stderr);
-            } /* a frame from another adapter while the endpoint is alive: keep it, no log */
-            return &s_peers[i];
+    peer_t *p = lan_find(mac);
+    if (p) {
+        p->last_knock = now;
+        if (p->addr.sin_addr.s_addr != from->sin_addr.s_addr || p->addr.sin_port != from->sin_port) {
+            p->addr = *from;
+            p->last_heard = now; /* the knock comes from the card's live adapter */
         }
+        return p;
+    }
+    for (i = 0; i < PEERS_MAX; i++)
         if (!s_peers[i].has_mac && free < 0)
             free = i;
-    }
     if (free < 0)
         return NULL;
     s_peers[free].addr = *from;
     memcpy(s_peers[free].mac, mac, 6);
     s_peers[free].has_mac = 1;
     s_peers[free].last_heard = now;
-    fprintf(stderr, "[FCI] network: LAN learn %02X:%02X:%02X:%02X:%02X:%02X <- %s:%u\n",
+    s_peers[free].last_knock = now;
+    fprintf(stderr, "[FCI] network: LAN admit %02X:%02X:%02X:%02X:%02X:%02X <- %s:%u\n",
             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], inet_ntoa(from->sin_addr), ntohs(from->sin_port));
     fflush(stderr);
     return &s_peers[free];
+}
+
+/* a frame from an admitted MAC: the endpoint is kept while it is alive; it moves to a new source
+ * only after 3 s of silence from the current one (an adapter change). NULL when the MAC is not
+ * admitted, or its knocks have stopped (the card left): the frame is dropped. */
+static peer_t *lan_frame_seen(const uint8_t *mac, const struct sockaddr_in *from)
+{
+    ULONGLONG now = GetTickCount64();
+    peer_t *p = lan_find(mac);
+    if (!p || now - p->last_knock >= LAN_KNOCK_EXPIRE_MS)
+        return NULL;
+    if (p->addr.sin_addr.s_addr == from->sin_addr.s_addr && p->addr.sin_port == from->sin_port)
+        p->last_heard = now; /* the endpoint is alive: keep it */
+    else if (now - p->last_heard >= 3000) {
+        /* quiet for 3 s (an adapter change): the card moved, the new source wins */
+        p->addr = *from;
+        p->last_heard = now;
+        fprintf(stderr, "[FCI] network: LAN learn %02X:%02X:%02X:%02X:%02X:%02X <- %s:%u (moved)\n",
+                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], inet_ntoa(from->sin_addr),
+                ntohs(from->sin_port));
+        fflush(stderr);
+    } /* a frame from another adapter while the endpoint is alive: keep it, no log */
+    return p;
+}
+
+/* the compatibility triple every hello and knock carries (the one rule for every transport):
+ * the title (0 = Instincts, 1 = Evolution), the disc's version (the XBE certificate's Version),
+ * and the net protocol (fci_net.h). A peer is admitted only when all three match ours; a mismatch
+ * is logged once per peer (10 s) and the peer is never admitted. research/docs/multiplayer.md */
+#define NET_TRIPLE_LEN 6
+static uint8_t s_triple[NET_TRIPLE_LEN];
+static int s_triple_made;
+static void net_triple_fill(uint8_t *b)
+{
+    if (!s_triple_made) {
+        s_triple[0] = strstr(FCI_TITLE_NAME, "Evolution") ? 1 : 0;
+        s_triple[1] = (uint8_t)fci_xbe_version;
+        s_triple[2] = (uint8_t)(fci_xbe_version >> 8);
+        s_triple[3] = (uint8_t)(fci_xbe_version >> 16);
+        s_triple[4] = (uint8_t)(fci_xbe_version >> 24);
+        s_triple[5] = FCI_NET_PROTO;
+        s_triple_made = 1;
+    }
+    memcpy(b, s_triple, NET_TRIPLE_LEN);
+}
+
+/* ours is built on first use: a peer's knock can arrive before we send one */
+static int net_triple_ok(const uint8_t *b)
+{
+    uint8_t ours[NET_TRIPLE_LEN];
+    net_triple_fill(ours);
+    return memcmp(b, ours, NET_TRIPLE_LEN) == 0;
+}
+
+/* one rate-limited line per peer (10 s): both sides' title, version and net protocol */
+static void net_triple_mismatch(const uint8_t *mac, const uint8_t *b)
+{
+    static uint8_t seen[16][6];
+    static ULONGLONG next_log[16];
+    static int nseen;
+    ULONGLONG now = GetTickCount64();
+    uint32_t v = (uint32_t)b[1] | ((uint32_t)b[2] << 8) | ((uint32_t)b[3] << 16) | ((uint32_t)b[4] << 24);
+    int i, free = -1;
+    for (i = 0; i < nseen; i++) {
+        if (!memcmp(seen[i], mac, 6))
+            break;
+        if (!seen[i][0] && free < 0)
+            free = i;
+    }
+    if (i == nseen) {
+        if (free < 0)
+            free = nseen < 16 ? nseen : -1;
+        if (free < 0)
+            return; /* the table is full: a 17th mismatching peer is dropped without a log */
+        memcpy(seen[free], mac, 6);
+        i = free;
+        if (free == nseen)
+            nseen++;
+    }
+    if (now < next_log[i])
+        return;
+    next_log[i] = now + 10000;
+    fprintf(stderr,
+            "[FCI] network: peer %02X:%02X:%02X:%02X:%02X:%02X is %s version %u net protocol %u; "
+            "we are %s version %u net protocol %u; not admitted\n",
+            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], b[0] ? "evolution" : "instincts", (unsigned)v,
+            (unsigned)b[5], strstr(FCI_TITLE_NAME, "Evolution") ? "evolution" : "instincts",
+            (unsigned)fci_xbe_version, (unsigned)FCI_NET_PROTO);
+    fflush(stderr);
+}
+
+/* the room name the card sends to the hub: "<room>~<the triple in hex>" (12 hex chars). The hub
+ * keys its rooms by the name and never relays hellos, so a mismatched build lands in a different
+ * room and never sees this one: a mismatch in hub mode shows as an empty room, with no line. The
+ * user's room is cut to fit the name (and the cut is logged). */
+static void room_scope(char *room, size_t roomlen)
+{
+    char hex[NET_TRIPLE_LEN * 2 + 1]; /* + the NUL sprintf writes */
+    uint8_t t[NET_TRIPLE_LEN];
+    size_t keep = roomlen - 1 - 1 - NET_TRIPLE_LEN * 2, n = strlen(room);
+    int i;
+    net_triple_fill(t); /* the triple is built on first use: not yet at hub start */
+    for (i = 0; i < NET_TRIPLE_LEN; i++)
+        sprintf(hex + i * 2, "%02x", t[i]);
+    if (n > keep) {
+        n = keep;
+        fprintf(stderr, "[FCI] network: room name cut to %u chars to fit the version scope\n", (unsigned)n);
+        fflush(stderr);
+    }
+    memcpy(room + n, "~", 1);
+    memcpy(room + n + 1, hex, NET_TRIPLE_LEN * 2);
+    room[n + 1 + NET_TRIPLE_LEN * 2] = 0;
 }
 
 static void hello(void)
@@ -534,6 +673,37 @@ static void hello(void)
     memcpy(b + 6, s_cookie, COOKIE);
     memcpy(b + 6 + COOKIE, s_room, n);
     send_datagram('H', b, (int)(6 + COOKIE + n));
+}
+
+/* the knock (LAN and direct peers): "FCN1" 'H' + our MAC + the triple, 17 bytes. A peer admits us
+ * on it, as we admit it; the triple is what makes the two builds a match */
+static void knock_send(const struct sockaddr_in *to)
+{
+    char b[6 + NET_TRIPLE_LEN];
+    memcpy(b, s_mac, 6);
+    net_triple_fill((uint8_t *)b + 6);
+    send_datagram_addr(to, 'H', b, (int)sizeof b);
+}
+
+static void lan_knock(void)
+{
+    int i, j;
+    for (i = 0; i < s_lan_nbc; i++)
+        for (j = 0; j < s_lan_nbcports; j++) {
+            struct sockaddr_in to;
+            memset(&to, 0, sizeof to);
+            to.sin_family = AF_INET;
+            to.sin_addr = s_lan_bc[i];
+            to.sin_port = htons(s_lan_bcports[j]);
+            knock_send(&to);
+        }
+}
+
+static void direct_knock(void)
+{
+    int i;
+    for (i = 0; i < s_npeers; i++)
+        knock_send(&s_peers[i].addr);
 }
 
 /* --- LIST mode: STUN, punch, peer table --- */
@@ -1000,9 +1170,10 @@ static int relay_socket_new(const lpeer_t *p)
     }
     s_relsock[i] = s;
     memset(s_relcookie[i], 0, COOKIE);
-    for (n = 0; n < 16; n++) /* the room: the peer's nonce in hex, 32 chars */
+    for (n = 0; n < 16; n++) /* the room: the peer's nonce in hex, scoped by the triple */
         sprintf(s_relroom[i] + n * 2, "%02x", p->nonce[n]);
     s_relroom[i][32] = 0;
+    room_scope(s_relroom[i], sizeof s_relroom[i]); /* the nonce is cut to fit the scope */
     s_relhello[i] = GetTickCount64(); /* hello now: the cookie exchange starts */
     relay_hello(i);
     return i;
@@ -1277,11 +1448,28 @@ static void receive(void)
         } else if (n < 5 || memcmp(buf, MAGIC, 4)) {
             continue;
         } else if (s_lan) {
-            /* LAN mode: the segment's cards, each with its own card's frames. Our own broadcast comes
-             * back to us (another adapter, the test port): its source MAC is the card's own, drop it */
+            /* LAN mode: the segment's cards. A knock ('H', 17 bytes) admits its sender's MAC when
+             * the triple matches; a frame reaches the guest only from an admitted MAC. Our own
+             * broadcast comes back to us (another adapter, the test port): its source MAC is the
+             * card's own, drop it */
             const uint8_t *src = (const uint8_t *)buf + 5 + 6;
             static ULONGLONG next_own;
-            if (fromlen != sizeof from || buf[4] != 'F') {
+            if (fromlen != sizeof from) {
+                stray(&from);
+                continue;
+            }
+            if (buf[4] == 'H' && n == 5 + 6 + NET_TRIPLE_LEN) {
+                /* a knock's MAC follows the kind (buf + 5); src above is a frame's source MAC */
+                const uint8_t *kmac = (const uint8_t *)buf + 5;
+                if (!(kmac[0] & 1) && memcmp(kmac, s_mac, 6)) { /* our own knock echoes: dropped */
+                    if (net_triple_ok((const uint8_t *)buf + 11))
+                        lan_admit(kmac, &from);
+                    else
+                        net_triple_mismatch(kmac, (const uint8_t *)buf + 11);
+                }
+                continue;
+            }
+            if (buf[4] != 'F') {
                 stray(&from);
                 continue;
             }
@@ -1300,12 +1488,26 @@ static void receive(void)
                 }
                 continue;
             }
-            p = lan_learn(src, &from); /* de-duplicated by MAC, the latest source wins */
+            p = lan_frame_seen(src, &from); /* only a MAC admitted by a knock, while its knocks run */
             if (!p) {
                 stray(&from);
                 continue;
             }
         } else if (s_direct) { /* only peers reach the guest, each with its own card's frames */
+            if (fromlen == sizeof from && buf[4] == 'H' && n == 5 + 6 + NET_TRIPLE_LEN) {
+                /* a knock from a configured peer: the matching triple admits it, and updates its
+                 * MAC, which changes across a restart of the peer's process */
+                peer_t *k = peer_at(&from);
+                if (k) {
+                    if (net_triple_ok((const uint8_t *)buf + 11)) {
+                        memcpy(k->mac, (const uint8_t *)buf + 5, 6);
+                        k->has_mac = 1;
+                        k->last_knock = GetTickCount64();
+                    } else
+                        net_triple_mismatch((const uint8_t *)buf + 5, (const uint8_t *)buf + 11);
+                }
+                continue;
+            }
             p = fromlen == sizeof from ? peer_at(&from) : NULL;
             if (!p || buf[4] != 'F') {
                 stray(&from);
@@ -1332,6 +1534,8 @@ static void receive(void)
                         src[4], src[5]);
                 fflush(stderr);
             } else if (memcmp(p->mac, src, 6)) {
+                /* the MAC comes from the peer's knock (direct); a frame from an unknocked or a
+                 * different MAC is dropped */
                 stray(&from);
                 continue;
             }
@@ -1562,6 +1766,14 @@ int fci_nic_tick(void)
             lan_adapters_refresh(); /* Wi-Fi changes: the list is re-read every 30 s */
             s_lan_bc_refresh = now + LAN_REFRESH_MS;
         }
+        if (s_lan && now >= s_lan_knock_next) {
+            lan_knock(); /* the segment's cards admit each other on it (the triple checked) */
+            s_lan_knock_next = now + LAN_KNOCK_MS;
+        }
+        if (s_direct && now >= s_dir_knock_next) {
+            direct_knock(); /* the fixed peers admit us on it, as we admit them */
+            s_dir_knock_next = now + LAN_KNOCK_MS;
+        }
         if (s_list) {
             list_tick(now);
             receive_relays(); /* before receive(): the relay queue shares s_rxq */
@@ -1649,6 +1861,7 @@ static int connect_hub(const char *spec)
     memcpy(host, spec, (size_t)(colon - spec));
     host[colon - spec] = 0;
     snprintf(s_room, sizeof s_room, "%s", slash ? slash + 1 : "");
+    room_scope(s_room, sizeof s_room); /* the triple in the room name: mismatched builds never meet */
     {
         char port[16];
         size_t pn = slash ? (size_t)(slash - colon - 1) : strlen(colon + 1);
@@ -1732,6 +1945,7 @@ static int connect_peers(const char *spec, char *err, int errlen)
         snprintf(err, errlen, "no peers after the local port");
         return 0;
     }
+    s_dir_knock_next = GetTickCount64() + LAN_KNOCK_MS; /* the first knock a second in */
     memset(&local, 0, sizeof local);
     local.sin_family = AF_INET;
     local.sin_port = htons((u_short)port);
@@ -2200,6 +2414,7 @@ int fci_nic_start_lan(void)
     s_lan = 1;
     lan_adapters_refresh();
     s_lan_bc_refresh = GetTickCount64() + LAN_REFRESH_MS;
+    s_lan_knock_next = GetTickCount64() + LAN_KNOCK_MS; /* the first knock a second in */
     fci_nic_mac(m);
     fprintf(stderr, "[FCI] network: LAN up, %02X:%02X:%02X:%02X:%02X:%02X, bound 0.0.0.0:%u\n", m[0], m[1],
             m[2], m[3], m[4], m[5], port);

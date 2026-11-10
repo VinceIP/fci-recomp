@@ -81,7 +81,7 @@ def register(base, title="evolution", version="3", endpoint="127.0.0.1:40000", t
         f"{base}/v1/register",
         method="POST",
         body={
-            "proto": 1,
+            "proto": 2,
             "title": title,
             "version": version,
             "mac": "02:46:43:12:34:56",
@@ -145,6 +145,47 @@ def test_register_poll_connect():
         server.shutdown()
 
 
+def test_register_wrong_proto_is_refused_and_hidden():
+    """A registration with the old net protocol (1) is refused; a proto-1 host in the table is
+    not listed to a proto-2 listing. The list hides a mismatch (the one rule, q21)."""
+    port, server, lobby = start_server()
+    try:
+        base = f"http://127.0.0.1:{port}"
+        status, body = http_json(
+            f"{base}/v1/register",
+            method="POST",
+            body={
+                "proto": 1,
+                "title": "evolution",
+                "version": "3",
+                "mac": "02:46:43:12:34:56",
+                "endpoint": "127.0.0.1:40002",
+                "token": secrets.token_hex(32),
+            },
+        )
+        assert status == 400, body
+
+        # and a proto-1 host already in the table is not listed to a proto-2 listing
+        host_id, _ = register(base)
+        lobby.hosts["deadbeef" * 4] = {
+            "id": "deadbeef" * 4,
+            "ip": "10.0.0.9",
+            "proto": 1,
+            "title": "evolution",
+            "version": "3",
+            "mac": "02:46:43:00:11:22",
+            "endpoint": "1.2.3.4:3074",
+            "local": None,
+            "expires": time.time() + 60,
+        }
+        status, body = http_json(f"{base}/v1/hosts?title=evolution&version=3")
+        assert status == 200
+        assert body["proto"] == 2
+        assert body["hosts"] == [{"id": host_id}]  # the proto-1 host is hidden
+    finally:
+        server.shutdown()
+
+
 def test_poll_times_out():
     """A poll with no connect times out with a 200 and an empty list."""
     port, server, lobby = start_server()
@@ -204,7 +245,7 @@ def test_register_bad_mac_is_rejected():
                 f"{base}/v1/register",
                 method="POST",
                 body={
-                    "proto": 1,
+                    "proto": 2,
                     "title": "evolution",
                     "version": "3",
                     "mac": mac,
@@ -250,7 +291,7 @@ def test_ban_flow_and_admin_gate():
             f"{base}/v1/register",
             method="POST",
             body={
-                "proto": 1,
+                "proto": 2,
                 "title": "evolution",
                 "version": "3",
                 "mac": "02:46:43:12:34:56",
@@ -286,7 +327,7 @@ def test_ban_flow_and_admin_gate():
             f"{base}/v1/register",
             method="POST",
             body={
-                "proto": 1,
+                "proto": 2,
                 "title": "evolution",
                 "version": "3",
                 "mac": "02:46:43:12:34:56",
@@ -628,7 +669,7 @@ def test_unregister_releases_a_held_poll_and_clears_the_queue():
             f"{base}/v1/register",
             method="POST",
             body={
-                "proto": 1,
+                "proto": 2,
                 "title": "evolution",
                 "version": "3",
                 "mac": "02:46:43:12:34:56",
@@ -655,7 +696,7 @@ def test_local_stored_on_register():
             f"{base}/v1/register",
             method="POST",
             body={
-                "proto": 1,
+                "proto": 2,
                 "title": "evolution",
                 "version": "3",
                 "mac": "02:46:43:12:34:56",
@@ -675,7 +716,7 @@ def test_local_stored_on_register():
             f"{base}/v1/register",
             method="POST",
             body={
-                "proto": 1,
+                "proto": 2,
                 "title": "evolution",
                 "version": "3",
                 "mac": "02:46:43:12:34:57",
@@ -693,7 +734,7 @@ def test_local_stored_on_register():
             f"{base}/v1/register",
             method="POST",
             body={
-                "proto": 1,
+                "proto": 2,
                 "title": "evolution",
                 "version": "3",
                 "mac": "02:46:43:12:34:58",
@@ -720,7 +761,7 @@ def test_local_forwarded_same_ip():
             f"{base}/v1/register",
             method="POST",
             body={
-                "proto": 1,
+                "proto": 2,
                 "title": "evolution",
                 "version": "3",
                 "mac": "02:46:43:12:34:56",
@@ -762,7 +803,7 @@ def test_local_in_poll():
             f"{base}/v1/register",
             method="POST",
             body={
-                "proto": 1,
+                "proto": 2,
                 "title": "evolution",
                 "version": "3",
                 "mac": "02:46:43:12:34:56",
@@ -814,7 +855,7 @@ def test_local_cgnat_rejected():
             f"{base}/v1/register",
             method="POST",
             body={
-                "proto": 1,
+                "proto": 2,
                 "title": "evolution",
                 "version": "3",
                 "mac": "02:46:43:12:34:56",
