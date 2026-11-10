@@ -158,8 +158,7 @@ static void traffic_summary(ULONGLONG now, int force)
         fprintf(stderr, "%s %s tx %llu frames %llu bytes, rx %llu frames %llu bytes", shown++ ? ";" : "", name[i],
                 s_tfc[i][0], s_tfc[i][1], s_tfc[i][2], s_tfc[i][3]);
     }
-    fprintf(stderr, "
-");
+    fprintf(stderr, "\n");
     fflush(stderr);
 }
 /* q24: the gate between the wire and the guest's RX queue. Every frame (card socket, relay rooms,
