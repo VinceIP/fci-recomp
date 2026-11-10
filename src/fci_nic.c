@@ -64,6 +64,7 @@ extern uint32_t fci_xbe_version; /* the XBE certificate's Version (fci_main.c): 
 #define PUNCH_PERIOD_MS  100
 #define PUNCH_WINDOW_MS  3000
 #define PEER_EXPIRE_MS   15000
+#define TURN_OPEN_MS     1000 /* the host's datagram to a relayed guest: opens and keeps its NAT mapping */
 #define STUN_PERIOD_MS   60000
 #define STUN_MAGIC       0x2112A442u
 
@@ -1258,6 +1259,8 @@ int fci_nic_list_turn_peer(const uint8_t nonce[16], const uint8_t mac[6], const 
         p->relay = -1;
         p->turn_ch = -1;
         p->via_turn = 1; /* its endpoint is the guest's relayed address */
+        p->has_local = 0;
+        p->next_punch = now; /* the tick opens our NAT to the relayed address */
         p->last_frame = now;
         freeaddrinfo(ai);
         fprintf(stderr, "[FCI] network: guest now at relay %s:%u (nonce %02x%02x%02x%02x)\n", inet_ntoa(ep.sin_addr),
@@ -1280,6 +1283,8 @@ int fci_nic_list_turn_peer(const uint8_t nonce[16], const uint8_t mac[6], const 
         p->relay = -1;
         p->turn_ch = -1;
         p->via_turn = 1; /* its endpoint is the guest's relayed address */
+        p->has_local = 0;
+        p->next_punch = now; /* the tick opens our NAT to the relayed address */
         p->last_frame = now;
         s_nlpeers++;
         fprintf(stderr, "[FCI] network: guest now at relay %s (nonce %02x%02x%02x%02x)\n", endpoint, nonce[0], nonce[1],
@@ -1420,7 +1425,10 @@ static void receive_turn(void)
     while ((n = fci_turn_recv(d, sizeof d, &from)) > 0) {
         int i, ok = 0;
         const uint8_t *f = d + 5;
-        /* the host's card datagram (FCN1 'F' + frame); its punches ('P'/'A') don't apply here */
+        /* the host's NAT opener (a punch, 21 bytes) carries no frame */
+        if (n == 21 && !memcmp(d, MAGIC, 4) && d[4] == 'P')
+            continue;
+        /* the host's card datagram (FCN1 'F' + frame) */
         if (n < 5 + 14 || n > 5 + ETHER_MAX || memcmp(d, MAGIC, 4) || d[4] != 'F') {
             baddgram_log(&from, n);
             continue;
@@ -1776,6 +1784,12 @@ static void list_tick(ULONGLONG now)
     /* punch schedule and expiries */
     for (i = 0; i < s_nlpeers; i++) {
         lpeer_t *p = &s_lpeers[i];
+        /* a relayed guest's frames come from the TURN server's relayed address: our NAT lets them
+         * in only once we have sent there, and the game sends nothing until it hears the guest */
+        if (p->state == LP_LIVE && p->via_turn && now >= p->next_punch) {
+            punch_send(p);
+            p->next_punch = now + TURN_OPEN_MS;
+        }
         if (p->state == LP_PENDING) {
             if (now >= p->punch_end) {
                 /* 3 s with no answer: the TURN relay (the guest asks the list for a credential) */
