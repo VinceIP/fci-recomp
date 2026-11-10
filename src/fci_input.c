@@ -1,5 +1,6 @@
 /* Mouse and keyboard as the controller on port 0, merged over a real pad: bindable controls, direct aim
- * on foot (fci_aim.c), the mouse as the right stick elsewhere. Options: src/fci.ini. */
+ * on foot (fci_aim.c), the mouse as the right stick elsewhere. The right stick aims directly on foot too,
+ * past the game's look. Options: src/fci.ini. */
 #include <windows.h>
 #include <ctype.h>
 #include <math.h>
@@ -126,7 +127,9 @@ static int parse_input(const char *s)
 static int binds[C_COUNT][MAX_BINDS];
 static struct {
     double sens, degrees, y_scale, curve, deadzone, walk;
+    double stick_speed, stick_y_scale, stick_deadzone, stick_curve, stick_boost;
     int aim, invert_y, window_ms, capture, wheel_ms, log;
+    int stick_aim, stick_invert_y, stick_boost_ms;
 } opt;
 
 static double opt_num(const char *name, double fallback)
@@ -184,6 +187,24 @@ static BOOL CALLBACK load_config(PINIT_ONCE once, PVOID param, PVOID *ctx)
     opt.walk = opt_num("RECOMP_WALK_SCALE", 0.5);
     opt.wheel_ms = (int)opt_num("RECOMP_WHEEL_HOLD_MS", 80);
     opt.log = opt_num("RECOMP_INPUT_LOG", 0) != 0;
+    opt.stick_aim = opt_num("RECOMP_STICK_AIM", 0) != 0;
+    opt.stick_speed = opt_num("RECOMP_STICK_SPEED", 180.0);
+    opt.stick_y_scale = opt_num("RECOMP_STICK_Y_SCALE", 0.75);
+    opt.stick_deadzone = opt_num("RECOMP_STICK_DEADZONE", 0.12);
+    opt.stick_curve = opt_num("RECOMP_STICK_CURVE", 1.8);
+    opt.stick_boost = opt_num("RECOMP_STICK_BOOST", 1.6);
+    opt.stick_boost_ms = (int)opt_num("RECOMP_STICK_BOOST_MS", 350);
+    opt.stick_invert_y = opt_num("RECOMP_STICK_INVERT_Y", 0) != 0;
+    if (opt.stick_curve <= 0)
+        opt.stick_curve = 1.0;
+    if (opt.stick_deadzone < 0)
+        opt.stick_deadzone = 0;
+    if (opt.stick_deadzone > 0.9)
+        opt.stick_deadzone = 0.9;
+    if (opt.stick_boost < 1)
+        opt.stick_boost = 1;
+    if (opt.stick_boost_ms < 0)
+        opt.stick_boost_ms = 0;
     if (opt.curve <= 0)
         opt.curve = 1.0;
     if (opt.window_ms < 4)
@@ -195,6 +216,14 @@ static BOOL CALLBACK load_config(PINIT_ONCE once, PVOID param, PVOID *ctx)
             "curve %.2f, dead zone %.2f, window %d ms, capture %s\n",
             opt.sens, opt.y_scale, opt.invert_y ? ", inverted" : "", opt.aim ? "direct" : "stick",
             opt.degrees * opt.sens, opt.curve, opt.deadzone, opt.window_ms, opt.capture ? "on" : "off");
+    if (opt.stick_aim)
+        fprintf(stderr,
+                "[FCI] input: stick aim direct, %.0f degrees/s (y %.2f%s), dead zone %.2f, curve %.2f, "
+                "boost %.2f over %d ms\n",
+                opt.stick_speed, opt.stick_y_scale, opt.stick_invert_y ? ", inverted" : "",
+                opt.stick_deadzone, opt.stick_curve, opt.stick_boost, opt.stick_boost_ms);
+    else
+        fprintf(stderr, "[FCI] input: stick aim through the game's look\n");
     fprintf(stderr, "[FCI] input: bindings");
     for (int c = 0; c < C_COUNT; c++) {
         fprintf(stderr, " %s=", control_names[c]);
@@ -251,29 +280,107 @@ void fci_input_wheel(int notches)
 }
 
 /* direct aim (fci_aim.c): counts since the player's input step last took them */
-#define AIM_LIVE_MS 250 /* the step ran this recently: the mouse aims directly */
+#define AIM_LIVE_MS 250 /* the step ran this recently: the mouse and the right stick aim directly */
 static volatile LONG aim_dx, aim_dy;
 static volatile LONGLONG aim_seen;
 
-static int aim_live(void) { return opt.aim && (LONGLONG)GetTickCount64() - aim_seen < AIM_LIVE_MS; }
+static int step_live(void) { return (LONGLONG)GetTickCount64() - aim_seen < AIM_LIVE_MS; }
+static int aim_live(void) { return opt.aim && step_live(); }
+static int stick_live(void) { return opt.stick_aim && step_live(); }
+
+/* the right stick, taken out of the pad reports while it aims directly */
+#define STICK_PADS     4
+#define STICK_FRESH_MS 100 /* a pad not reported for this long has let go */
+static volatile LONG stick_rx[STICK_PADS], stick_ry[STICK_PADS];
+static volatile LONGLONG stick_t[STICK_PADS];
+static LARGE_INTEGER stick_last; /* the input step that last turned by the stick; 0: resuming */
+static double stick_held_ms;     /* how long the stick has been at its rim */
+
+/* a finished pad report (fci_record.c), before the title reads it: while the stick aims directly the game's
+ * look never sees it, so its axis snap, turn ramp and target slowdown (re/notes/INPUT-CAMERA.md) are gone */
+void fci_input_pad_stick(int pad, uint8_t *report)
+{
+    config();
+    if (pad < 0 || pad >= STICK_PADS || !stick_live())
+        return;
+    stick_rx[pad] = (int16_t)(report[16] | report[17] << 8);
+    stick_ry[pad] = (int16_t)(report[18] | report[19] << 8);
+    stick_t[pad] = (LONGLONG)GetTickCount64();
+    memset(report + 16, 0, 4);
+}
+
+/* this step's turn from the right stick, in degrees, added to *yaw and *pitch: a round dead zone, the curve,
+ * and the boost while the stick is held at its rim. Returns whether it turned. */
+static int stick_turn(float *yaw, float *pitch)
+{
+    static LARGE_INTEGER freq;
+    LARGE_INTEGER now;
+    LONGLONG ms = (LONGLONG)GetTickCount64();
+    double dt, x = 0, y = 0, best = 0, mag, amount, boost = 1;
+    if (!freq.QuadPart)
+        QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&now);
+    dt = stick_last.QuadPart ? (double)(now.QuadPart - stick_last.QuadPart) / (double)freq.QuadPart : 0;
+    stick_last = now;
+    /* a long frame: no jump */
+    if (dt > 0.1)
+        dt = 0.1;
+    /* the pad pushed furthest */
+    for (int p = 0; p < STICK_PADS; p++) {
+        double px = stick_rx[p] / 32767.0, py = stick_ry[p] / 32767.0, m = px * px + py * py;
+        if (ms - stick_t[p] < STICK_FRESH_MS && m > best) {
+            best = m;
+            x = px;
+            y = py;
+        }
+    }
+    mag = sqrt(best);
+    if (mag <= opt.stick_deadzone) {
+        stick_held_ms = 0;
+        return 0;
+    }
+    /* zero at the dead zone's edge, full a little short of the rim (worn sticks seldom reach it) */
+    amount = (mag - opt.stick_deadzone) / (0.97 - opt.stick_deadzone);
+    if (amount >= 1) {
+        amount = 1;
+        stick_held_ms += dt * 1000.0;
+        boost = opt.stick_boost_ms ? 1 + (opt.stick_boost - 1) * fmin(stick_held_ms / opt.stick_boost_ms, 1)
+                                   : opt.stick_boost;
+    } else {
+        stick_held_ms = 0;
+    }
+    amount = pow(amount, opt.stick_curve) * opt.stick_speed * boost * dt;
+    /* along the stick's own direction: no snap to an axis */
+    *yaw += (float)(x / mag * amount);
+    /* stick up looks up, and the game's pitch grows looking down */
+    *pitch += (float)(-y / mag * amount * opt.stick_y_scale * (opt.stick_invert_y ? -1 : 1));
+    return 1;
+}
 
 /* the player's input step, once a frame: the turn in degrees since the last one */
 int fci_input_aim(float *yaw, float *pitch)
 {
     LONGLONG now = (LONGLONG)GetTickCount64(), was = aim_seen;
     LONG dx, dy;
+    int turned;
     config();
-    if (!opt.aim)
+    if (!opt.aim && !opt.stick_aim)
         return 0;
     aim_seen = now;
     dx = InterlockedExchange(&aim_dx, 0);
     dy = InterlockedExchange(&aim_dy, 0);
-    if (now - was >= AIM_LIVE_MS || (!dx && !dy))
+    if (now - was >= AIM_LIVE_MS) {
+        stick_last.QuadPart = 0;
+        stick_held_ms = 0;
         return 0; /* resuming: drop what was left over */
+    }
     *yaw = (float)(dx * opt.degrees * opt.sens);
     /* screen y grows down, and so does the game's pitch (looking down) */
     *pitch = (float)(dy * opt.degrees * opt.sens * opt.y_scale * (opt.invert_y ? -1 : 1));
-    return 1;
+    turned = dx || dy;
+    if (opt.stick_aim && stick_turn(yaw, pitch))
+        turned = 1;
+    return turned;
 }
 
 static void mouse_motion(int dx, int dy)

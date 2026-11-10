@@ -238,6 +238,10 @@ mod tests {
         assert_eq!(get("gfx-res-scale").kind, "text");
         assert_eq!(get("gfx-ssao").kind, "toggle");
         assert_eq!(get("controls-bind-a").label, "jump");
+        assert_eq!(get("controls-stick-aim").kind, "toggle");
+        assert_eq!(get("controls-stick-aim").section, "Controller right stick");
+        assert_eq!(get("controls-stick-deadzone").kind, "number");
+        assert_eq!(get("controls-stick-invert-y").kind, "toggle");
         assert!(get("save-dir").per_game);
         assert!(o.len() > 50, "{}", o.len());
     }
