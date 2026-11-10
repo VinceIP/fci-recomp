@@ -258,6 +258,55 @@ def test_register_bad_mac_is_rejected():
         server.shutdown()
 
 
+def test_register_global_host_cap():
+    """The global live-host cap (HOSTS_MAX): a flood of fake games from many addresses cannot grow
+    the list without bound; a re-register of a live host never grows the map, so it is not capped."""
+    import fake_hostlist
+
+    port, server, lobby = start_server()
+    old = fake_hostlist.HOSTS_MAX
+    fake_hostlist.HOSTS_MAX = 3
+    try:
+        base = f"http://127.0.0.1:{port}"
+        first_tok = None
+        for i in range(3):
+            _, tok = register(base, version=str(i + 1), endpoint=f"127.0.0.1:{40000 + i}")
+            first_tok = first_tok or tok
+        # a fourth, distinct host is refused
+        status, body = http_json(
+            f"{base}/v1/register",
+            method="POST",
+            body={
+                "proto": 2,
+                "title": "evolution",
+                "version": "9",
+                "mac": "02:46:43:12:34:56",
+                "endpoint": "127.0.0.1:40003",
+                "token": secrets.token_hex(32),
+            },
+        )
+        assert status == 503, body
+        assert body["error"] == "host list full"
+        # a re-register of a live host (the same token derives the same id) still succeeds:
+        # the map does not grow
+        status, body = http_json(
+            f"{base}/v1/register",
+            method="POST",
+            body={
+                "proto": 2,
+                "title": "evolution",
+                "version": "1",
+                "mac": "02:46:43:12:34:56",
+                "endpoint": "127.0.0.1:40000",
+                "token": tok,
+            },
+        )
+        assert status == 200, body
+    finally:
+        fake_hostlist.HOSTS_MAX = old
+        server.shutdown()
+
+
 def test_ban_flow_and_admin_gate():
     """A banned id cannot host or join; the admin routes need the secret."""
     port, server, lobby = start_server(secret="topsecret")

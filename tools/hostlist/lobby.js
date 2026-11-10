@@ -68,6 +68,7 @@ const MESSAGE_MAX = 512; // register, connect and admin bodies
 const BANS_RING = 1000; // recent refusals kept in memory
 const TURN_WINDOW_MS = 600000; // a mint (and a relayed connect) is valid for 10 minutes after the connect
 const TURN_MAPS_MAX = 1000; // the recent-pairs and mints maps are tiny by construction; cap them anyway
+const HOSTS_MAX = 1024; // the global live-host cap: the per-address caps bound one client, this bounds a flood of them
 const MINTS_PER_WINDOW = 6; // mints per guest and per address, per 10-minute window
 const RELAY_CONNECTS_PER_NONCE = 3; // re-POSTs of a relayed address (ICE restarts)
 const TURN_TTL = 14400; // s; the credential must outlive the longest relayed session
@@ -385,6 +386,10 @@ export class Lobby {
     if ([...this.hosts.values()].filter((h) => endpointIp(h.endpoint) === eip).length >= LIMITS.hostsPerEndpointIp) {
       this.note("rate", ip, id);
       return json({ error: "too many hosts at this endpoint" }, 429);
+    }
+    if (!this.hosts.has(id) && this.hosts.size >= HOSTS_MAX) {
+      this.note("rate", ip, id);
+      return json({ error: "host list full" }, 503); // a re-register of a live host never grows the map
     }
     const old = this.hosts.get(id);
     if (old) clearTimeout(old.timer); // a re-register (the common case: the id is stable)

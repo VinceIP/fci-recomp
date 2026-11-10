@@ -14,6 +14,7 @@
 
 #include "mmio_decode.h"
 #include "fci_image.h"
+#include "fci_frame.h"
 #include "fci_net.h"
 #include "fci_net_worker.h"
 #include "fci_turn.h"
@@ -128,6 +129,28 @@ static int s_mac_made;
 static uint8_t s_rxq[RX_QUEUE][FRAME_MAX];
 static int s_rxq_len[RX_QUEUE], s_rxq_head, s_rxq_count;
 static unsigned long s_sent, s_received, s_dropped;
+/* q24: the gate between the wire and the guest's RX queue. Every frame (card socket, relay rooms,
+ * TURN relay) passes the sanity check (src/fci_frame.c) and the per-source-MAC rate cap before it
+ * is enqueued; the envelope's drops (no FCN1 magic, an unknown kind, an out-of-size datagram) are
+ * counted too. Drops are logged two ways: detailed lines (the first eight, then one a 10 s) and a
+ * counters line ("gate drops: ...", every counter by name, cumulative, at most once a 10 s) that
+ * tools/net_fuzz.py judges. research/qwen/notes/q24-harden.md */
+#define RATE_MAX 64
+typedef struct {
+    uint8_t mac[6];
+    int used;
+    ULONGLONG t0;
+    unsigned long n;
+} rate_t;
+static rate_t s_rate[RATE_MAX];
+static unsigned long s_badframe[FCI_FRAME_NREASONS]; /* frames dropped by the sanity check, by reason */
+static unsigned long s_baddgram;                     /* datagrams dropped by the envelope check */
+static unsigned long s_ratelimit;                    /* frames dropped by the rate cap */
+static unsigned long s_passed;                       /* frames the gate put in the RX queue */
+static unsigned long s_gate_logged;                  /* detailed gate drop lines printed so far */
+static ULONGLONG s_gate_next;                        /* the next detailed gate drop line (GetTickCount64) */
+static unsigned long s_summary_total; /* the gate's total drop count at the last summary line */
+static ULONGLONG s_summary_next;      /* the next gate summary line (GetTickCount64) */
 static int s_trace
         = -1; /* RECOMP_FCI_NET_TRACE=1: control writes and interrupts (the first 400) and frames */
 static unsigned s_traced;
@@ -505,6 +528,145 @@ static peer_t *peer_at(const struct sockaddr_in *a)
         if (s_peers[i].addr.sin_addr.s_addr == a->sin_addr.s_addr && s_peers[i].addr.sin_port == a->sin_port)
             return &s_peers[i];
     return NULL;
+}
+
+/* the gate's log line (q24): the first eight drops in detail, then one line every 10 s, so a
+ * flood cannot flood the log */
+static void gate_log(const char *what, const char *reason, int n, const uint8_t *mac,
+                     const struct sockaddr_in *from)
+{
+    ULONGLONG now = GetTickCount64();
+    if (s_gate_logged >= 8 && now < s_gate_next)
+        return;
+    s_gate_next = now + 10000;
+    s_gate_logged++;
+    fprintf(stderr, "[FCI] network: %s: %s (%d bytes) from %02X:%02X:%02X:%02X:%02X:%02X %s:%u, dropped\n",
+            what, reason, n, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], inet_ntoa(from->sin_addr),
+            ntohs(from->sin_port));
+    fflush(stderr);
+}
+
+/* the gate's counters line (q24): the detailed drop lines are rate-limited (the first eight,
+ * then one a 10 s), so a flood hides most of the reasons; this line carries every counter by
+ * name, cumulative, at most once a 10 s whenever any of them changed. tools/net_fuzz.py judges
+ * a run from the last one: it waits past the 10 s window, causes one drop, and reads the line.
+ * research/qwen/notes/q24-harden.md */
+static void gate_summary(void)
+{
+    ULONGLONG now = GetTickCount64();
+    unsigned long total = s_baddgram + s_ratelimit + s_stray + s_passed;
+    int i;
+    for (i = 0; i < FCI_FRAME_NREASONS; i++)
+        total += s_badframe[i];
+    if (total == s_summary_total || now < s_summary_next)
+        return;
+    s_summary_next = now + 10000;
+    s_summary_total = total;
+    unsigned long bad = 0;
+    for (i = 1; i < FCI_FRAME_NREASONS; i++)
+        bad += s_badframe[i];
+    fprintf(stderr, "[FCI] network: gate drops: envelope %lu, rate cap %lu, bad frame %lu (", s_baddgram,
+            s_ratelimit, bad);
+    for (i = 1; i < FCI_FRAME_NREASONS; i++)
+        fprintf(stderr, "%s %lu%s", fci_frame_reason(i), s_badframe[i],
+                i + 1 < FCI_FRAME_NREASONS ? ", " : "");
+    fprintf(stderr, "), stranger %lu, passed %lu\n", s_stray, s_passed);
+    fflush(stderr);
+}
+
+/* the envelope's drops: a datagram with no FCN1 magic, an unknown kind, or an out-of-size
+ * payload (q24). Counted, logged rate-limited as the frame drops are. */
+static void baddgram_log(const struct sockaddr_in *from, int n)
+{
+    s_baddgram++;
+    gate_summary();
+    ULONGLONG now = GetTickCount64();
+    if (s_gate_logged >= 8 && now < s_gate_next)
+        return;
+    s_gate_next = now + 10000;
+    s_gate_logged++;
+    fprintf(stderr, "[FCI] network: a datagram with no FCN1 frame (%d bytes) from %s:%u, dropped\n", n,
+            inet_ntoa(from->sin_addr), ntohs(from->sin_port));
+    fflush(stderr);
+}
+
+/* an oversized datagram (q24): recvfrom fails WSAEMSGSIZE before the bytes are read, so there is
+ * no source address to log; it is the envelope's out-of-size rule, counted as an envelope drop.
+ * research/qwen/notes/q24-harden.md */
+static void oversize_drop(void)
+{
+    s_baddgram++;
+    gate_summary();
+    ULONGLONG now = GetTickCount64();
+    if (s_gate_logged >= 8 && now < s_gate_next)
+        return;
+    s_gate_next = now + 10000;
+    s_gate_logged++;
+    fprintf(stderr, "[FCI] network: an oversized datagram (WSAEMSGSIZE), dropped\n");
+    fflush(stderr);
+}
+
+/* the per-source-MAC rate cap (q24): a fixed 1 s window of RATE_CAP frames. 200 is well above
+ * the game's traffic (the recorded run averages a few frames a second per card; 60 fps game
+ * frames are the upper bound) and bounds a single spoofed MAC at 200 x 1514 bytes/s. A slot quiet
+ * for 10 s is reused; with 64 busy MACs a new one is uncapped, bounded by the receive budget and
+ * the queue's overflow drop. */
+#define RATE_CAP 200
+#define RATE_MS  1000
+static int rate_ok(const uint8_t *mac)
+{
+    ULONGLONG now = GetTickCount64();
+    int i, free = -1;
+    for (i = 0; i < RATE_MAX; i++) {
+        if (s_rate[i].used && !memcmp(s_rate[i].mac, mac, 6))
+            break;
+        if ((!s_rate[i].used || now - s_rate[i].t0 >= 10 * RATE_MS) && free < 0)
+            free = i;
+    }
+    if (i == RATE_MAX) { /* a new MAC takes a free or 10 s quiet slot; only 64 busy MACs leave it uncapped */
+        if (free < 0)
+            return 1;
+        i = free;
+    }
+    if (!s_rate[i].used || memcmp(s_rate[i].mac, mac, 6))
+        memcpy(s_rate[i].mac, mac, 6), s_rate[i].used = 1, s_rate[i].t0 = 0, s_rate[i].n = 0;
+    if (now - s_rate[i].t0 >= RATE_MS)
+        s_rate[i].t0 = now, s_rate[i].n = 0;
+    if (++s_rate[i].n > RATE_CAP)
+        return 0;
+    return 1;
+}
+
+/* the gate between the wire and the guest's RX queue (q24): the frame sanity check
+ * (src/fci_frame.c), the per-source-MAC rate cap, then the queue (the oldest goes when it is
+ * full, as a full FIFO). 1 when enqueued, 0 when dropped (counted, logged rate-limited). */
+static int rx_enqueue(const uint8_t *f, int n, const struct sockaddr_in *from)
+{
+    int r = fci_frame_sane(f, n);
+    if (r != FCI_FRAME_OK) {
+        s_badframe[r]++;
+        gate_summary();
+        gate_log("bad frame", fci_frame_reason(r), n, f + 6, from);
+        return 0;
+    }
+    if (!rate_ok(f + 6)) {
+        s_ratelimit++;
+        gate_summary();
+        gate_log("rate cap", "too many frames", n, f + 6, from);
+        return 0;
+    }
+    s_passed++;
+    if (s_rxq_count == RX_QUEUE) { /* the driver is not keeping up: the oldest goes, as a full FIFO */
+        s_rxq_head = (s_rxq_head + 1) % RX_QUEUE;
+        s_rxq_count--;
+    }
+    {
+        int slot = (s_rxq_head + s_rxq_count) % RX_QUEUE;
+        memcpy(s_rxq[slot], f, (size_t)n);
+        s_rxq_len[slot] = n;
+        s_rxq_count++;
+    }
+    return 1;
 }
 
 #define LAN_KNOCK_MS        1000  /* the knock: every second, as the game's discovery broadcast */
@@ -1203,22 +1365,30 @@ static void receive_relays(void)
             int n = recvfrom(s_relsock[i], buf, sizeof buf, 0, (struct sockaddr *)&from, &fromlen);
             if (n == SOCKET_ERROR) {
                 int e = WSAGetLastError(); /* WSAEWOULDBLOCK: no more this millisecond */
-                if (e == WSAEMSGSIZE || e == WSAECONNRESET)
+                if (e == WSAEMSGSIZE) {
+                    oversize_drop();
+                    continue;
+                }
+                if (e == WSAECONNRESET)
                     continue;
                 break;
             }
             /* the socket is connected to the hub: only the hub's datagrams arrive */
             if (n < 5 || memcmp(buf, MAGIC, 4) || fromlen != sizeof from
                 || from.sin_addr.s_addr != s_relay_hub.sin_addr.s_addr
-                || from.sin_port != s_relay_hub.sin_port)
+                || from.sin_port != s_relay_hub.sin_port) {
+                baddgram_log(&from, n);
                 continue;
+            }
             if (buf[4] == 'C' && n == 5 + COOKIE) {
                 memcpy(s_relcookie[i], buf + 5, COOKIE);
                 relay_hello(i); /* say hello with the cookie, as in hub mode */
                 continue;
             }
-            if (buf[4] != 'F' || n < 5 + 14 || n > 5 + ETHER_MAX)
+            if (buf[4] != 'F' || n < 5 + 14 || n > 5 + ETHER_MAX) {
+                baddgram_log(&from, n);
                 continue;
+            }
             {
                 /* only the room's peer, with its pre-seeded source MAC; anything else is dropped */
                 int j, ok = 0;
@@ -1235,16 +1405,7 @@ static void receive_relays(void)
                     continue;
                 }
             }
-            if (s_rxq_count == RX_QUEUE) {
-                s_rxq_head = (s_rxq_head + 1) % RX_QUEUE;
-                s_rxq_count--;
-            }
-            {
-                int slot = (s_rxq_head + s_rxq_count) % RX_QUEUE;
-                memcpy(s_rxq[slot], buf + 5, (size_t)(n - 5));
-                s_rxq_len[slot] = n - 5;
-                s_rxq_count++;
-            }
+            rx_enqueue((const uint8_t *)buf + 5, n - 5, &from);
         }
     }
 }
@@ -1260,8 +1421,10 @@ static void receive_turn(void)
         int i, ok = 0;
         const uint8_t *f = d + 5;
         /* the host's card datagram (FCN1 'F' + frame); its punches ('P'/'A') don't apply here */
-        if (n < 5 + 14 || n > 5 + ETHER_MAX || memcmp(d, MAGIC, 4) || d[4] != 'F')
+        if (n < 5 + 14 || n > 5 + ETHER_MAX || memcmp(d, MAGIC, 4) || d[4] != 'F') {
+            baddgram_log(&from, n);
             continue;
+        }
         n -= 5;
         for (i = 0; i < s_nlpeers; i++) {
             lpeer_t *p = &s_lpeers[i];
@@ -1294,16 +1457,7 @@ static void receive_turn(void)
             fflush(stderr);
             continue;
         }
-        if (s_rxq_count == RX_QUEUE) {
-            s_rxq_head = (s_rxq_head + 1) % RX_QUEUE;
-            s_rxq_count--;
-        }
-        {
-            int slot = (s_rxq_head + s_rxq_count) % RX_QUEUE;
-            memcpy(s_rxq[slot], f, (size_t)n);
-            s_rxq_len[slot] = n;
-            s_rxq_count++;
-        }
+        rx_enqueue(f, n, &from);
     }
 }
 
@@ -1387,14 +1541,17 @@ static void receive(void)
     char buf[FRAME_MAX + 8];
     int n, k;
     for (k = 0; k < 4 * RX_QUEUE; k++) { /* bounded: the rest waits for the next millisecond */
-        int slot;
         struct sockaddr_in from;
         int fromlen = sizeof from;
         peer_t *p = NULL;
         n = recvfrom(s_sock, buf, sizeof buf, 0, (struct sockaddr *)&from, &fromlen);
         if (n == SOCKET_ERROR) {
             int e = WSAGetLastError(); /* an oversized datagram or an ICMP report: skip it, not the rest */
-            if (e == WSAEMSGSIZE || e == WSAECONNRESET)
+            if (e == WSAEMSGSIZE) {
+                oversize_drop();
+                continue;
+            }
+            if (e == WSAECONNRESET)
                 continue;
             return;
         }
@@ -1406,15 +1563,19 @@ static void receive(void)
                     stun_recv(buf, n, &from);
                 continue;
             }
-            if (n < 5 || memcmp(buf, MAGIC, 4))
+            if (n < 5 || memcmp(buf, MAGIC, 4)) {
+                baddgram_log(&from, n);
                 continue;
+            }
             if ((buf[4] == 'P' || buf[4] == 'A') && n == 21) {
                 if (fromlen == sizeof from)
                     punch_recv(buf, buf[4], &from);
                 continue;
             }
-            if (buf[4] != 'F' || n < 5 + 14 || n > 5 + ETHER_MAX)
+            if (buf[4] != 'F' || n < 5 + 14 || n > 5 + ETHER_MAX) {
+                baddgram_log(&from, n);
                 continue;
+            }
             /* a frame: only from a live peer's endpoint, with that peer's MAC. A relayed guest's
              * endpoint is its relayed address, which is where the TURN server sends its frames from. */
             {
@@ -1446,20 +1607,21 @@ static void receive(void)
                 lp->last_frame = GetTickCount64();
             }
         } else if (n < 5 || memcmp(buf, MAGIC, 4)) {
+            baddgram_log(&from, n);
             continue;
         } else if (s_lan) {
             /* LAN mode: the segment's cards. A knock ('H', 17 bytes) admits its sender's MAC when
              * the triple matches; a frame reaches the guest only from an admitted MAC. Our own
              * broadcast comes back to us (another adapter, the test port): its source MAC is the
-             * card's own, drop it */
-            const uint8_t *src = (const uint8_t *)buf + 5 + 6;
+             * card's own, drop it. The frame's size is checked before its source MAC is read, so a
+             * short datagram cannot be read past its end (q24) */
             static ULONGLONG next_own;
             if (fromlen != sizeof from) {
                 stray(&from);
                 continue;
             }
             if (buf[4] == 'H' && n == 5 + 6 + NET_TRIPLE_LEN) {
-                /* a knock's MAC follows the kind (buf + 5); src above is a frame's source MAC */
+                /* a knock's MAC follows the kind (buf + 5) */
                 const uint8_t *kmac = (const uint8_t *)buf + 5;
                 if (!(kmac[0] & 1) && memcmp(kmac, s_mac, 6)) { /* our own knock echoes: dropped */
                     if (net_triple_ok((const uint8_t *)buf + 11))
@@ -1469,10 +1631,12 @@ static void receive(void)
                 }
                 continue;
             }
-            if (buf[4] != 'F') {
-                stray(&from);
+            if (buf[4] != 'F' || n < 5 + 14 || n > 5 + ETHER_MAX) {
+                baddgram_log(&from, n); /* an out-of-size F is an envelope drop, not a stranger */
                 continue;
             }
+            /* the frame's size was checked above, so its source MAC is in bounds (q24) */
+            const uint8_t *src = (const uint8_t *)buf + 5 + 6;
             if (src[0] & 1) { /* no card sends from a group address */
                 stray(&from);
                 continue;
@@ -1510,6 +1674,8 @@ static void receive(void)
             }
             p = fromlen == sizeof from ? peer_at(&from) : NULL;
             if (!p || buf[4] != 'F') {
+                if (p)
+                    baddgram_log(&from, n); /* a known peer sent a non-frame: the envelope's drop */
                 stray(&from);
                 continue;
             }
@@ -1518,8 +1684,10 @@ static void receive(void)
             hello();
             continue;
         }
-        if (buf[4] != 'F' || n < 5 + 14 || n > 5 + ETHER_MAX)
+        if (buf[4] != 'F' || n < 5 + 14 || n > 5 + ETHER_MAX) {
+            baddgram_log(&from, n);
             continue;
+        }
         if (p) {
             const uint8_t *src = (const uint8_t *)buf + 5 + 6;
             if (src[0] & 1) { /* no card sends from a group address */
@@ -1540,14 +1708,7 @@ static void receive(void)
                 continue;
             }
         }
-        if (s_rxq_count == RX_QUEUE) { /* the driver is not keeping up: the oldest goes, as a full FIFO */
-            s_rxq_head = (s_rxq_head + 1) % RX_QUEUE;
-            s_rxq_count--;
-        }
-        slot = (s_rxq_head + s_rxq_count) % RX_QUEUE;
-        memcpy(s_rxq[slot], buf + 5, (size_t)(n - 5));
-        s_rxq_len[slot] = n - 5;
-        s_rxq_count++;
+        rx_enqueue((const uint8_t *)buf + 5, n - 5, &from);
     }
 }
 

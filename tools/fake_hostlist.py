@@ -44,6 +44,7 @@ TURN_WINDOW_SECONDS = 600  # a mint (and a relayed connect) is valid for 10 minu
 MINTS_PER_WINDOW = 6  # mints per guest and per address, per 10-minute window
 RELAY_CONNECTS_PER_NONCE = 3  # re-POSTs of a relayed address (ICE restarts)
 DEFAULT_TURN_URL = "turn:127.0.0.1:3478?transport=udp"
+HOSTS_MAX = 1024  # the global live-host cap: the per-address caps bound one client, this bounds a flood of them
 LIMITS = {
     "hostsPerIp": 4,
     "listsPerMinute": 30,
@@ -219,6 +220,9 @@ class Lobby:
             if len(live) >= LIMITS["hostsPerIp"]:
                 self._note("rate", ip)
                 return 429, {"error": "too many hosts from this address"}
+            if id_ not in self.hosts and len(self.hosts) >= HOSTS_MAX:
+                self._note("rate", ip)
+                return 503, {"error": "host list full"}  # a re-register of a live host never grows the map
             self.hosts[id_] = {
                 "id": id_,
                 "ip": ip,
