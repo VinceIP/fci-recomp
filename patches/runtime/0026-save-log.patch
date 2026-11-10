@@ -1,0 +1,644 @@
+Subject: A save log: one stderr line per change to a file under UDATA
+
+A save-point save writes several files under the save folder's UDATA; a process ending between them
+leaves a set the game reports as damaged (research/qwen/notes/q22-saves.md). To measure that window in
+any run or player's log, each close of a write-opened UDATA file, each delete and each shrink logs
+"[FCI] save @<tick>: <path> ...", the path being the Xbox path (backslash separators) relative to the
+save folder. A write-opened file closed with no writes, whose open changed nothing, leaves no line; if
+the open created the file or truncated an existing one (the create disposition and whether the file
+existed before the open tell), the close line says so: "created, ..." / "truncated, ...". Read-only
+opens and other files leave no line. No title issues a class-10 rename (measured, Instincts): the
+level-start save deletes the free slot and writes <level>.fcs fresh, and a re-save over an existing
+.fcs rewrites it in place -- no rename, no overwrite of a live name; the rename case is kept only so a
+title that does rename leaves a line. Runs of path separators the game doubles are collapsed, so a
+delete reads 9FBDF33E7A0C\fcs0.fcs, not 9FBDF33E7A0C\\fcs0.fcs.
+
+The filter recognises both spellings of the save partition, because a title may open the same files
+either way and the log must not go quiet on half a save: the device path
+\Device\Harddisk0\PartitionN\UDATA\... and the U: drive letter (U:\..., case-insensitive, an
+object-manager \??\ prefix transparent). This is what the title's profile folder is opened through:
+the save code opens 9FBDF33E7A0C\profile.sav and friends as u:\... (the slot path stored in
+profile.sav itself is "u:\9FBDF33E7A0C\"), which the device-path-only filter used to miss.
+
+The guest's kernel calls enter through kernel_bridge.c, so the hooks sit where the bridge takes the
+host call: create in bridge_NtCreateFile/bridge_NtOpenFile via bridge_create_file_impl into
+xbox_NtCreateFile, write in bridge_NtWriteFile into xbox_NtWriteFile, set-EOF/disposition/rename in
+bridge_NtSetInformationFile into xbox_NtSetInformationFile, delete in bridge_NtDeleteFile into
+xbox_NtDeleteFile, and close in bridge_NtClose itself -- the guest's NtClose closes the host handle
+directly and never reaches xbox_NtClose, so savelog_close is called there (kernel.h declares it,
+kernel_file.c defines it non-static). The bridge passes the same host handle savelog_open recorded:
+bridge_create_file_impl stores it with bridge_write_handle, bridge_NtClose takes it back with
+bridge_take_handle. The tracking table's lock is a static SRWLOCK (SRWLOCK_INIT), race-free from first
+use on both backends, instead of a lazy InitializeCriticalSection that races when two threads make the
+first file call.
+
+---
+
+--- build/deps/xboxrecomp/src/kernel/kernel.h
++++ b/src/kernel/kernel.h
+@@ -233,6 +233,16 @@
+ typedef struct _XBOX_FILE_DISPOSITION_INFORMATION {
+     BOOLEAN DeleteFile;
+ } XBOX_FILE_DISPOSITION_INFORMATION, *PXBOX_FILE_DISPOSITION_INFORMATION;
++
++/* FILE_RENAME_INFORMATION - NT layout. NtSetInformationFile does not
++ * implement class 10, but the save log names a rename attempt with it
++ * (kernel_file.c). */
++typedef struct _XBOX_FILE_RENAME_INFORMATION {
++    BOOLEAN       ReplaceIfExists;
++    HANDLE        RootDirectory;
++    ULONG         FileNameLength;
++    CHAR          FileName[1];
++} XBOX_FILE_RENAME_INFORMATION, *PXBOX_FILE_RENAME_INFORMATION;
+ 
+ /* FILE_NETWORK_OPEN_INFORMATION (used by NtQueryFullAttributesFile) */
+ typedef struct _XBOX_FILE_NETWORK_OPEN_INFORMATION {
+@@ -672,6 +682,10 @@
+     PLARGE_INTEGER ByteOffset);
+ 
+ NTSTATUS __stdcall xbox_NtClose(HANDLE Handle);
++/* Save log (Q22b): the close line for a write-opened UDATA file. Called from
++ * bridge_NtClose (kernel_bridge.c), which is where the guest's NtClose takes
++ * the host handle, and from xbox_NtClose for the non-bridge path. */
++void savelog_close(HANDLE h);
+ #ifdef _WIN32
+ void xbox_dir_context_drop(HANDLE FileHandle);
+ #endif
+
+--- build/deps/xboxrecomp/src/kernel/kernel_file.c
++++ b/src/kernel/kernel_file.c
+@@ -67,6 +67,185 @@
+     return g_xbox_last_file_error;
+ }
+ 
++/* ====================  Save log (Q22b)  ================================= */
++/*
++ * One stderr line per operation that changes a file below the save folder
++ * (\Device\Harddisk0\PartitionN\UDATA), so a log reader can compute the span
++ * of a save-point save (first write to last close). Read-only opens leave no
++ * line. Saves are rare, so this is always on.
++ */
++#include "savelog.h"
++
++#define SAVELOG_MAX 32
++typedef struct {
++    HANDLE     handle;
++    char       rel[MAX_PATH];
++    uint64_t   open_tick;
++    uint64_t   bytes;
++    unsigned   writes;
++    unsigned   open_change; /* 0 none, 1 the open created the file, 2 it
++                               truncated an existing one */
++    int        write;  /* opened for writing: a close leaves a line */
++    int        del;    /* delete requested: the close leaves no line */
++} SAVELOG_ENTRY;
++static SAVELOG_ENTRY s_savelog[SAVELOG_MAX];
++/* Race-free from first use: SRWLOCK_INIT is a real static init on Windows,
++ * and the POSIX compat's srw_lazy_init serialises its one-time allocation
++ * (win32_compat.c). A lazy InitializeCriticalSection races when two threads
++ * make the first file call. This is the toolkit's established pattern
++ * (guest_vmem.c, kernel_rtl.c). */
++static SRWLOCK s_savelog_lock = SRWLOCK_INIT;
++
++static void savelog_lock(void)
++{
++    AcquireSRWLockExclusive(&s_savelog_lock);
++}
++
++static SAVELOG_ENTRY* savelog_find(HANDLE h)
++{
++    int i;
++    for (i = 0; i < SAVELOG_MAX; i++)
++        if (s_savelog[i].handle == h)
++            return &s_savelog[i];
++    return NULL;
++}
++
++/* The UDATA-relative path of a path, or of a name relative to a tracked root
++ * directory, into out. Caller holds the lock. NULL if not under UDATA. */
++static char* savelog_resolve(const char* xbox_path, HANDLE root, char* out, size_t outsz)
++{
++    const char* rel;
++    char joined[MAX_PATH];
++    int i;
++    if (!xbox_path)
++        return NULL;
++    rel = (root == NULL || xbox_path[0] == '\\') ? savelog_udata_rel(xbox_path) : NULL;
++    if (rel) {
++        if (savelog_collapse(out, outsz, rel) >= 0)
++            return out;
++        return NULL;
++    }
++    if (root && xbox_path[0])
++        for (i = 0; i < SAVELOG_MAX; i++)
++            if (s_savelog[i].handle == root &&
++                savelog_join(joined, sizeof joined, s_savelog[i].rel, xbox_path) >= 0 &&
++                savelog_collapse(out, outsz, joined) >= 0)
++                return out;
++    return NULL;
++}
++
++static void savelog_emit(const char* rel, const char* action)
++{
++    char buf[512];
++    if (savelog_line(buf, sizeof buf, (uint64_t)GetTickCount64(), rel, action) >= 0) {
++        fprintf(stderr, "%s", buf);
++        fflush(stderr);
++    }
++}
++
++/* What the open itself did to the file: 0 nothing, 1 created it, 2
++ * truncated an existing one. The disposition and whether the file existed
++ * before the open tell: a successful open of an absent file created it, a
++ * truncating disposition on an existing file emptied it. */
++static unsigned savelog_open_change(int existed, ULONG disposition)
++{
++    if (!existed)
++        return 1;
++    if (disposition == XBOX_FILE_SUPERSEDE || disposition == XBOX_FILE_OVERWRITE ||
++        disposition == XBOX_FILE_OVERWRITE_IF)
++        return 2;
++    return 0;
++}
++
++/* Track a new open. write: the open may write, so its close leaves a line;
++ * directory opens are tracked with write = 0 so relative names resolve.
++ * open_change: what the open itself did to the file (savelog_open_change). */
++static void savelog_open(HANDLE h, const char* xbox_path, HANDLE root, int write,
++                         unsigned open_change)
++{
++    char rel[MAX_PATH];
++    int i;
++    savelog_lock();
++    if (savelog_resolve(xbox_path, root, rel, sizeof rel))
++        for (i = 0; i < SAVELOG_MAX; i++)
++            if (s_savelog[i].handle == NULL) {
++                s_savelog[i].handle = h;
++                snprintf(s_savelog[i].rel, sizeof s_savelog[i].rel, "%s", rel);
++                s_savelog[i].open_tick = (uint64_t)GetTickCount64();
++                s_savelog[i].bytes = 0;
++                s_savelog[i].writes = 0;
++                s_savelog[i].open_change = open_change;
++                s_savelog[i].write = write;
++                s_savelog[i].del = 0;
++                break;
++            }
++    ReleaseSRWLockExclusive(&s_savelog_lock);
++}
++
++static void savelog_write(HANDLE h, uint64_t n)
++{
++    SAVELOG_ENTRY* e;
++    savelog_lock();
++    e = savelog_find(h);
++    if (e) {
++        e->bytes += n;
++        e->writes++;
++    }
++    ReleaseSRWLockExclusive(&s_savelog_lock);
++}
++
++/* Not static: bridge_NtClose (kernel_bridge.c) closes the host handle
++ * itself and calls this for the line. */
++void savelog_close(HANDLE h)
++{
++    SAVELOG_ENTRY* e;
++    savelog_lock();
++    e = savelog_find(h);
++    if (e) {
++        if (e->write && !e->del) {
++            const char* verb = savelog_close_verb(e->writes, e->open_change);
++            if (verb) {
++                char action[96];
++                snprintf(action, sizeof action, "%s, %llu bytes in %u writes, open %llu ms",
++                         verb, (unsigned long long)e->bytes, e->writes,
++                         (unsigned long long)((uint64_t)GetTickCount64() - e->open_tick));
++                savelog_emit(e->rel, action);
++            }
++        }
++        e->handle = NULL;
++    }
++    ReleaseSRWLockExclusive(&s_savelog_lock);
++}
++
++/* One line for a tracked handle: a rename, a shrink, a delete on close. */
++static void savelog_event(HANDLE h, const char* action)
++{
++    SAVELOG_ENTRY* e;
++    savelog_lock();
++    e = savelog_find(h);
++    if (e)
++        savelog_emit(e->rel, action);
++    ReleaseSRWLockExclusive(&s_savelog_lock);
++}
++
++/* A delete that names the path itself (NtDeleteFile, possibly relative). */
++static void savelog_delete(const char* xbox_path, HANDLE root)
++{
++    char rel[MAX_PATH];
++    savelog_lock();
++    if (savelog_resolve(xbox_path, root, rel, sizeof rel))
++        savelog_emit(rel, "deleted");
++    ReleaseSRWLockExclusive(&s_savelog_lock);
++}
++
++/* Set-EOF to a smaller size, on a tracked handle. Caller holds the lock. */
++static void savelog_shrink_locked(SAVELOG_ENTRY* e, long long new_size)
++{
++    char action[48];
++    snprintf(action, sizeof action, "shrunk to %lld bytes", new_size);
++    savelog_emit(e->rel, action);
++}
++
+ #if defined(_WIN32)
+ /* ====================  Win32 backend  =================================== */
+ /* ======================================================================== */
+@@ -144,6 +323,7 @@
+     WCHAR win_path[MAX_PATH];
+     HANDLE h;
+     DWORD flags_and_attrs = FILE_ATTRIBUTE_NORMAL;
++    DWORD pre_attrs = INVALID_FILE_ATTRIBUTES; /* the file before this open */
+     (void)AllocationSize;
+ 
+     if (!FileHandle || !ObjectAttributes)
+@@ -188,6 +368,7 @@
+         /* XBOX_FILE_NO_INTERMEDIATE_BUFFERING is not passed on */
+         if (FileAttributes & XBOX_FILE_ATTRIBUTE_READONLY)
+             flags_and_attrs |= FILE_ATTRIBUTE_READONLY;
++        pre_attrs = GetFileAttributesW(win_path);
+         h = CreateFileW(win_path, xbox_access_to_win32(DesiredAccess),
+             xbox_share_to_win32(ShareAccess), NULL,
+             xbox_disposition_to_win32(CreateDisposition), flags_and_attrs, NULL);
+@@ -224,6 +405,16 @@
+         IoStatusBlock->Status = STATUS_SUCCESS;
+         IoStatusBlock->Information = (CreateDisposition == XBOX_FILE_CREATE) ? 2 : 1;
+     }
++    {
++        int is_file = (CreateOptions & XBOX_FILE_DIRECTORY_FILE) == 0;
++        savelog_open(h, get_xbox_path(ObjectAttributes), ObjectAttributes->RootDirectory,
++                     is_file &&
++                     (DesiredAccess & (XBOX_GENERIC_WRITE | XBOX_GENERIC_ALL |
++                                       XBOX_FILE_WRITE_DATA | XBOX_FILE_APPEND_DATA)) != 0,
++                     is_file ?
++                         savelog_open_change(pre_attrs != INVALID_FILE_ATTRIBUTES,
++                                             CreateDisposition) : 0);
++    }
+     XBOX_TRACE(XBOX_LOG_FILE, "NtCreateFile: %S -> handle=%p", win_path, h);
+     return STATUS_SUCCESS;
+ }
+@@ -293,6 +484,7 @@
+     if (result) {
+         IoStatusBlock->Status = STATUS_SUCCESS;
+         IoStatusBlock->Information = bytes_written;
++        savelog_write(FileHandle, (uint64_t)bytes_written);
+         if (Event) SetEvent(Event);
+         return STATUS_SUCCESS;
+     }
+@@ -310,6 +502,7 @@
+     if (Handle && Handle != INVALID_HANDLE_VALUE) {
+         xbox_dir_context_drop(Handle);
+         CloseHandle(Handle);
++        savelog_close(Handle);
+         return STATUS_SUCCESS;
+     }
+     return STATUS_INVALID_HANDLE;
+@@ -321,8 +514,14 @@
+     if (!translate_obj_path(ObjectAttributes, win_path, MAX_PATH))
+         return STATUS_OBJECT_PATH_NOT_FOUND;
+     XBOX_TRACE(XBOX_LOG_FILE, "NtDeleteFile: %S", win_path);
+-    if (DeleteFileW(win_path))    return STATUS_SUCCESS;
+-    if (RemoveDirectoryW(win_path)) return STATUS_SUCCESS;
++    if (DeleteFileW(win_path)) {
++        savelog_delete(get_xbox_path(ObjectAttributes), ObjectAttributes->RootDirectory);
++        return STATUS_SUCCESS;
++    }
++    if (RemoveDirectoryW(win_path)) {
++        savelog_delete(get_xbox_path(ObjectAttributes), ObjectAttributes->RootDirectory);
++        return STATUS_SUCCESS;
++    }
+     return STATUS_OBJECT_NAME_NOT_FOUND;
+ }
+ 
+@@ -457,6 +656,15 @@
+             }
+             if (cur.QuadPart <= info->EndOfFile.QuadPart)
+                 SetFilePointerEx(FileHandle, cur, NULL, FILE_BEGIN);
++            savelog_lock();
++            if (savelog_find(FileHandle)) {
++                LARGE_INTEGER size = {0};
++                if (GetFileSizeEx(FileHandle, &size) &&
++                    size.QuadPart > info->EndOfFile.QuadPart)
++                    savelog_shrink_locked(savelog_find(FileHandle),
++                                          (long long)info->EndOfFile.QuadPart);
++            }
++            ReleaseSRWLockExclusive(&s_savelog_lock);
+             IoStatusBlock->Status = STATUS_SUCCESS;
+             return STATUS_SUCCESS;
+         }
+@@ -492,8 +700,24 @@
+             if (!SetFileInformationByHandle(FileHandle, FileDispositionInfo, &fdi, sizeof(fdi)))
+                 xbox_log(XBOX_LOG_WARN, XBOX_LOG_FILE,
+                          "SetFileDispositionInfo failed: err=%u", GetLastError());
+-            IoStatusBlock->Status = STATUS_SUCCESS;
+-            return STATUS_SUCCESS;
++            else if (info->DeleteFile)
++                savelog_event(FileHandle, "deleted");
++            IoStatusBlock->Status = STATUS_SUCCESS;
++            return STATUS_SUCCESS;
++        }
++        case XboxFileRenameInformation: {
++            /* Not implemented (see default below); name the attempted move in
++             * the save log, so a title that renames a save object leaves a line. */
++            PXBOX_FILE_RENAME_INFORMATION info = (PXBOX_FILE_RENAME_INFORMATION)FileInformation;
++            char newname[MAX_PATH];
++            int n = (int)info->FileNameLength;
++            if (n >= (int)sizeof(newname)) n = (int)sizeof(newname) - 1;
++            memcpy(newname, info->FileName, n);
++            newname[n] = 0;
++            char action[MAX_PATH + 48];
++            snprintf(action, sizeof(action), "rename to %s (not implemented)", newname);
++            savelog_event(FileHandle, action);
++            return STATUS_NOT_IMPLEMENTED;
+         }
+         case XboxFileBasicInformation: {
+             PXBOX_FILE_BASIC_INFORMATION info = (PXBOX_FILE_BASIC_INFORMATION)FileInformation;
+@@ -861,11 +1085,14 @@
+     }
+ 
+     int fd;
++    int pre_exists = 1; /* the file before this open */
+     if (CreateOptions & XBOX_FILE_DIRECTORY_FILE) {
+         if (CreateDisposition == XBOX_FILE_CREATE || CreateDisposition == XBOX_FILE_OPEN_IF)
+             mkdir(host_path, 0755);   /* EEXIST is fine */
+         fd = open(host_path, O_RDONLY | O_DIRECTORY);
+     } else {
++        struct stat pre_st;
++        pre_exists = (stat(host_path, &pre_st) == 0);
+         fd = open(host_path, posix_open_flags(DesiredAccess, CreateDisposition), 0644);
+     }
+ 
+@@ -884,6 +1111,15 @@
+         IoStatusBlock->Status = STATUS_SUCCESS;
+         IoStatusBlock->Information = (CreateDisposition == XBOX_FILE_CREATE) ? 2 : 1;
+     }
++    {
++        int is_file = (CreateOptions & XBOX_FILE_DIRECTORY_FILE) == 0;
++        savelog_open(*FileHandle, xbox_path, NULL,
++                     is_file &&
++                     (DesiredAccess & (XBOX_GENERIC_WRITE | XBOX_GENERIC_ALL |
++                                       XBOX_FILE_WRITE_DATA | XBOX_FILE_APPEND_DATA)) != 0,
++                     is_file ?
++                         savelog_open_change(pre_exists, CreateDisposition) : 0);
++    }
+     XBOX_TRACE(XBOX_LOG_FILE, "NtCreateFile: %s -> handle=%p", host_path, *FileHandle);
+     return STATUS_SUCCESS;
+ }
+@@ -952,6 +1188,7 @@
+ 
+     IoStatusBlock->Status = STATUS_SUCCESS;
+     IoStatusBlock->Information = (ULONG_PTR)n;
++    savelog_write(FileHandle, (uint64_t)n);
+     if (Event) SetEvent(Event);
+     return STATUS_SUCCESS;
+ }
+@@ -961,6 +1198,7 @@
+     XBOX_TRACE(XBOX_LOG_FILE, "NtClose(handle=%p)", Handle);
+     if (Handle && Handle != INVALID_HANDLE_VALUE) {
+         CloseHandle(Handle);
++        savelog_close(Handle);
+         return STATUS_SUCCESS;
+     }
+     return STATUS_INVALID_HANDLE;
+@@ -973,8 +1211,14 @@
+     if (!xbox_path || !xbox_translate_path(xbox_path, host_path, MAX_PATH))
+         return STATUS_OBJECT_PATH_NOT_FOUND;
+     XBOX_TRACE(XBOX_LOG_FILE, "NtDeleteFile: %s", host_path);
+-    if (unlink(host_path) == 0) return STATUS_SUCCESS;
+-    if (rmdir(host_path)  == 0) return STATUS_SUCCESS;
++    if (unlink(host_path) == 0) {
++        savelog_delete(xbox_path, NULL);
++        return STATUS_SUCCESS;
++    }
++    if (rmdir(host_path) == 0) {
++        savelog_delete(xbox_path, NULL);
++        return STATUS_SUCCESS;
++    }
+     return STATUS_OBJECT_NAME_NOT_FOUND;
+ }
+ 
+@@ -1072,6 +1316,14 @@
+             PXBOX_FILE_END_OF_FILE_INFORMATION info = (PXBOX_FILE_END_OF_FILE_INFORMATION)FileInformation;
+             if (ftruncate(fd, (off_t)info->EndOfFile.QuadPart) != 0)
+                 return STATUS_UNSUCCESSFUL;
++            savelog_lock();
++            if (savelog_find(FileHandle)) {
++                struct stat st;
++                if (fstat(fd, &st) == 0 && (long long)st.st_size > (long long)info->EndOfFile.QuadPart)
++                    savelog_shrink_locked(savelog_find(FileHandle),
++                                          (long long)info->EndOfFile.QuadPart);
++            }
++            ReleaseSRWLockExclusive(&s_savelog_lock);
+             IoStatusBlock->Status = STATUS_SUCCESS;
+             return STATUS_SUCCESS;
+         }
+@@ -1080,11 +1332,29 @@
+             /* POSIX: unlinking an open file removes it on last close -- this
+              * matches NT "delete on close" semantics exactly. */
+             if (info->DeleteFile) {
++                /* POSIX: unlinking an open file removes it on last close -- this
++                 * matches NT "delete on close" semantics exactly. */
+                 const char* p = w32_handle_path(FileHandle);
+-                if (p) unlink(p);
++                if (p)
++                    unlink(p);
++                savelog_event(FileHandle, "deleted");
+             }
+             IoStatusBlock->Status = STATUS_SUCCESS;
+             return STATUS_SUCCESS;
++        }
++        case XboxFileRenameInformation: {
++            /* Not implemented (see default below); name the attempted move in
++             * the save log, so a title that renames a save object leaves a line. */
++            PXBOX_FILE_RENAME_INFORMATION info = (PXBOX_FILE_RENAME_INFORMATION)FileInformation;
++            char newname[MAX_PATH];
++            int n = (int)info->FileNameLength;
++            if (n >= (int)sizeof(newname)) n = (int)sizeof(newname) - 1;
++            memcpy(newname, info->FileName, n);
++            newname[n] = 0;
++            char action[MAX_PATH + 48];
++            snprintf(action, sizeof(action), "rename to %s (not implemented)", newname);
++            savelog_event(FileHandle, action);
++            return STATUS_NOT_IMPLEMENTED;
+         }
+         case XboxFileBasicInformation:
+             /* Setting file times is non-essential for the game; accept it. */
+
+--- build/deps/xboxrecomp/src/kernel/kernel_bridge.c
++++ b/src/kernel/kernel_bridge.c
+@@ -712,6 +712,10 @@
+             xbox_dir_context_drop(h);
+ #endif
+             CloseHandle(h);
++            /* The guest's NtClose takes this path, not xbox_NtClose: the save
++             * log's close line fires here (Q22b). h is the host handle
++             * savelog_open recorded at create. */
++            savelog_close(h);
+         }
+     }
+     g_eax = 0; /* STATUS_SUCCESS */
+
+--- build/deps/xboxrecomp/src/kernel/savelog.c
++++ b/src/kernel/savelog.c
+@@ -0,0 +1,98 @@
++/*
++ * savelog.c - UDATA path filter and save log line format. See savelog.h.
++ */
++
++#include "savelog.h"
++#include <stdio.h>
++#include <string.h>
++
++static int udata_at(const char* s)
++{
++    static const char seg[5] = "UDATA";
++    int i;
++    for (i = 0; i < 5; i++) {
++        char c = s[i];
++        if (c >= 'a' && c <= 'z')
++            c = (char)(c + 'A' - 'a');
++        if (c != seg[i])
++            return 0;
++    }
++    return 1;
++}
++
++/* The part of an Xbox path below the UDATA (save) partition, or NULL.
++ *
++ * Two spellings of the same partition reach the kernel, and a title may use
++ * either, so both must be recognised or the log goes quiet on half the files
++ * a save touches:
++ *   U:\rest                                   the U: drive letter
++ *   \Device\Harddisk0\PartitionN\UDATA\rest   the device path
++ * The match is case-insensitive; an object-manager "\??" prefix is
++ * transparent. */
++const char* savelog_udata_rel(const char* p)
++{
++    const char* s = p;
++    if (s[0] == '\\' && s[1] == '?' && s[2] == '?' &&
++        (s[3] == '\\' || s[3] == '/'))
++        s += 4;
++    if ((s[0] == 'U' || s[0] == 'u') && s[1] == ':' &&
++        (s[2] == '\\' || s[2] == '/'))
++        return s + 3;
++    for (; *s; s++)
++        if ((s == p || s[-1] == '\\' || s[-1] == '/') &&
++            udata_at(s) && (s[5] == '\\' || s[5] == '/'))
++            return s + 6;
++    return NULL;
++}
++
++int savelog_join(char* out, size_t outsz, const char* root_rel, const char* child)
++{
++    size_t r = strlen(root_rel);
++    while (r > 0 && (root_rel[r - 1] == '\\' || root_rel[r - 1] == '/'))
++        r--;
++    while (*child == '\\' || *child == '/')
++        child++;
++    size_t c = strlen(child);
++    if (outsz == 0 || r + 1 + c + 1 > outsz)
++        return -1;
++    memcpy(out, root_rel, r);
++    out[r] = '/';
++    memcpy(out + r + 1, child, c + 1);
++    return (int)(r + 1 + c);
++}
++
++int savelog_collapse(char* out, size_t outsz, const char* in)
++{
++    size_t o = 0;
++    const char* s;
++    for (s = in; *s; s++) {
++        int sep = (*s == '\\' || *s == '/');
++        if (o > 0 && sep && (out[o - 1] == '\\' || out[o - 1] == '/'))
++            continue;   /* a separator following a separator: drop it */
++        if (o + 1 >= outsz)
++            return -1;
++        out[o++] = sep ? '\\' : *s;   /* normalise to the log's backslash */
++    }
++    if (o >= outsz)
++        return -1;
++    out[o] = 0;
++    return (int)o;
++}
++
++const char* savelog_close_verb(unsigned writes, unsigned open_change)
++{
++    if (writes)
++        return "closed";
++    if (open_change == 1)
++        return "created";   /* the open created the file */
++    if (open_change == 2)
++        return "truncated"; /* the open truncated an existing file */
++    return NULL; /* no writes, open changed nothing: no line */
++}
++
++int savelog_line(char* out, size_t outsz, uint64_t tick_ms, const char* rel, const char* action)
++{
++    int n = snprintf(out, outsz, "[FCI] save @%llu: %s %s\n",
++                     (unsigned long long)tick_ms, rel, action);
++    return (size_t)n >= outsz ? -1 : n;
++}
+
+--- build/deps/xboxrecomp/src/kernel/savelog.h
++++ b/src/kernel/savelog.h
+@@ -0,0 +1,50 @@
++/*
++ * savelog.h - save log: the UDATA path filter and the line format (Q22b).
++ *
++ * Pure string logic, split out so a host test harness can compile and run
++ * savelog.c without the game. kernel_file.c calls these around the file
++ * operations that touch the save folder, one stderr line per event, so a
++ * log reader can compute the span of a save-point save.
++ */
++
++#ifndef XBOX_SAVELOG_H
++#define XBOX_SAVELOG_H
++
++#include <stddef.h>
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* The part of an Xbox path below its \UDATA\ segment (the save folder), or
++ * NULL if the path is not below UDATA. The segment match is case-insensitive
++ * and bounded by path separators. */
++const char* savelog_udata_rel(const char* xbox_path);
++
++/* root_rel + "/" + child, NUL-terminated, into out. Returns the length
++ * stored, or -1 if out is too small. */
++int savelog_join(char* out, size_t outsz, const char* root_rel, const char* child);
++
++/* A UDATA-relative path with runs of separators (\\, //, \/) collapsed to a
++ * single backslash, into out. The game builds some paths by appending a name
++ * to a folder path that already ends in a separator, which doubles it; the log
++ * shows one. Returns the length stored, or -1 if out is too small. */
++int savelog_collapse(char* out, size_t outsz, const char* in);
++
++/* The verb for the close line of a write-opened UDATA file: "closed",
++ * "created" (the open created the file) or "truncated" (the open truncated
++ * an existing file); NULL when a close with no writes of a file the open
++ * did not change prints no line. open_change: 0 none, 1 created, 2
++ * truncated. */
++const char* savelog_close_verb(unsigned writes, unsigned open_change);
++
++/* "[FCI] save @<tick_ms>: <rel> <action>\n" into out. Returns the length
++ * written, or -1 if out is too small. */
++int savelog_line(char* out, size_t outsz, uint64_t tick_ms, const char* rel, const char* action);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif

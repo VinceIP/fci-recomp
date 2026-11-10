@@ -28,6 +28,7 @@ RUNTIME_SOURCES = {
         "kernel_rtl.c",
         "kernel_memory.c",
         "kernel_file.c",
+        "savelog.c",  # patches/runtime/0026-save-log.patch
         "kernel_thread.c",
         "kernel_sync.c",
         "kernel_hal.c",
