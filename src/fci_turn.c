@@ -583,9 +583,9 @@ static int build_req_body(int method, int peer, int lifetime, int auth, char *bo
         blen += put_attr(body, A_XOR_PEER, x, 8);
     }
     if (method == M_CHANNEL_BIND) {
-        char cb[2];
+        char cb[4] = {0}; /* 16-bit channel number, then 2 RFFU bytes (RFC 8656 18.1); Cloudflare answers 400 to 2 bytes */
         put_u16(cb, (uint16_t)s_peers[peer].channel);
-        blen += put_attr(body, A_CHANNEL, cb, 2);
+        blen += put_attr(body, A_CHANNEL, cb, 4);
         put_xaddr(x, &s_peers[peer].addr);
         blen += put_attr(body + blen, A_XOR_PEER, x, 8);
     }

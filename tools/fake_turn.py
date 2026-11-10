@@ -502,6 +502,8 @@ class TurnServer:
         peer = get1(attrs, A_XOR_PEER)
         if chan is None or peer is None:
             return self.error(txn, T_CHANNEL_BIND_ERROR, 400, "CHANNEL-NUMBER/XOR-PEER required")
+        if len(chan) != 4:  # a 16-bit number and 2 RFFU bytes (RFC 8656 18.1); Cloudflare rejects 2 bytes
+            return self.error(txn, T_CHANNEL_BIND_ERROR, 400, "CHANNEL-NUMBER must be 4 bytes")
         num = struct.unpack("!H", chan[:2])[0]
         if not (CHANNEL_MIN <= num <= CHANNEL_MAX):
             return self.error(txn, T_CHANNEL_BIND_ERROR, 400, "Channel out of range")

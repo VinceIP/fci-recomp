@@ -180,7 +180,7 @@ class Client:
     def channel_bind(self, chan, peer):
         def make(txn):
             return [
-                (ft.A_CHANNEL_NUMBER, struct.pack("!H", chan)),
+                (ft.A_CHANNEL_NUMBER, struct.pack("!HH", chan, 0)),
                 (ft.A_XOR_PEER, ft.enc_addr(1, peer[0], peer[1], txn)),
             ]
 
@@ -253,7 +253,7 @@ def test_nonce_reuse(turn):
     n = c.last_nonce
     cp = lambda txn: [(ft.A_XOR_PEER, ft.enc_addr(1, "127.0.0.1", 1, txn))]
     cb = lambda txn: [
-        (ft.A_CHANNEL_NUMBER, struct.pack("!H", 0x4001)),
+        (ft.A_CHANNEL_NUMBER, struct.pack("!HH", 0x4001, 0)),
         (ft.A_XOR_PEER, ft.enc_addr(1, "127.0.0.1", 1, txn)),
     ]
     rf = lambda txn: [(ft.A_LIFETIME, struct.pack("!I", 600))]
@@ -423,4 +423,16 @@ def test_retry_reusing_the_transaction_id_is_400(turn):
     mt, _, rattrs = c._drain_for(txn)
     assert mt == ft.T_ALLOCATE_ERROR
     assert c._errcode(rattrs) == 400
+    c.close()
+
+
+def test_channel_number_must_be_4_bytes(turn):
+    """RFC 8656 18.1: a 16-bit number and 2 RFFU bytes; Cloudflare answered 400 to the 2-byte form."""
+    c = Client(turn.addr, "u", "p", REALM)
+    assert c.allocate()[0] == ft.T_ALLOCATE_SUCCESS
+    cb = lambda txn: [
+        (ft.A_CHANNEL_NUMBER, struct.pack("!H", 0x4002)),
+        (ft.A_XOR_PEER, ft.enc_addr(1, "127.0.0.1", 1, txn)),
+    ]
+    assert c._send_auth(ft.T_CHANNEL_BIND_REQ, cb, c.last_nonce, REALM)[0] == ft.T_CHANNEL_BIND_ERROR
     c.close()
