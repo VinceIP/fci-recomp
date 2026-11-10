@@ -6,8 +6,9 @@ For each player id present in both files, the owner's track is the (wall, pos, y
 file where it is "local": true; each remote sample (the other file, local false) is compared with the
 owner's track linearly interpolated at (remote wall - lag). One lag per player is fit: the lag in
 [0, 500] ms (5 ms steps) that minimises the median position residual. It passes when every player's
-p95 residual is within tolerance, the fitted lag is small, and enough players and samples are present
-(re/notes/q20 §11).
+p95 residual is within tolerance, the fitted lag is small, and the worst residual is a short
+transient, not a sustained disagreement (below), with enough players and samples present
+(re/notes/q20 §11, re/notes/q23 §2).
 
 Usage:
     python tools/sync_check.py host.jsonl join.jsonl [--pos-tol 0.05] [--yaw-tol 1.0]
@@ -31,6 +32,18 @@ LAG_MAX_MS = 500
 LAG_STEP_MS = 5
 MIN_SAMPLES = 10
 OWNER_MOVE_MPS = 0.2
+# the network quantises the remote copy to 1/512 m per axis (re/notes/q20 §10.5); the worst 3D
+# vector error is the cube diagonal
+QUANTUM_M = math.sqrt(3) / 512.0
+# an excess sample must beat the moving allowance by more than this: quantisation-level wobble
+# (the live p95 residual is ~1 quantum, re/notes/q20 §11.6) is not an excess
+EXCESS_FLOOR_M = 4.0 * QUANTUM_M
+# the longest allowed excess run (first excess sample to the first clean one again), in remote
+# sample intervals. Evidence (re/notes/q23 §2): the only transients seen in live runs are the
+# spawn-state mismatch (up to 0.79 m, 5 consecutive excess samples at 10 Hz, clean at the 6th) and
+# a teleport (1-2 samples); a real desync runs for the whole match (the 3 s wall shift: a 4.3 s run,
+# a stalled copy: the whole file), 60x longer. 7 intervals is 40% above the worst observed transient
+EXCESS_RUN_INTERVALS = 7
 
 
 def load(path: str) -> list[tuple[int, dict[int, dict[str, Any]]]]:
@@ -133,6 +146,23 @@ def owner_speed_at(walls: np.ndarray, pos: np.ndarray, t: float) -> float:
 MIN_MOVING_FOR_FIT = 5
 
 
+def _max_excess_run_ms(excess: list[float], kept: list[int], rwalls: np.ndarray) -> float:
+    """The longest excess run, in ms: first excess sample to the first clean one again (or to the last
+    sample when the run reaches the end of the file); 0.0 when no sample is in excess."""
+    run_ms = 0.0
+    start: int | None = None
+    for m, k in enumerate(kept):
+        if excess[m] > EXCESS_FLOOR_M:
+            if start is None:
+                start = k
+        elif start is not None:
+            run_ms = max(run_ms, float(rwalls[k] - rwalls[start]))
+            start = None
+    if start is not None:
+        run_ms = max(run_ms, float(rwalls[-1] - rwalls[start]))
+    return run_ms
+
+
 def fit_lag(
     owalls: np.ndarray,
     opos: np.ndarray,
@@ -140,24 +170,27 @@ def fit_lag(
     rwalls: np.ndarray,
     rpos: np.ndarray,
     ryaw: np.ndarray,
-) -> tuple[float, list[float], list[float], int, int, list[float]]:
+) -> tuple[float, list[float], list[float], int, int, list[float], float]:
     """The lag (ms) in [LAG_MIN, LAG_MAX] (LAG_STEP steps) minimising the median position residual over
     the samples where the owner moves (a still owner fits every lag, so those decide nothing; with fewer
     than MIN_MOVING_FOR_FIT moving samples, over all of them).
 
-    Returns (lag_ms, pos_residuals, yaw_residuals, n_moving, n_still) for the fitted lag; the
-    residuals are over the remote samples whose (wall - lag) falls inside the owner's track span.
+    Returns (lag_ms, pos_residuals, yaw_residuals, n_moving, n_still, excess, excess_run_ms) for the
+    fitted lag; the residuals are over the remote samples whose (wall - lag) falls inside the owner's
+    track span, and excess_run_ms the longest run of samples whose excess (residual less the moving
+    allowance) beats the floor.
     """
     # a moving owner's copy may be one sample interval off the single fitted lag (the lag jitters by
     # about one network update), so each residual is allowed the owner's speed times that interval
     jitter_s = float(np.median(np.diff(rwalls))) / 1000.0 if len(rwalls) > 1 else 0.0
-    best: tuple[float, list[float], list[float], int, int, list[float]] = (
+    best: tuple[float, list[float], list[float], int, int, list[float], float] = (
         float(LAG_MIN_MS),
         [],
         [],
         0,
         0,
         [],
+        0.0,
     )
     best_med = math.inf
     for lag in range(LAG_MIN_MS, LAG_MAX_MS + 1, LAG_STEP_MS):
@@ -165,6 +198,7 @@ def fit_lag(
         yaw_res: list[float] = []
         moving_res: list[float] = []
         excess: list[float] = []
+        kept: list[int] = []
         n_moving = 0
         n_still = 0
         for k in range(len(rwalls)):
@@ -178,6 +212,7 @@ def fit_lag(
             d = float(np.linalg.norm(rpos[k] - op))
             speed = owner_speed_at(owalls, opos, t)
             excess.append(d - speed * jitter_s)
+            kept.append(k)
             if speed > OWNER_MOVE_MPS:
                 n_moving += 1
                 moving_res.append(d)
@@ -190,7 +225,7 @@ def fit_lag(
         med = float(np.median(moving_res if len(moving_res) >= MIN_MOVING_FOR_FIT else pos_res))
         if med < best_med:
             best_med = med
-            best = (float(lag), pos_res, yaw_res, n_moving, n_still, excess)
+            best = (float(lag), pos_res, yaw_res, n_moving, n_still, excess, _max_excess_run_ms(excess, kept, rwalls))
     return best
 
 
@@ -220,17 +255,20 @@ def compare_player(
     base = {"id": pid, "owner_file": owner_file}
     if len(owalls) < 2 or len(rwalls) < 1:
         return {**base, "n": 0, "ok": False}
-    lag, pos_res, yaw_res, n_moving, n_still, excess = fit_lag(owalls, opos, oyaw, rwalls, rpos, ryaw)
+    lag, pos_res, yaw_res, n_moving, n_still, excess, excess_run = fit_lag(owalls, opos, oyaw, rwalls, rpos, ryaw)
     if not pos_res:
         return {**base, "lag_ms": lag, "n": 0, "moving": 0, "still": 0, "ok": False}
+    interval = float(np.median(np.diff(rwalls))) if len(rwalls) > 1 else 0.0
     return {
         **base,
         "lag_ms": lag,
         "n": len(pos_res),
+        "interval_ms": round(interval, 3),
         "moving": n_moving,
         "still": n_still,
         "pos_max": round(max(pos_res), 6),
         "pos_excess_max": round(max(excess), 6),
+        "pos_excess_run_ms": round(excess_run, 3),
         "pos_median": round(float(np.median(pos_res)), 6),
         "pos_p95": round(_pct(pos_res, 95), 6),
         "yaw_max": round(max(yaw_res), 6),
@@ -240,14 +278,16 @@ def compare_player(
 
 
 def player_ok(r: dict[str, Any], pos_tol: float, yaw_tol: float, max_lag: float) -> bool:
-    """The per-player pass: enough samples, small lag, and the residuals within tolerance."""
+    """The per-player pass: enough samples, small lag, the steady-state p95 within tolerance, and the
+    worst residual a short transient (a spawn-state mismatch or a teleport converges within a few
+    samples; a sustained disagreement runs for the whole match, re/notes/q23 §2)."""
     if r.get("n", 0) < MIN_SAMPLES:
         return False
     if r.get("lag_ms", 1e9) > max_lag:
         return False
     if r.get("pos_p95", 1e9) > pos_tol:
         return False
-    if r.get("pos_excess_max", 1e9) > 4 * pos_tol:  # the worst sample, less the moving allowance
+    if r.get("pos_excess_run_ms", 1e9) > EXCESS_RUN_INTERVALS * r.get("interval_ms", 1e9):
         return False
     if r.get("yaw_p95", 1e9) > yaw_tol:
         return False

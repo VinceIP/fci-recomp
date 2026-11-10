@@ -194,6 +194,41 @@ class LagFitTest(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertEqual(rep["players"], [])
 
+    def test_spawn_transient_passes(self):
+        # the q23 run: the copy starts from a stale spawn state (0.79 m off in z) and converges
+        # within 4 samples while the owner walks; the short excess run is a transient, not a desync
+        run = Run()
+        host = []
+        join = []
+        z_off = {0: 0.79, 1: 0.4, 2: 0.15, 3: 0.03}  # the spawn-state mismatch, converging
+        for i in range(60):
+            t = i * 100
+            host.append(sample(t, i, [player(2, [2.0 * t / 1000.0, 0, 0], 0.0, local=True)]))
+            x = quant(2.0 * (t - 100) / 1000.0) if t >= 100 else 0.0
+            join.append(sample(t, i, [player(2, [x, 0, z_off.get(i, 0.0)], 0.0)]))
+        rc, rep = run(host, join, min_players=1)
+        self.assertEqual(rc, 0)
+        p = rep["players"][0]
+        self.assertLessEqual(p["pos_excess_run_ms"], 5 * p["interval_ms"])  # a short run
+
+    def test_sustained_excess_burst_fails(self):
+        # 9 consecutive samples (9 intervals) 3.5 m off, 191 in sync: the p95 stays within tolerance
+        # (the bad samples are 4.5% of the run), but the excess run is too long to be a transient
+        run = Run()
+        host = []
+        join = []
+        for i in range(200):
+            t = i * 100
+            host.append(sample(t, i, [player(2, [5.0 * t / 1000.0, 0, 0], 0.0, local=True)]))
+            behind = 800 if 100 <= i <= 108 else 100  # a 700 ms dip for 9 samples
+            x = quant(5.0 * max(t - behind, 0) / 1000.0)
+            join.append(sample(t, i, [player(2, [x, 0, 0], 0.0)]))
+        rc, rep = run(host, join, min_players=1)
+        self.assertEqual(rc, 1)
+        p = rep["players"][0]
+        self.assertLessEqual(p["pos_p95"], 0.05)  # the steady state is in sync
+        self.assertGreater(p["pos_excess_run_ms"], 5 * p["interval_ms"])  # but the run is too long
+
     def test_moving_still_split(self):
         # the owner walks for the first 2 s (moving) then stops (still); the remote follows exactly
         run = Run()
