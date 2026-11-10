@@ -657,12 +657,21 @@ static LRESULT CALLBACK window_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
         for (vk = 0; vk < 256; vk++)
             fci_framebuffer_key(vk, 0);
     }
-    if (msg == WM_CLOSE) {
-        /* closing the window ends the session: leave the host list before the process is torn down
-         * (TerminateProcess skips every handler, so this is the only chance). Bounded to about 1.5 s. */
-        extern void fci_net_leave(void);
-        fci_net_leave();
-        TerminateProcess(GetCurrentProcess(), 0);
+    if (msg == WM_CLOSE) { /* the user exit waits for a save to finish (fci_exit.c) */
+        extern void fci_exit_begin(void);
+        fci_exit_begin();
+        SetTimer(w, 1, 10, NULL); /* fci_exit_ready ends the process, bounded */
+        return 0;
+    }
+    if (msg == WM_TIMER && wp == 1) {
+        extern int fci_exit_ready(void);
+        if (fci_exit_ready()) {
+            /* leave the host list before the process is torn down (TerminateProcess skips every
+             * handler, so this is the only chance); bounded to about 1.5 s */
+            extern void fci_net_leave(void);
+            fci_net_leave();
+            TerminateProcess(GetCurrentProcess(), 0);
+        }
         return 0;
     }
     return DefWindowProcA(w, msg, wp, lp);

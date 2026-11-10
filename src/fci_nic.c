@@ -2558,7 +2558,7 @@ int fci_nic_start_list(const char *url)
     fflush(stderr);
     fci_net_worker_start(); /* LIST mode: the worker thread does the host-list HTTP */
     /* leave the host list on a clean exit (quit-to-dashboard / shutdown): the toolkit calls
-     * this once, on the exiting thread, just before it exits (patches/runtime/0031-exit-hook.patch) */
+     * this once, on the exiting thread, just before it exits (patches/runtime/0034-exit-hook.patch) */
     extern void (*xbox_exit_hook)(void);
     xbox_exit_hook = fci_net_leave;
     return 1;

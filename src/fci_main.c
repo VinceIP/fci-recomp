@@ -141,6 +141,21 @@ void fci_cpu_init(void);
 void fci_disk_init(const char *save_dir);
 void fci_pak_log_init(void);
 void fci_menu_log_init(void);
+void fci_exit_wait(void); /* fci_exit.c: a user exit waits for a save to finish */
+
+/* Closing the console window ends the process: wait (bounded) for a save in flight first, so the
+ * console does not end it between a save's file writes. Ctrl+Break and Ctrl+C keep the system's
+ * behaviour. */
+static BOOL WINAPI fci_console_ctrl(DWORD type)
+{
+    if (type == CTRL_CLOSE_EVENT || type == CTRL_SHUTDOWN_EVENT) {
+        extern void fci_net_leave(void);
+        fci_exit_wait();
+        fci_net_leave(); /* then leave the host list: the process ends on return */
+        return TRUE;
+    }
+    return FALSE;
+}
 
 static int install_kernel_header(void)
 {
@@ -240,6 +255,7 @@ int main(int argc, char **argv)
     }
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
+    SetConsoleCtrlHandler(fci_console_ctrl, TRUE);
     if (argc < 4) {
         fprintf(stderr, "usage: %s <default.xbe> <game dir> <save dir> [RECOMP_*=value ...]\n", argv[0]);
         return 2;

@@ -13,6 +13,7 @@
 #include "fci_image.h"
 
 void fci_log_session_end(void); /* fci_config.c: a clean exit, for the log */
+void fci_exit_wait(void);       /* fci_exit.c: a user exit waits for a save to finish */
 
 /* audio buffers XAudio2 refused because its queue was full */
 int fci_apu_drops;
@@ -115,6 +116,8 @@ void fci_relaunch(uint32_t page)
     void *frame = NULL;
     int in_chain = getenv("RECOMP_FCI_CHAIN") != NULL;
     uint32_t i;
+
+    fci_exit_wait(); /* the relaunch ends this instance: not between a save's file writes (Q22c) */
 
     for (i = 0; i < sizeof(path) - 1 && MEM8(page + 8 + i); i++)
         path[i] = (char)MEM8(page + 8 + i);

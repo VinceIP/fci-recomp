@@ -57,6 +57,8 @@ int fci_aspect_wide(void);                        // fci_display.c: RECOMP_FCI_A
 int fci_window_size(uint32_t* w, uint32_t* h);    // fci_display.c: RECOMP_FCI_WINDOW
 void fci_log_session_end(void);                   // fci_config.c: a clean exit, for the log
 void fci_net_leave(void);                         // fci_net_worker.c: leave the host list on a clean exit
+void fci_exit_begin(void);                        // fci_exit.c: the user exit waits for a save to finish
+int fci_exit_ready(void);                         // fci_exit.c: 1 when the process may end
 extern const char *fci_xbe_path, *fci_game_dir;   // fci_main.c: from the arguments or fci.ini
 }
 
@@ -293,6 +295,7 @@ DWORD g_window_thread = 0;
 bool g_alt_enter = true;                  // RECOMP_FCI_ALT_ENTER=0: no fullscreen toggle
 constexpr UINT kMsgToggle = WM_APP + 1;   // render window to frame: Alt+Enter
 constexpr UINT kMsgLeave = WM_APP + 2;    // fci_window_handoff: the render window goes
+constexpr UINT_PTR kExitTimer = 1;        // the frame's poll while a user exit waits for a save (fci_exit.c)
 constexpr int kClientW = 1280, kClientH = 960;
 
 bool Option(const char* name, bool fallback) { return OptionFlag(name, fallback); }
@@ -374,8 +377,14 @@ LRESULT CALLBACK FrameProc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     case WM_CLOSE:   // the session ends: the first instance waits for this one's job to empty
         fci_log_session_end();
-        fci_net_leave();   // leave the host list: TerminateProcess skips every handler, so this is the only chance
-        TerminateProcess(GetCurrentProcess(), 0);
+        fci_exit_begin();
+        SetTimer(w, kExitTimer, 10, nullptr);   // fci_exit_ready ends the process, bounded
+        return 0;
+    case WM_TIMER:
+        if (wp == kExitTimer && fci_exit_ready()) {
+            fci_net_leave();   // leave the host list: TerminateProcess skips every handler, so this is the only chance
+            TerminateProcess(GetCurrentProcess(), 0);
+        }
         return 0;
     }
     return DefWindowProcW(w, msg, wp, lp);

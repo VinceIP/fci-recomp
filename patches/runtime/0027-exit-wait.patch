@@ -1,0 +1,103 @@
+Subject: Exit wait: the save log's busy state, so a user exit can wait for a save to finish
+
+A user exit (window close, console close, the relaunch) can land between a save's file
+writes and leave a set the game reports as damaged (Q22c). The wait needs the save log's
+state as a query: savelog_busy_ms(now, quiet) is 0 when no UDATA file is open for writing
+and no save log line was emitted within quiet ms of now, else the ms since the last line.
+The last line's tick is recorded in savelog_emit, which every tracked write-side operation
+funnels through (an open-for-write is covered by the open-write count; the writes and the
+close by the lines around them). The quiet/busy decision is savelog_busy_decision in
+savelog.c, pure and unit-tested without the game (tests/test_savelog_busy.py). The caller
+is src/fci_exit.c, which polls it on the user-exit paths, bounded at 3 s.
+
+---
+--- build/deps/xboxrecomp/src/kernel/kernel.h
++++ b/src/kernel/kernel.h
+@@ -686,6 +686,10 @@
+  * bridge_NtClose (kernel_bridge.c), which is where the guest's NtClose takes
+  * the host handle, and from xbox_NtClose for the non-bridge path. */
+ void savelog_close(HANDLE h);
++/* Save log busy state for the exit wait (Q22c): 0 when quiet (no UDATA file
++ * open for writing and no line within quiet_ms of now), else the ms since
++ * the last line. */
++uint64_t savelog_busy_ms(uint64_t now_ms, uint64_t quiet_ms);
+ #ifdef _WIN32
+ void xbox_dir_context_drop(HANDLE FileHandle);
+ #endif
+--- build/deps/xboxrecomp/src/kernel/kernel_file.c
++++ b/src/kernel/kernel_file.c
+@@ -95,6 +95,10 @@
+  * make the first file call. This is the toolkit's established pattern
+  * (guest_vmem.c, kernel_rtl.c). */
+ static SRWLOCK s_savelog_lock = SRWLOCK_INIT;
++/* The tick of the last save log line (0: none): the exit wait's "quiet" half
++ * (Q22c, src/fci_exit.c). Updated in savelog_emit, which every tracked
++ * write-side operation funnels through. */
++static uint64_t s_savelog_last_event;
+ 
+ static void savelog_lock(void)
+ {
+@@ -140,6 +144,7 @@
+     if (savelog_line(buf, sizeof buf, (uint64_t)GetTickCount64(), rel, action) >= 0) {
+         fprintf(stderr, "%s", buf);
+         fflush(stderr);
++        s_savelog_last_event = (uint64_t)GetTickCount64();
+     }
+ }
+ 
+@@ -244,6 +249,24 @@
+     char action[48];
+     snprintf(action, sizeof action, "shrunk to %lld bytes", new_size);
+     savelog_emit(e->rel, action);
++}
++
++/* The save log's busy state for the exit wait (Q22c, src/fci_exit.c): 0 when
++ * no UDATA file is open for writing and no line was emitted within quiet_ms
++ * of now, else the ms since the last line. The decision is
++ * savelog_busy_decision (savelog.c, unit-tested). */
++uint64_t savelog_busy_ms(uint64_t now_ms, uint64_t quiet_ms)
++{
++    uint64_t last;
++    int open_writes = 0;
++    int i;
++    savelog_lock();
++    last = s_savelog_last_event;
++    for (i = 0; i < SAVELOG_MAX; i++)
++        if (s_savelog[i].handle && s_savelog[i].write)
++            open_writes++;
++    ReleaseSRWLockExclusive(&s_savelog_lock);
++    return savelog_busy_decision(now_ms, last, open_writes, quiet_ms);
+ }
+ 
+ #if defined(_WIN32)
+--- build/deps/xboxrecomp/src/kernel/savelog.c
++++ b/src/kernel/savelog.c
+@@ -96,3 +96,12 @@
+                      (unsigned long long)tick_ms, rel, action);
+     return (size_t)n >= outsz ? -1 : n;
+ }
++
++uint64_t savelog_busy_decision(uint64_t now_ms, uint64_t last_event_ms, int open_writes,
++                               uint64_t quiet_ms)
++{
++    uint64_t since = now_ms - last_event_ms;
++    if (open_writes > 0 || since < quiet_ms)
++        return since;
++    return 0;
++}
+--- build/deps/xboxrecomp/src/kernel/savelog.h
++++ b/src/kernel/savelog.h
+@@ -43,6 +43,13 @@
+  * written, or -1 if out is too small. */
+ int savelog_line(char* out, size_t outsz, uint64_t tick_ms, const char* rel, const char* action);
+ 
++/* The quiet/busy decision for the exit wait (Q22c): busy while a UDATA file
++ * is open for writing (open_writes > 0) or a line was emitted within
++ * quiet_ms of now (now_ms - last_event_ms < quiet_ms). Returns the ms since
++ * the last event when busy, 0 when quiet. */
++uint64_t savelog_busy_decision(uint64_t now_ms, uint64_t last_event_ms, int open_writes,
++                               uint64_t quiet_ms);
++
+ #ifdef __cplusplus
+ }
+ #endif
