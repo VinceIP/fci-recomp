@@ -36,7 +36,21 @@
 //   relayed address back as a second /v1/connect with the same nonce and "relay": true (capped at
 //   3 per nonce: ICE restarts); the host receives it on its long-poll. The host never mints.
 //   The TURN key is env.TURN_KEY_API_TOKEN (a wrangler secret); the key id is env.TURN_KEY_ID
-//   (a wrangler variable). Neither is in the repo, and Cloudflare's answer is never echoed.
+//   (a wrangler secret). Neither is in the repo, and Cloudflare's answer is never echoed.
+// - The operator's relay budget: RELAY_BUDGET_GB (a wrangler secret, GB), TURN_USAGE_API_TOKEN
+//   (a wrangler secret, a least-privilege API token with the Account Analytics permission) and
+//   TURN_USAGE_ACCOUNT_ID (a wrangler secret) together turn the quota on; with any of them
+//   missing it is off (one log line on the first mint) and mints proceed as before. On, the
+//   month's TURN egress is checked before every mint: it is read from Cloudflare's GraphQL
+//   analytics API at most every 5 minutes and cached in the object's SQLite for the UTC calendar
+//   month (the provider's billing period); at or past the budget the mint is refused 503
+//   `no relay`, the status the client already treats as relay unavailable. A cached value up to
+//   1 h old is trusted when the read fails; with nothing that fresh the mint is refused (fail
+//   closed: the budget must hold). RELAY_KILL (a wrangler secret, any non-empty value)
+//   is the operator's kill switch: `wrangler secret put RELAY_KILL` sets it, `wrangler secret
+//   delete RELAY_KILL` clears it; each creates a new Worker version, no code redeploy. The
+//   refusal is the same `no relay` as when the TURN key is unset and is never explained to the
+//   caller.
 // - Bans (a banned id cannot host, and cannot join anyone) persist in the object's SQLite, so they
 //   survive an eviction; the refusal counters and a ring of recent refusals are memory-only.
 //
@@ -46,9 +60,11 @@
 // out (a poll is the renewal). Nothing important survives an eviction (a host re-registers),
 // except the bans.
 //
-// Deploy: wrangler.toml (one Worker, one DO class, `Lobby`); RELAY and TURN_KEY_ID are plain
-// variables (`wrangler variables put`), ADMIN_SECRET and TURN_KEY_API_TOKEN secrets
-// (`wrangler secret put`). Free tier.
+// Deploy: wrangler.toml (one Worker, one DO class, `Lobby`). Every setting (RELAY, TURN_KEY_ID,
+// TURN_KEY_API_TOKEN, RELAY_BUDGET_GB, TURN_USAGE_ACCOUNT_ID, TURN_USAGE_API_TOKEN, ADMIN_SECRET,
+// RELAY_KILL) is a secret (`wrangler secret put`): secrets survive `wrangler deploy`, which replaces
+// plain variables with wrangler.toml's (none), and no deployment's values live in the repo.
+// Free tier.
 // The how-to is research/docs/online-architecture.md, section 7.
 
 const PROTO = 2; // the net protocol (src/fci_net.h): title + version + this must all match
@@ -71,7 +87,10 @@ const TURN_MAPS_MAX = 1000; // the recent-pairs and mints maps are tiny by const
 const HOSTS_MAX = 1024; // the global live-host cap: the per-address caps bound one client, this bounds a flood of them
 const MINTS_PER_WINDOW = 6; // mints per guest and per address, per 10-minute window
 const RELAY_CONNECTS_PER_NONCE = 3; // re-POSTs of a relayed address (ICE restarts)
-const TURN_TTL = 14400; // s; the credential must outlive the longest relayed session
+const TURN_TTL = 14400; // s; the credential must outlive the longest relayed session: a TURN
+// refresh authenticates with the same long-term credential, so a short one would drop a running relay.
+const USAGE_READ_EVERY_MS = 5 * 60 * 1000; // the month's usage, read at most every 5 minutes
+const USAGE_STALE_MS = 60 * 60 * 1000; // a cached usage older than 1 h with a failed read: fail closed
 const LIMITS = {
   hostsPerIp: 4,
   hostsPerEndpointIp: 4, // live hosts that may list the same endpoint IP (a hostile endpoint is bounded)
@@ -240,6 +259,12 @@ export class Lobby {
     state.storage.sql.exec(
       "CREATE TABLE IF NOT EXISTS bans (id TEXT PRIMARY KEY, reason TEXT NOT NULL DEFAULT '', date TEXT NOT NULL)"
     );
+    state.storage.sql.exec(
+      "CREATE TABLE IF NOT EXISTS relay_usage (k TEXT PRIMARY KEY, v TEXT NOT NULL)"
+    );
+    this.usage = null; // {month, bytes, at}: the month's egress, in memory (SQLite is the source)
+    this.usageInFlight = null; // at most one in-flight usage read per object
+    this.quotaOffLogged = false;
   }
 
   // Memory of the refusals this object has seen (the admin CLI's `abuse` command); the ban itself
@@ -251,6 +276,143 @@ export class Lobby {
     this.abuse.byIp.set(ip, c);
     this.abuse.ring.push({ ip, kind, id: id || null, at: Date.now() });
     if (this.abuse.ring.length > BANS_RING) this.abuse.ring.shift();
+  }
+
+  // The UTC calendar month a time falls in, as "YYYY-MM" (the provider's billing period is the
+  // calendar month, so the budget resets there).
+  monthKey(ms) {
+    const d = new Date(ms);
+    return d.getUTCFullYear() + "-" + String(d.getUTCMonth() + 1).padStart(2, "0");
+  }
+
+  // The operator's relay budget settings: on only when the budget, the usage token and the
+  // account id are all set.
+  quotaConfig() {
+    const e = this.env || {};
+    const gb = Number(e.RELAY_BUDGET_GB);
+    if (!isFinite(gb) || gb <= 0) return { on: false, why: "RELAY_BUDGET_GB not set (or not a positive number)" };
+    if (!e.TURN_USAGE_API_TOKEN) return { on: false, why: "TURN_USAGE_API_TOKEN not set" };
+    if (!e.TURN_USAGE_ACCOUNT_ID) return { on: false, why: "TURN_USAGE_ACCOUNT_ID not set" };
+    return { on: true, budgetBytes: gb * 1e9 };
+  }
+
+  // The operator's kill switch (a wrangler secret, any non-empty value): `wrangler secret put
+  // RELAY_KILL` sets it, `wrangler secret delete RELAY_KILL` clears it; no code redeploy.
+  relayKilled() {
+    return String((this.env && this.env.RELAY_KILL) || "").length > 0;
+  }
+
+  cachedUsage() {
+    if (this.usage) return this.usage;
+    const rows = this.state.storage.sql.exec("SELECT v FROM relay_usage WHERE k = ?", "usage").toArray();
+    if (rows.length === 1) {
+      try {
+        this.usage = JSON.parse(rows[0].v);
+      } catch {
+        this.usage = null;
+      }
+    }
+    return this.usage;
+  }
+
+  storeUsage(u) {
+    this.usage = u;
+    this.state.storage.sql.exec(
+      "INSERT OR REPLACE INTO relay_usage (k, v) VALUES (?, ?)", "usage", JSON.stringify(u)
+    );
+  }
+
+  // The month's egress in bytes from Cloudflare's GraphQL analytics API (TURN usage is queryable
+  // over the GraphQL API only; the TURN key itself has no usage endpoint). At most one in-flight
+  // read per object; a failure returns null and keeps whatever is cached.
+  readUsage(now) {
+    if (!this.usageInFlight) {
+      this.usageInFlight = this.queryUsage(now).finally(() => {
+        this.usageInFlight = null;
+      });
+    }
+    return this.usageInFlight;
+  }
+
+  async queryUsage(now) {
+    const e = this.env || {};
+    const d = new Date(now);
+    // `date` filters take a Date (YYYY-MM-DD, UTC); a request must declare its variables
+    const from = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1)).toISOString().slice(0, 10);
+    const query =
+      'query TurnUsage($accountId: string!, $keyId: string!, $from: Date!, $to: Date!) { viewer { accounts(filter: { accountTag: $accountId }) { callsTurnUsageAdaptiveGroups(' +
+      'limit: 1, filter: { keyId: $keyId, date_geq: $from, date_leq: $to }) { sum { egressBytes } } } } }';
+    try {
+      const resp = await fetch("https://api.cloudflare.com/client/v4/graphql", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer " + e.TURN_USAGE_API_TOKEN,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          query,
+          variables: {
+            accountId: e.TURN_USAGE_ACCOUNT_ID,
+            keyId: e.TURN_KEY_ID,
+            from,
+            to: d.toISOString().slice(0, 10),
+          },
+        }),
+      });
+      if (!resp.ok) {
+        console.log("relay usage: Cloudflare answered " + resp.status);
+        return null;
+      }
+      const body = await resp.json().catch(() => null);
+      if (body && body.errors) console.log("relay usage: GraphQL errors in Cloudflare's answer");
+      const data = body && body.data;
+      const groups =
+        data &&
+        data.viewer &&
+        data.viewer.accounts &&
+        data.viewer.accounts[0] &&
+        data.viewer.accounts[0].callsTurnUsageAdaptiveGroups;
+      // an empty list is a month with no relay traffic yet: 0 bytes, not a failed read
+      const bytes = Array.isArray(groups) && groups.length === 0 ? 0
+        : groups && groups[0] && groups[0].sum && Number(groups[0].sum.egressBytes);
+      if (!isFinite(bytes)) {
+        console.log("relay usage: no egressBytes in Cloudflare's answer");
+        return null;
+      }
+      const u = { month: this.monthKey(now), bytes, at: Date.now() };
+      this.storeUsage(u);
+      return u;
+    } catch (err) {
+      console.log("relay usage: the request failed (" + ((err && err.name) || "error") + ")");
+      return null;
+    }
+  }
+
+  // The operator's relay budget: allow the mint while the month's egress is under
+  // RELAY_BUDGET_GB. Off (any setting missing) => allow. Kill switch => refuse. The usage is
+  // read at most every 5 minutes; a cached value up to 1 h old is trusted when the read fails,
+  // and with nothing that fresh the mint is refused (fail closed: the budget must hold even
+  // while the usage API is down).
+  async quotaAllows(now) {
+    const q = this.quotaConfig();
+    if (!q.on) {
+      if (!this.quotaOffLogged) {
+        this.quotaOffLogged = true;
+        console.log("relay quota off: " + q.why);
+      }
+      return true;
+    }
+    if (this.relayKilled()) return false;
+    const month = this.monthKey(now);
+    let u = this.cachedUsage();
+    if (!u || u.month !== month) u = null;
+    if (!u || now - u.at > USAGE_READ_EVERY_MS) {
+      const fresh = await this.readUsage(now);
+      if (fresh && fresh.month === month) u = fresh;
+    }
+    if (!u) return false; // nothing cached and the read failed
+    if (now - u.at > USAGE_STALE_MS) return false; // older than 1 h and the read failed
+    return u.bytes < q.budgetBytes;
   }
 
   // The connect queue is drained by the host's poll, so the mint and relay-connect gates keep
@@ -613,6 +775,11 @@ export class Lobby {
     const apiToken = String((this.env && this.env.TURN_KEY_API_TOKEN) || "");
     if (!keyId || !apiToken) {
       this.note("norelay", ip, gid);
+      return json({ error: "no relay" }, 503);
+    }
+    if (!(await this.quotaAllows(now))) {
+      this.note("norelay", ip, gid);
+      console.log("relay budget reached (" + this.monthKey(now) + "): mint refused");
       return json({ error: "no relay" }, 503);
     }
     let data = null;

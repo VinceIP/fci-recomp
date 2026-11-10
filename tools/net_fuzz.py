@@ -367,7 +367,7 @@ class Fuzzer:
                 self.start_knocking()  # keep the MAC admitted for the whole run (the 5 s expiry)
                 self.phase_gate(src_ip, dst_ip)
                 self.phase_rate(src_ip, dst_ip, burst)
-                time.sleep(1.0)  # let the card drain the burst: a 65000-byte datagram needs the 64 KB socket buffer free
+                time.sleep(1.0)  # let the card drain the burst (a 65 KB datagram needs the socket buffer free)
             self.phase_envelope()
             if not self.log or send_only:
                 return self.finish(send_only)

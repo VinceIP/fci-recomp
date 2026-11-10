@@ -24,6 +24,7 @@ function cursor(rows, written = 0) {
 
 function fakeStorage() {
   const bans = new Map();
+  const kv = new Map(); // the relay_usage table (the cached month's usage)
   return {
     sql: {
       exec(query, ...params) {
@@ -36,6 +37,12 @@ function fakeStorage() {
         if (q.startsWith("SELECT 1 FROM BANS WHERE ID")) return cursor(bans.has(params[0]) ? [{ 1: 1 }] : []);
         if (q.startsWith("SELECT ID, REASON, DATE FROM BANS")) return cursor([...bans.values()]);
         if (q.startsWith("DELETE FROM BANS WHERE ID")) return cursor([], bans.delete(params[0]) ? 1 : 0);
+        if (q.startsWith("INSERT OR REPLACE INTO RELAY_USAGE")) {
+          kv.set(params[0], params[1]);
+          return cursor([], 1);
+        }
+        if (q.startsWith("SELECT V FROM RELAY_USAGE WHERE K"))
+          return cursor(kv.has(params[0]) ? [{ v: kv.get(params[0]) }] : []);
         throw new Error("fake storage: unknown query: " + query);
       },
     },
@@ -93,8 +100,55 @@ const TURN_ENTRY = {
   credential: "c2".repeat(32),
 };
 const TURN_ENV = { TURN_KEY_ID: "keyid", TURN_KEY_API_TOKEN: "apitoken" };
+// The operator's relay budget settings (the quota is on only when all three are set).
+const QUOTA_ENV = {
+  ...TURN_ENV,
+  RELAY_BUDGET_GB: "100",
+  TURN_USAGE_API_TOKEN: "usagetoken",
+  TURN_USAGE_ACCOUNT_ID: "acct",
+};
 const cfOk = (ice) => new Response(JSON.stringify({ iceServers: ice }), { status: 201 });
 const cfBad = (status, text) => new Response(text, { status });
+
+// The GraphQL analytics endpoint and its answer shape (callsTurnUsageAdaptiveGroups, sum of
+// egressBytes for the month, the fields the Worker reads).
+const USAGE_URL = "https://api.cloudflare.com/client/v4/graphql";
+const usageOk = (bytes) =>
+  new Response(
+    JSON.stringify({
+      data: { viewer: { accounts: [{ callsTurnUsageAdaptiveGroups: [{ sum: { egressBytes: bytes } }] }] } },
+    }),
+    { status: 200 }
+  );
+
+// A fetch stub that routes the two Cloudflare calls the Worker makes: the usage read (GraphQL)
+// and the mint (generate-ice-servers). `usage` and `mint` are called per request; record both.
+function stubTurnUsage({ usage = () => usageOk(0), mint = () => cfOk([STUN_ENTRY, TURN_ENTRY]) } = {}) {
+  const calls = { usage: [], mint: [] };
+  const restore = stubFetch(async (url, init) => {
+    const u = String(url);
+    if (u.startsWith(USAGE_URL)) {
+      calls.usage.push([u, init]);
+      return usage();
+    }
+    if (u.includes("generate-ice-servers")) {
+      calls.mint.push([u, init]);
+      return mint();
+    }
+    throw new Error("unexpected fetch: " + u);
+  });
+  return { restore, calls };
+}
+
+// Rewrite the cached usage row (and drop the in-memory copy) so a test can age the cache.
+function setCache(lobby, { bytes, at, month }) {
+  lobby.usage = null;
+  lobby.state.storage.sql.exec(
+    "INSERT OR REPLACE INTO relay_usage (k, v) VALUES (?, ?)",
+    "usage",
+    JSON.stringify({ month: month || lobby.monthKey(Date.now()), bytes, at })
+  );
+}
 
 function stubFetch(impl) {
   const old = globalThis.fetch;
@@ -633,6 +687,175 @@ test("Cloudflare 500: 503 no relay, the body is not echoed", async () => {
   }
 });
 
+test("relay budget: under budget mints; the usage read goes to the GraphQL endpoint with the month", async () => {
+  const lobby = mk(QUOTA_ENV);
+  const { restore, calls } = stubTurnUsage({ usage: () => usageOk(1e9) }); // 1 GB of a 100 GB budget
+  try {
+    const { hid, nonce } = await hostAndConn(lobby, {});
+    const [status, body] = await r(lobby, req("/v1/turn", { method: "POST", body: { id: hid, nonce, token: "d".repeat(64) } }));
+    assert.equal(status, 200);
+    assert.equal(body.username, TURN_ENTRY.username);
+    assert.equal(calls.usage.length, 1);
+    assert.ok(calls.usage[0][0].startsWith(USAGE_URL));
+    assert.equal(calls.usage[0][1].headers.authorization, "Bearer usagetoken");
+    const sent = JSON.parse(calls.usage[0][1].body);
+    const d = new Date();
+    const monthStart = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1)).toISOString().slice(0, 10);
+    assert.equal(sent.variables.keyId, "keyid");
+    assert.equal(sent.variables.accountId, "acct");
+    assert.equal(sent.variables.from, monthStart); // the UTC calendar month the budget is in
+    assert.ok(sent.query.includes("callsTurnUsageAdaptiveGroups"));
+    assert.ok(sent.query.includes("egressBytes"));
+    assert.match(sent.query, /\$from: Date!/); // declared, a plain date
+    assert.match(sent.variables.to, /^\d{4}-\d{2}-\d{2}$/);
+    assert.equal(calls.mint.length, 1);
+  } finally {
+    restore();
+  }
+});
+
+test("relay budget: at or past the budget the mint is 503 no relay, and Cloudflare is never called", async () => {
+  const lobby = mk(QUOTA_ENV); // budget 100 GB
+  const { restore, calls } = stubTurnUsage({ usage: () => usageOk(101e9) }); // 101 GB
+  try {
+    const { hid, nonce } = await hostAndConn(lobby, {});
+    const [status, body] = await r(lobby, req("/v1/turn", { method: "POST", body: { id: hid, nonce, token: "d".repeat(64) } }));
+    assert.equal(status, 503);
+    assert.deepEqual(body, { error: "no relay" });
+    assert.equal(calls.mint.length, 0); // a refused mint never burns a Cloudflare mint call
+    // exactly at the budget is refused too (the budget is a cap, not a target)
+    const lobby2 = mk(QUOTA_ENV);
+    const t2 = stubTurnUsage({ usage: () => usageOk(100e9) });
+    try {
+      const c2 = await hostAndConn(lobby2, {});
+      const [s2, b2] = await r(lobby2, req("/v1/turn", { method: "POST", body: { id: c2.hid, nonce: c2.nonce, token: "d".repeat(64) } }));
+      assert.equal(s2, 503);
+      assert.deepEqual(b2, { error: "no relay" });
+    } finally {
+      t2.restore();
+    }
+  } finally {
+    restore();
+  }
+});
+
+test("relay budget: the usage read fails with no cache: 503 (fail closed)", async () => {
+  const lobby = mk(QUOTA_ENV);
+  const { restore, calls } = stubTurnUsage({ usage: () => cfBad(500, "nope") });
+  try {
+    const { hid, nonce } = await hostAndConn(lobby, {});
+    const [status, body] = await r(lobby, req("/v1/turn", { method: "POST", body: { id: hid, nonce, token: "d".repeat(64) } }));
+    assert.equal(status, 503);
+    assert.deepEqual(body, { error: "no relay" });
+    assert.equal(calls.usage.length, 1);
+    assert.equal(calls.mint.length, 0);
+  } finally {
+    restore();
+  }
+});
+
+test("relay budget: the usage read fails with a recent cache: the cache is trusted (fail open under 1 h)", async () => {
+  const lobby = mk(QUOTA_ENV);
+  // first mint: the read succeeds and the cache is stored
+  let t = stubTurnUsage({ usage: () => usageOk(1e9) });
+  try {
+    const { hid, nonce } = await hostAndConn(lobby, {});
+    const [status] = await r(lobby, req("/v1/turn", { method: "POST", body: { id: hid, nonce, token: "d".repeat(64) } }));
+    assert.equal(status, 200);
+  } finally {
+    t.restore();
+  }
+  // age the cache past the 5-minute read interval, then break the usage endpoint
+  setCache(lobby, { bytes: 1e9, at: Date.now() - 10 * 60 * 1000 });
+  t = stubTurnUsage({ usage: () => cfBad(500, "nope") });
+  try {
+    const { hid, nonce } = await hostAndConn(lobby, {});
+    const [status, body] = await r(lobby, req("/v1/turn", { method: "POST", body: { id: hid, nonce, token: "d".repeat(64) } }));
+    assert.equal(status, 200, "a cache under 1 h old is trusted when the read fails");
+    assert.equal(body.username, TURN_ENTRY.username);
+    assert.equal(t.calls.usage.length, 1); // it did try the read
+    assert.equal(t.calls.mint.length, 1);
+  } finally {
+    t.restore();
+  }
+});
+
+test("relay budget: the usage read fails and the cache is over 1 h old: 503 (fail closed)", async () => {
+  const lobby = mk(QUOTA_ENV);
+  let t = stubTurnUsage({ usage: () => usageOk(1e9) });
+  try {
+    const { hid, nonce } = await hostAndConn(lobby, {});
+    const [status] = await r(lobby, req("/v1/turn", { method: "POST", body: { id: hid, nonce, token: "d".repeat(64) } }));
+    assert.equal(status, 200);
+  } finally {
+    t.restore();
+  }
+  setCache(lobby, { bytes: 1e9, at: Date.now() - 2 * 60 * 60 * 1000 }); // 2 h old
+  t = stubTurnUsage({ usage: () => cfBad(500, "nope") });
+  try {
+    const { hid, nonce } = await hostAndConn(lobby, {});
+    const [status, body] = await r(lobby, req("/v1/turn", { method: "POST", body: { id: hid, nonce, token: "d".repeat(64) } }));
+    assert.equal(status, 503);
+    assert.deepEqual(body, { error: "no relay" });
+    assert.equal(t.calls.mint.length, 0);
+  } finally {
+    t.restore();
+  }
+});
+
+test("relay budget: a month rollover resets the budget (the old month's cache does not carry over)", async () => {
+  const lobby = mk(QUOTA_ENV);
+  const d = new Date();
+  const last = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - 1, 15));
+  const lastMonth = last.getUTCFullYear() + "-" + String(last.getUTCMonth() + 1).padStart(2, "0");
+  // last month's usage, over the budget, cached
+  setCache(lobby, { bytes: 999e9, at: Date.now(), month: lastMonth });
+  const { restore, calls } = stubTurnUsage({ usage: () => usageOk(1e9) }); // this month: 1 GB
+  try {
+    const { hid, nonce } = await hostAndConn(lobby, {});
+    const [status, body] = await r(lobby, req("/v1/turn", { method: "POST", body: { id: hid, nonce, token: "d".repeat(64) } }));
+    assert.equal(status, 200, "the new month's usage is under the budget");
+    assert.equal(body.username, TURN_ENTRY.username);
+    assert.equal(calls.usage.length, 1); // a fresh read for the new month
+    assert.equal(lobby.usage.month, lobby.monthKey(Date.now()));
+  } finally {
+    restore();
+  }
+});
+
+test("relay budget: quota off (any setting missing) mints without a usage read", async () => {
+  for (const over of [{}, { RELAY_BUDGET_GB: "100" }, { RELAY_BUDGET_GB: "100", TURN_USAGE_API_TOKEN: "usagetoken" }, { RELAY_BUDGET_GB: "junk", TURN_USAGE_API_TOKEN: "usagetoken", TURN_USAGE_ACCOUNT_ID: "acct" }]) {
+    const lobby = mk({ ...TURN_ENV, ...over });
+    let usageCalls = 0;
+    const { restore, calls } = stubTurnUsage();
+    try {
+      const { hid, nonce } = await hostAndConn(lobby, {});
+      const [status, body] = await r(lobby, req("/v1/turn", { method: "POST", body: { id: hid, nonce, token: "d".repeat(64) } }));
+      assert.equal(status, 200);
+      assert.equal(body.username, TURN_ENTRY.username);
+      usageCalls = calls.usage.length;
+    } finally {
+      restore();
+    }
+    assert.equal(usageCalls, 0, "no usage read while the quota is off");
+  }
+});
+
+test("relay budget: the kill switch refuses the mint with no usage read and no Cloudflare call", async () => {
+  const lobby = mk({ ...QUOTA_ENV, RELAY_KILL: "1" });
+  const { restore, calls } = stubTurnUsage();
+  try {
+    const { hid, nonce } = await hostAndConn(lobby, {});
+    const [status, body] = await r(lobby, req("/v1/turn", { method: "POST", body: { id: hid, nonce, token: "d".repeat(64) } }));
+    assert.equal(status, 503);
+    assert.deepEqual(body, { error: "no relay" });
+    assert.equal(calls.usage.length, 0);
+    assert.equal(calls.mint.length, 0);
+  } finally {
+    restore();
+  }
+});
+
 test("mint rate limits: 6 per guest in 10 minutes, 6 per address in 10 minutes", async () => {
   // per guest: one connect, seven mints for the same (gid, nonce) -> the 7th is 429
   const lobby = mk(TURN_ENV);
@@ -1034,4 +1257,19 @@ test("local: 100.64/10 (CGNAT) is rejected", async () => {
   }));
   assert.equal(status, 200);
   assert.equal(body.local, undefined);
+});
+
+test("relay budget: a month with no relay traffic yet (empty usage list) mints", async () => {
+  const lobby = mk(QUOTA_ENV);
+  const empty = () =>
+    new Response(JSON.stringify({ data: { viewer: { accounts: [{ callsTurnUsageAdaptiveGroups: [] }] } } }), { status: 200 });
+  const { restore, calls } = stubTurnUsage({ usage: empty });
+  try {
+    const { hid, nonce } = await hostAndConn(lobby, {});
+    const [status] = await r(lobby, req("/v1/turn", { method: "POST", body: { id: hid, nonce, token: "d".repeat(64) } }));
+    assert.equal(status, 200);
+    assert.equal(calls.mint.length, 1);
+  } finally {
+    restore();
+  }
 });
