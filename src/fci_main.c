@@ -132,6 +132,19 @@ static int load_file(const char *path, void **data, size_t *size)
  * fci-kinit.dll is a real image laid out that way, and its loaded header is copied there unchanged. */
 void fci_cpu_init(void);
 void fci_disk_init(const char *save_dir);
+void fci_exit_wait(void); /* fci_exit.c: a user exit waits for a save to finish */
+
+/* Closing the console window ends the process: wait (bounded) for a save in flight first, so the
+ * console does not end it between a save's file writes. Ctrl+Break and Ctrl+C keep the system's
+ * behaviour. */
+static BOOL WINAPI fci_console_ctrl(DWORD type)
+{
+    if (type == CTRL_CLOSE_EVENT || type == CTRL_SHUTDOWN_EVENT) {
+        fci_exit_wait();
+        return TRUE;
+    }
+    return FALSE;
+}
 
 static int install_kernel_header(void)
 {
@@ -230,6 +243,7 @@ int main(int argc, char **argv)
     }
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
+    SetConsoleCtrlHandler(fci_console_ctrl, TRUE);
     if (argc < 4) {
         fprintf(stderr, "usage: %s <default.xbe> <game dir> <save dir> [RECOMP_*=value ...]\n", argv[0]);
         return 2;
