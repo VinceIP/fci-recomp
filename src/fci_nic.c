@@ -922,7 +922,7 @@ static int stun_recv(const char *buf, int n, const struct sockaddr_in *from)
             uint16_t port = (uint16_t)((((uint8_t)buf[off + 6] << 8) | (uint8_t)buf[off + 7]) ^ 0x2112);
             uint32_t addr;
             memcpy(&addr, buf + off + 8, 4);
-            addr ^= STUN_MAGIC;
+            addr ^= htonl(STUN_MAGIC); /* addr is in network order */
             s_stun_ep.sin_family = AF_INET;
             s_stun_ep.sin_port = htons(port);
             s_stun_ep.sin_addr.s_addr = addr;
@@ -941,7 +941,7 @@ static int stun_recv(const char *buf, int n, const struct sockaddr_in *from)
             memcpy(&addr, buf + off + 8, 4);
             s_stun_ep.sin_family = AF_INET;
             s_stun_ep.sin_port = htons(port);
-            s_stun_ep.sin_addr.s_addr = ntohl(addr);
+            s_stun_ep.sin_addr.s_addr = addr; /* already in network order */
             if (!s_stun_known) {
                 s_stun_known = 1;
                 fprintf(stderr, "[FCI] network: STUN endpoint (MAPPED) %s:%u\n",
@@ -950,7 +950,7 @@ static int stun_recv(const char *buf, int n, const struct sockaddr_in *from)
             }
             return 1;
         }
-        off += 4 + (int)len;
+        off += 4 + (((int)len + 3) & ~3); /* attributes are padded to 4 bytes */
     }
     return 0;
 }
