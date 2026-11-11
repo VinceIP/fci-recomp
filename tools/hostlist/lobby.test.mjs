@@ -841,18 +841,20 @@ test("relay budget: quota off (any setting missing) mints without a usage read",
   }
 });
 
-test("relay budget: the kill switch refuses the mint with no usage read and no Cloudflare call", async () => {
-  const lobby = mk({ ...QUOTA_ENV, RELAY_KILL: "1" });
-  const { restore, calls } = stubTurnUsage();
-  try {
-    const { hid, nonce } = await hostAndConn(lobby, {});
-    const [status, body] = await r(lobby, req("/v1/turn", { method: "POST", body: { id: hid, nonce, token: "d".repeat(64) } }));
-    assert.equal(status, 503);
-    assert.deepEqual(body, { error: "no relay" });
-    assert.equal(calls.usage.length, 0);
-    assert.equal(calls.mint.length, 0);
-  } finally {
-    restore();
+test("relay budget: the kill switch refuses the mint with or without a quota", async () => {
+  for (const env of [TURN_ENV, QUOTA_ENV]) {
+    const lobby = mk({ ...env, RELAY_KILL: "1" });
+    const { restore, calls } = stubTurnUsage();
+    try {
+      const { hid, nonce } = await hostAndConn(lobby, {});
+      const [status, body] = await r(lobby, req("/v1/turn", { method: "POST", body: { id: hid, nonce, token: "d".repeat(64) } }));
+      assert.equal(status, 503);
+      assert.deepEqual(body, { error: "no relay" });
+      assert.equal(calls.usage.length, 0);
+      assert.equal(calls.mint.length, 0);
+    } finally {
+      restore();
+    }
   }
 });
 

@@ -41,14 +41,14 @@
 // - The operator's relay budget: RELAY_BUDGET_GB (a wrangler secret, GB), TURN_USAGE_API_TOKEN
 //   (a wrangler secret, a least-privilege API token with the Account Analytics permission) and
 //   TURN_USAGE_ACCOUNT_ID (a wrangler secret) together turn the quota on; with any of them
-//   missing it is off (one log line on the first mint) and mints proceed as before. On, the
+//   missing it is off (one log line on the first mint). With the quota on, the
 //   month's TURN egress is checked before every mint: it is read from Cloudflare's GraphQL
 //   analytics API at most every 5 minutes and cached in the object's SQLite for the UTC calendar
 //   month (the provider's billing period); at or past the budget the mint is refused 503
 //   `no relay`, the status the client already treats as relay unavailable. A cached value up to
 //   1 h old is trusted when the read fails; with nothing that fresh the mint is refused (fail
 //   closed: the budget must hold). RELAY_KILL (a wrangler secret, any non-empty value)
-//   is the operator's kill switch: `wrangler secret put RELAY_KILL` sets it, `wrangler secret
+//   blocks mints regardless of quota configuration. The operator sets it: `wrangler secret put RELAY_KILL` sets it, `wrangler secret
 //   delete RELAY_KILL` clears it; each creates a new Worker version, no code redeploy. The
 //   refusal is the same `no relay` as when the TURN key is unset and is never explained to the
 //   caller.
@@ -402,6 +402,8 @@ export class Lobby {
   async quotaCheck(now) {
     const q = this.quotaConfig();
     const month = this.monthKey(now);
+    const out = { month, ...(q.on ? { budgetBytes: q.budgetBytes } : {}) };
+    if (this.relayKilled()) return { ...out, allow: false, why: "kill switch (RELAY_KILL) set" };
     if (!q.on) {
       if (!this.quotaOffLogged) {
         this.quotaOffLogged = true;
@@ -409,8 +411,6 @@ export class Lobby {
       }
       return { allow: true, why: "quota off: " + q.why, month };
     }
-    const out = { month, budgetBytes: q.budgetBytes };
-    if (this.relayKilled()) return { ...out, allow: false, why: "kill switch (RELAY_KILL) set" };
     let u = this.cachedUsage();
     if (!u || u.month !== month) u = null;
     if (!u || now - u.at > USAGE_READ_EVERY_MS) {
