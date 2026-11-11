@@ -256,6 +256,11 @@ export class Lobby {
     this.mints = new Map(); // gid+":"+nonce -> {host, at, relay}: recent mints (the relay-connect gate)
     this.mintLimit = new RateLimit(TURN_WINDOW_MS); // mints per guest and per address
     this.abuse = { byIp: new Map(), ring: [] };
+    this.metrics = {
+      startedAt: Date.now(), routes: {},
+      connects: { directQueued: 0, relayQueued: 0, directDelivered: 0, relayDelivered: 0 },
+      relay: { issued: 0, unconfigured: 0, budget: 0, disabled: 0, usageUnavailable: 0, providerError: 0 },
+    };
     // SqlStorage (Cloudflare): storage.sql.exec(query, ...bindings) returns a cursor
     state.storage.sql.exec(
       "CREATE TABLE IF NOT EXISTS bans (id TEXT PRIMARY KEY, reason TEXT NOT NULL DEFAULT '', date TEXT NOT NULL)"
@@ -481,6 +486,7 @@ export class Lobby {
     const hostIp = host ? host.ip : "";
     const hostEp = host ? host.endpoint : "";
     const q = (this.connects.get(id) || []).map(({ endpoint, nonce, mac, relay, local, ip: gip }) => {
+      this.metrics.connects[relay ? "relayDelivered" : "directDelivered"]++;
       const e = relay ? { endpoint, nonce, mac, relay: true } : { endpoint, nonce, mac };
       if (local && host && sameNat(gip, hostIp, endpoint, hostEp)) e.local = local;
       return e;
@@ -489,24 +495,37 @@ export class Lobby {
     return json({ connects: q });
   }
 
-  // The public routes.
+  // Only fixed route keys reach these counters. Long-poll latency includes the wait.
   async fetch(request) {
     const url = new URL(request.url);
-    // Cloudflare sets both request.cf.ip and the cf-connecting-ip header (the header is what the
-    // Node tests stand in for, as request.cf is Workers-only).
     const ip = (request.cf && request.cf.ip) || request.headers.get("cf-connecting-ip") || "";
-    try {
-      if (url.pathname.startsWith("/admin/")) return await this.admin(request, url);
-      if (url.pathname === "/v1/hosts" && request.method === "GET") return this.list(url, ip);
-      if (url.pathname === "/v1/register" && request.method === "POST") return await this.register(request, ip);
-      if (url.pathname === "/v1/connects" && request.method === "GET") return await this.poll(url, ip);
-      if (url.pathname === "/v1/connect" && request.method === "POST") return await this.connect(request, ip);
-      if (url.pathname === "/v1/turn" && request.method === "POST") return await this.turn(request, ip);
-      if (url.pathname === "/v1/unregister" && request.method === "POST") return await this.unregister(request, ip);
-      return json({ error: "not found" }, 404);
-    } catch (e) {
-      return json({ error: "internal" }, 500);
+    if (url.pathname.startsWith("/admin/")) {
+      try { return await this.admin(request, url); }
+      catch { return json({ error: "internal" }, 500); }
     }
+    const route = request.method + " " + url.pathname;
+    const start = Date.now();
+    let response;
+    try {
+      switch (route) {
+        case "GET /v1/hosts": response = this.list(url, ip); break;
+        case "POST /v1/register": response = await this.register(request, ip); break;
+        case "GET /v1/connects": response = await this.poll(url, ip); break;
+        case "POST /v1/connect": response = await this.connect(request, ip); break;
+        case "POST /v1/turn": response = await this.turn(request, ip); break;
+        case "POST /v1/unregister": response = await this.unregister(request, ip); break;
+        default: return json({ error: "not found" }, 404);
+      }
+    } catch {
+      response = json({ error: "internal" }, 500);
+    }
+    const row = this.metrics.routes[route] ??= { requests: 0, status: {}, totalMs: 0, maxMs: 0 };
+    const elapsed = Math.max(0, Date.now() - start);
+    row.requests++;
+    row.status[response.status] = (row.status[response.status] || 0) + 1;
+    row.totalMs += elapsed;
+    row.maxMs = Math.max(row.maxMs, elapsed);
+    return response;
   }
 
   list(url, ip) {
@@ -729,6 +748,7 @@ export class Lobby {
       q.push({ endpoint: msg.endpoint, nonce: msg.nonce, mac: msg.mac, gid, relay, local: glocal, ip });
     }
     this.connects.set(msg.id, q);
+    this.metrics.connects[relay ? "relayQueued" : "directQueued"]++;
     const w = this.waiters.get(msg.id);
     if (w) {
       this.waiters.delete(msg.id);
@@ -784,11 +804,15 @@ export class Lobby {
     const keyId = String((this.env && this.env.TURN_KEY_ID) || "");
     const apiToken = String((this.env && this.env.TURN_KEY_API_TOKEN) || "");
     if (!keyId || !apiToken) {
+      this.metrics.relay.unconfigured++;
       this.note("norelay", ip, gid);
       return json({ error: "no relay" }, 503);
     }
     const quota = await this.quotaCheck(now);
     if (!quota.allow) {
+      const reason = quota.why === "budget reached" ? "budget"
+        : this.relayKilled() ? "disabled" : "usageUnavailable";
+      this.metrics.relay[reason]++;
       this.note("norelay", ip, gid);
       // the reason and the numbers: an operator must tell a spent budget from a failed read
       console.log(
@@ -817,6 +841,7 @@ export class Lobby {
     }
     const cred = turnCredential(data && data.iceServers);
     if (!cred) {
+      this.metrics.relay.providerError++;
       if (data) console.log("turn mint: no usable TURN entry in Cloudflare's answer");
       this.note("norelay", ip, gid);
       return json({ error: "no relay" }, 503);
@@ -825,6 +850,7 @@ export class Lobby {
     const prev = this.mints.get(gid + ":" + msg.nonce);
     this.mints.set(gid + ":" + msg.nonce, { host: String(msg.id), at: now, relay: prev ? prev.relay : 0 });
     this.pruneTurnState(now);
+    this.metrics.relay.issued++;
     return json({ username: cred.username, credential: cred.credential, urls: cred.urls });
   }
 
@@ -879,6 +905,16 @@ export class Lobby {
     }
     if (url.pathname === "/admin/bans" && request.method === "GET") {
       return json({ bans: this.bans() });
+    }
+    if (url.pathname === "/admin/metrics" && request.method === "GET") {
+      const now = Date.now();
+      const active = {};
+      for (const h of this.hosts.values()) {
+        if (h.expires <= now) continue;
+        const key = h.title + "/" + h.proto;
+        active[key] = (active[key] || 0) + 1;
+      }
+      return json({ ...this.metrics, sampledAt: now, active });
     }
     if (url.pathname === "/admin/relay" && request.method === "GET") {
       // the month's relay usage against the budget, and whether a mint would be allowed now

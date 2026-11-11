@@ -1309,3 +1309,28 @@ test("relay budget: /admin/relay reports the usage, the budget and the reason; t
     t.restore();
   }
 });
+
+test("operator metrics aggregate fixed routes, delivery and refusals without player details", async () => {
+  const lobby = mk({ ADMIN_SECRET: "s3cret" });
+  const path = "/admin/metrics";
+  assert.equal((await r(lobby, req(path)))[0], 401);
+  const { hToken, hid, nonce } = await hostAndConn(lobby);
+  await r(lobby, req("/v1/hosts?title=instincts&version=1"));
+  await r(lobby, req("/v1/connects?id=" + hid + "&token=" + hToken));
+  await r(lobby, req("/v1/turn", { method: "POST", body: { id: hid, nonce, token: "d".repeat(64) } }));
+  await r(lobby, req("/unrecognized-player-path"));
+  const [status, data] = await r(lobby, req(path, { headers: { authorization: "Bearer s3cret" } }));
+  assert.equal(status, 200);
+  assert.equal(data.active["instincts/2"], 1);
+  assert.equal(data.connects.directQueued, 1);
+  assert.equal(data.connects.directDelivered, 1);
+  assert.equal(data.relay.unconfigured, 1);
+  assert.equal(data.routes["GET /v1/hosts"].status[200], 1);
+  assert.equal(data.routes["POST /v1/turn"].status[503], 1);
+  assert.ok(data.routes["GET /v1/hosts"].totalMs >= 0);
+  assert.ok(data.startedAt <= data.sampledAt);
+  const serialized = JSON.stringify(data);
+  for (const value of [hToken, hid, nonce, "s3cret", "8.8.8.7", "unrecognized-player-path", "version="]) {
+    assert.equal(serialized.includes(value), false);
+  }
+});
