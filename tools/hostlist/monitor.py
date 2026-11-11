@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 import json
 import math
 import os
+from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -134,8 +135,29 @@ def main():
     parser.add_argument("--script", default="fci-hostlist")
     parser.add_argument("--namespace", default=os.environ.get("FCI_DO_NAMESPACE_ID"))
     parser.add_argument("--url", default=os.environ.get("FCI_HOSTLIST_URL"))
+    parser.add_argument("--input", type=Path, help="render a saved snapshot without making requests")
+    parser.add_argument("--html", type=Path, help="write a self-contained report for a local browser")
+    parser.add_argument("--baseline", type=Path, help="compare host-list counters against a saved snapshot")
     args = parser.parse_args()
-    snapshot = collect(args, os.environ, datetime.now(UTC))
+    if args.baseline and not args.html:
+        parser.error("--baseline requires --html")
+    try:
+        snapshot = (
+            json.loads(args.input.read_text(encoding="utf-8-sig"))
+            if args.input
+            else collect(args, os.environ, datetime.now(UTC))
+        )
+        if not isinstance(snapshot, dict):
+            parser.error("snapshot must be a JSON object")
+        if args.html:
+            from monitor_report import render
+
+            baseline = json.loads(args.baseline.read_text(encoding="utf-8-sig")) if args.baseline else None
+            if args.baseline and not isinstance(baseline, dict):
+                parser.error("baseline must be a JSON object")
+            args.html.write_text(render(snapshot, baseline), encoding="utf-8")
+    except (OSError, ValueError) as error:
+        parser.error(str(error))
     print(json.dumps(snapshot, indent=2, sort_keys=True))
     return bool(snapshot["errors"])
 
