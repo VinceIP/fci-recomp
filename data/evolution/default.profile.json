@@ -94,6 +94,10 @@
       "prehook",
       "the CEntity destructor body (ecx = the entity; called by the deleting destructor sub_000648B4, the vtable 004B04E8's first slot): unregisters it from RECOMP_FCI_TELEMETRY (fci_telemetry.c)"
     ],
+    "sub_0004ABC6": [
+      "gate",
+      "per-frame join driver (recomp_0006.c:30575): refreshes the Internet browser's empty row before running the original state machine (fci_lan_menu.c)"
+    ],
     "sub_000FB0A2": [
       "gate",
       "the pre-game multiplayer action dispatcher (recomp_0023.c:27569; it tests B_SystemLink before B_Live and re-reads the hash in each): in menu mode, SYSTEM LINK starts LAN, XBOX LIVE starts the host list and is rewritten to B_SystemLink (fci_lan_menu.c)"

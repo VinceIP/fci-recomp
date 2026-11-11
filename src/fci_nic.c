@@ -192,6 +192,7 @@ static int s_list; /* 1 when RECOMP_FCI_NET_LIST is in use */
 static lpeer_t s_lpeers[LIST_PEER_MAX];
 static int s_nlpeers;
 static int s_lpending;                /* count of LP_PENDING peers (cap at LIST_PENDING_MAX) */
+static volatile LONG s_lpeer_dropped; /* count of peers dropped due to failure (no relay, punch failed) */
 static struct sockaddr_in s_stun_ep;  /* the card's public endpoint (from STUN or _ENDPOINT) */
 static int s_stun_known;              /* 1 when the endpoint is set */
 static ULONGLONG s_stun_next;         /* next STUN send deadline */
@@ -1008,6 +1009,7 @@ static void punch_recv(const char *buf, char type, const struct sockaddr_in *fro
             p->state = LP_LIVE;
             p->last_frame = GetTickCount64();
             s_lpending--;
+            s_lpeer_dropped = 0; /* a peer going live clears the dropped counter (Q29 r4) */
             if (is_local) {
                 /* the local path won: the peer is live at its LAN address */
                 memcpy(&p->endpoint, &p->local_ep, sizeof p->endpoint);
@@ -1185,6 +1187,26 @@ int fci_nic_list_turn_wait(uint8_t nonce[16])
     return 0;
 }
 
+/* the NIC's contribution to the browse status (Q29 round 4): in_list, n_pending, n_dropped.
+ * Called from the game thread (the relabel gate); reads under s_lock. */
+void fci_nic_browse_state(int *in_list, int *n_pending, int *n_dropped)
+{
+    AcquireSRWLockShared(&s_lock);
+    *in_list = s_list;
+    *n_pending = s_lpending;
+    *n_dropped = (int)s_lpeer_dropped;
+    ReleaseSRWLockShared(&s_lock);
+}
+
+/* clear the dropped counter (Q29 round 4): called when a fetch lists zero hosts, or when a peer
+ * goes live. Called from the worker thread; takes s_lock. */
+void fci_nic_browse_clear_dropped(void)
+{
+    AcquireSRWLockExclusive(&s_lock);
+    s_lpeer_dropped = 0;
+    ReleaseSRWLockExclusive(&s_lock);
+}
+
 /* start the allocation for the waiting peer (the worker's POST /v1/turn answered). The resolve is
  * the module's only blocking call; from the worker thread that is fine. 1 when the Allocate went out. */
 int fci_nic_list_turn_start(const char *hostport, const char *user, const char *pass)
@@ -1258,6 +1280,7 @@ int fci_nic_list_turn_peer(const uint8_t nonce[16], const uint8_t mac[6], const 
         memcpy(&p->endpoint, &ep, sizeof p->endpoint);
         memcpy(p->mac, mac, 6);
         p->state = LP_LIVE;
+        s_lpeer_dropped = 0; /* a peer going live clears the dropped counter (Q29 r4) */
         p->relay = -1;
         p->turn_ch = -1;
         p->via_turn = 1; /* its endpoint is the guest's relayed address */
@@ -1775,6 +1798,7 @@ static int turn_wait_fallback(int i, ULONGLONG now)
     fprintf(stderr, "[FCI] network: turn relay for %s:%u failed, no relay set: peer dropped\n",
             inet_ntoa(p->endpoint.sin_addr), ntohs(p->endpoint.sin_port));
     fflush(stderr);
+    InterlockedIncrement(&s_lpeer_dropped);
     lpeer_remove(i);
     return 0;
 }
@@ -1863,6 +1887,7 @@ static void list_tick(ULONGLONG now)
                 fprintf(stderr, "[FCI] network: punch to %s:%u failed, no relay set: peer dropped\n",
                         inet_ntoa(p->endpoint.sin_addr), ntohs(p->endpoint.sin_port));
                 fflush(stderr);
+                InterlockedIncrement(&s_lpeer_dropped);
                 lpeer_remove(i);
                 i--;
                 continue;

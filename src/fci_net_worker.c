@@ -39,6 +39,7 @@ extern int fci_nic_list_turn_start(const char *hostport, const char *user, const
 extern int fci_nic_list_turn_poll(char *ep, int len);
 extern void fci_nic_list_turn_fail(void);
 extern int fci_nic_list_turn_peer(const uint8_t nonce[16], const uint8_t mac[6], const char *endpoint);
+extern void fci_nic_browse_clear_dropped(void); /* Q29 round 4: clear the dropped counter */
 
 /* the XBE certificate's Version field (fci_main.c); the data folder (fci_main.c) */
 extern uint32_t fci_xbe_version;
@@ -171,10 +172,16 @@ static void local_addr_detect(void)
 
 static char s_host_id[64];
 static int s_registered;
-static ULONGLONG s_last_fetch;    /* last /v1/hosts fetch (GetTickCount64) */
+static ULONGLONG s_last_fetch_attempt;    /* last /v1/hosts attempt (GetTickCount64) */
 static ULONGLONG s_host_start_ms; /* when "host started" was set (for the endpoint-wait log) */
 static ULONGLONG s_reg_fail_ms;   /* last failed register (back off 5 s; a banned id gets 403 forever) */
 static int s_endpoint_warned;     /* logged once if the endpoint is not known 5 s after host start */
+
+/* the worker's contribution to the browse status (Q29 round 4) */
+static volatile LONG s_fetch_state;    /* 0 = never fetched, 1 = last fetch ok, 2 = last fetch failed */
+static volatile LONG s_fetch_nhosts;   /* number of hosts in the last successful fetch */
+static volatile LONG s_relay_refused;  /* 1 when the last relay mint was refused (503); clears on success */
+static volatile LONG s_version_refused; /* 1 when the list refused us for the version (not yet wired) */
 
 static const char *net_title(void) { return strstr(FCI_TITLE_NAME, "Evolution") ? "evolution" : "instincts"; }
 
@@ -426,6 +433,7 @@ static int http_request(const char *base_url, const char *method, const char *pa
 {
     char host[256];
     int port = 80, secure = 0;
+    *status = 0; /* No HTTP response yet. */
     if (parse_base(base_url, host, (int)sizeof host, &port, &secure) != 0)
         return -1;
     return http_request_on(s_session, host, port, secure, method, path, body, buf, buflen, status);
@@ -443,6 +451,7 @@ static int http_request_timed(const char *base_url, const char *method, const ch
     HINTERNET session;
     int r;
 
+    *status = 0; /* No HTTP response yet. */
     if (parse_base(base_url, host, (int)sizeof host, &port, &secure) != 0)
         return -1;
     session = WinHttpOpen(L"fci-recomp/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME,
@@ -678,6 +687,7 @@ static void turn_mint(void)
     if (status != 200) {
         /* 503 (at capacity) / 403 (banned) / 429 (too many): the NIC falls back to the hub */
         log_line("turn mint refused (status %d), the relay fallback applies", status);
+        InterlockedExchange(&s_relay_refused, 1);
         AcquireSRWLockExclusive(lock);
         fci_nic_list_turn_fail();
         ReleaseSRWLockExclusive(lock);
@@ -729,6 +739,7 @@ static void turn_mint(void)
         return;
     }
     ReleaseSRWLockExclusive(lock);
+    InterlockedExchange(&s_relay_refused, 0); /* a successful mint clears the refusal */
     log_line("turn mint ok (%s)", hostport);
 }
 
@@ -776,15 +787,22 @@ static void guest_fetch(void)
 
     if (!base)
         return;
+    s_last_fetch_attempt = GetTickCount64();
     snprintf(path, sizeof path, "/v1/hosts?title=%s&version=%s&max=12", net_title(), net_version());
     if (http_request(base, "GET", path, NULL, buf, sizeof buf, &status) != 0 || status != 200) {
         log_line("host list fetch failed (status %d), retrying next probe", status);
+        InterlockedExchange(&s_fetch_state, 2); /* last fetch failed */
         return;
     }
-    s_last_fetch = GetTickCount64();
     log_line("list fetched (%s)", net_title());
     s_seen_n = 0;
     json_array(buf, "hosts", on_host_obj);
+    InterlockedExchange(&s_fetch_nhosts, (LONG)s_seen_n);
+    if (s_seen_n == 0) {
+        fci_nic_browse_clear_dropped();
+        InterlockedExchange(&s_relay_refused, 0);
+    }
+    InterlockedExchange(&s_fetch_state, 1); /* Publish success after the host count. */
     for (n = 0; n < s_known_n; n++) {
         int keep = 0, m;
         for (m = 0; m < s_seen_n; m++)
@@ -981,9 +999,9 @@ static DWORD WINAPI worker_main(LPVOID arg)
         }
         if (s_registered)
             host_poll();
-        if (fci_nic_worker_probe_take() && GetTickCount64() - s_last_fetch >= LIST_FETCH_INTERVAL_MS)
+        if (fci_nic_worker_probe_take() && GetTickCount64() - s_last_fetch_attempt >= LIST_FETCH_INTERVAL_MS)
             guest_fetch();
-        /* if the probe is set but the list is fresh, clear it (the list is current) */
+        /* Coalesce probes while a list request is in flight. */
         fci_nic_worker_probe_take();
         /* the TURN relay: a punch failed (mint), or the allocation is ready (post the relayed connect) */
         if (fci_nic_list_turn_need_take())
@@ -1000,6 +1018,17 @@ static DWORD WINAPI worker_main(LPVOID arg)
 }
 
 /* --- public API --- */
+
+/* the worker's contribution to the browse status (Q29 round 4): fetch_state, n_hosts, relay_refused,
+ * version_refused. Called from the game thread (the relabel gate); reads volatile state set by the
+ * worker thread. */
+void fci_net_worker_browse_state(int *fetch_state, int *n_hosts, int *relay_refused, int *version_refused)
+{
+    *fetch_state = (int)s_fetch_state;
+    *n_hosts = (int)s_fetch_nhosts;
+    *relay_refused = (int)s_relay_refused;
+    *version_refused = (int)s_version_refused;
+}
 
 void fci_net_worker_start(void)
 {
