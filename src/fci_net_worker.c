@@ -45,7 +45,7 @@ extern void fci_nic_browse_clear_dropped(void); /* Q29 round 4: clear the droppe
 extern uint32_t fci_xbe_version;
 extern const char *fci_save_dir;
 
-#define LIST_FETCH_INTERVAL_MS 5000
+#define LIST_FETCH_INTERVAL_MS 10000
 #define POLL_WAIT_S            20
 #define WORKER_TICK_MS         500
 
@@ -999,10 +999,11 @@ static DWORD WINAPI worker_main(LPVOID arg)
         }
         if (s_registered)
             host_poll();
-        if (fci_nic_worker_probe_take() && GetTickCount64() - s_last_fetch_attempt >= LIST_FETCH_INTERVAL_MS)
+        int probe = fci_nic_worker_probe_take();
+        if (probe == FCI_LIST_PROBE_ENTRY ||
+            (probe == FCI_LIST_PROBE_DISCOVERY &&
+             (!s_last_fetch_attempt || GetTickCount64() - s_last_fetch_attempt >= LIST_FETCH_INTERVAL_MS)))
             guest_fetch();
-        /* Coalesce probes while a list request is in flight. */
-        fci_nic_worker_probe_take();
         /* the TURN relay: a punch failed (mint), or the allocation is ready (post the relayed connect) */
         if (fci_nic_list_turn_need_take())
             turn_mint();

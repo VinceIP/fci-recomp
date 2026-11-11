@@ -8,10 +8,11 @@ Mirrored:
 - ``action_crc``           <- the CRC-32 of the action name (sub_0026ACB2, poly 0xEDB88320)
 - ``gate_pick``            <- ``fci_gate_000FB0A2`` (the B_Live/B_SystemLink pick, the hash rewrite)
 - ``pick_state_machine``   <- ``fci_nic_start_menu_transport`` (first pick wins until restart)
-- ``relabel_entry``        <- ``relabel_entry`` (the "XBOX LIVE" -> "INTERNET" UTF-16 replacement
-                               in the string table entry, sub_0026A628 posthook)
 """
 
+import json
+from pathlib import Path
+from xml.etree import ElementTree
 import zlib
 
 # --- the action CRC-32 (sub_0026ACB2, poly 0xEDB88320) ------------------------
@@ -140,75 +141,17 @@ def test_list_no_url_then_list():
     assert pick_state_machine([1, 1, 0], url_set=False) == ["no-url", "no-url", "started"]
 
 
-# --- the relabel (relabel_entry, sub_0026A628 posthook) -----------------------
-
-# The UTF-16LE byte sequences (the C: s_from_utf16, s_to_utf16 in fci_lan_menu.c).
-FROM_UTF16 = "XBOX LIVE"
-TO_UTF16 = "INTERNET"
-SCAN_UNITS = 64  # 128 bytes / 2 (the C: scan_units in relabel_entry)
-
-
-def relabel_entry(buf: bytes) -> tuple[bytes, bool]:
-    """Mirror of relabel_entry: scan a UTF-16LE buffer for "XBOX LIVE" and replace with "INTERNET".
-
-    buf: the entry structure (up to 128 bytes = 64 uint16_t).
-    Returns (new_buf, found): the buffer with the first match replaced (null-padded),
-    and whether a match was found.
-    """
-    from_bytes = FROM_UTF16.encode("utf-16-le")
-    to_bytes = TO_UTF16.encode("utf-16-le")
-    # Null-pad the replacement to the same length as the original
-    padded_to = to_bytes + b"\x00\x00" * ((len(from_bytes) - len(to_bytes)) // 2)
-
-    data = buf[: SCAN_UNITS * 2]  # scan at most 128 bytes
-    idx = data.find(from_bytes)
-    if idx < 0:
-        return buf, False
-    # Replace at idx
-    new_data = data[:idx] + padded_to + data[idx + len(from_bytes) :]
-    return new_data + buf[SCAN_UNITS * 2 :], True
-
-
-def test_relabel_entry_xbox_live():
-    # "XBOX LIVE" at the start of the entry: replaced with "INTERNET" (null-padded).
-    entry = "XBOX LIVE\0".encode("utf-16-le") + b"\x00" * 120
-    result, found = relabel_entry(entry)
-    assert found
-    assert result.startswith("INTERNET\0\0".encode("utf-16-le"))
-
-
-def test_relabel_entry_offset():
-    # "XBOX LIVE" at an offset within the entry (e.g. after the CRC-32 at +4): replaced.
-    # Simulate: 2 dwords of header (8 bytes), then the text.
-    header = b"\x53\x0e\x68\x9b\x00\x00\x00\x00"  # CRC-32 + padding
-    entry = header + "XBOX LIVE\0".encode("utf-16-le") + b"\x00" * 100
-    result, found = relabel_entry(entry)
-    assert found
-    assert "INTERNET".encode("utf-16-le") in result
-    assert "XBOX LIVE".encode("utf-16-le") not in result
-
-
-def test_relabel_entry_idempotent():
-    # A second relabel finds nothing (the text is already "INTERNET").
-    entry = "XBOX LIVE\0".encode("utf-16-le") + b"\x00" * 120
-    once, found1 = relabel_entry(entry)
-    assert found1
-    twice, found2 = relabel_entry(once)
-    assert not found2
-    assert twice == once
-
-
-def test_relabel_entry_no_match():
-    # A string that doesn't match: unchanged.
-    entry = "SYSTEM LINK\0".encode("utf-16-le") + b"\x00" * 120
-    result, found = relabel_entry(entry)
-    assert not found
-    assert result == entry
-
-
-def test_relabel_entry_not_in_scan_range():
-    # "XBOX LIVE" beyond the 128-byte scan range: not found.
-    entry = b"\x00" * 128 + "XBOX LIVE\0".encode("utf-16-le")
-    result, found = relabel_entry(entry)
-    assert not found
-    assert result == entry
+def test_menu_xml_replacements_preserve_archive_offsets_and_action_ids():
+    source = (Path(__file__).resolve().parents[1] / "src" / "fci_disk.c").read_text(encoding="utf-8")
+    rows = {}
+    for line in source.splitlines():
+        declaration, sep, literal = line.strip().partition("[] = ")
+        if sep and declaration in {f"static const char {name}" for name in ("live", "internet", "system_link", "lan")}:
+            rows[declaration.split()[-1]] = json.loads(literal.removesuffix(";"))
+    for original, replacement, element, label in (
+        ("live", "internet", "B_Live", "INTERNET"),
+        ("system_link", "lan", "B_SystemLink", "LAN"),
+    ):
+        assert len(rows[original]) == len(rows[replacement])
+        assert ElementTree.fromstring(rows[original]).get("enum") == element
+        assert ElementTree.fromstring(rows[replacement]).attrib == {"enum": element, "value": label}

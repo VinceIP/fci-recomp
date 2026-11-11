@@ -218,7 +218,7 @@ static SOCKET s_relsock[RELAY_MAX]; /* a socket per relay room; INVALID_SOCKET =
 static uint8_t s_relcookie[RELAY_MAX][COOKIE];
 static char s_relroom[RELAY_MAX][33];   /* the room name: the peer's nonce in hex (32) */
 static ULONGLONG s_relhello[RELAY_MAX]; /* next hello deadline per socket */
-static volatile LONG s_probe; /* the game broadcast in LIST mode: the worker should fetch the list */
+static volatile LONG s_probe; /* A browser entry takes precedence over a discovery broadcast. */
 /* the TURN relay (guest side): a failed punch moves the peer to LP_TURN_WAIT, the worker mints a
  * credential (POST /v1/turn) and starts the allocation; when it is ready the peer is relayed over
  * it and the worker posts the relayed connect (research/qwen/notes/q17-turn-design.md) */
@@ -358,15 +358,22 @@ int fci_nic_start_list_lazy(const char *url)
  * (\"first choice wins until restart\"). 1 when a transport is up after this call. */
 int fci_nic_start_menu_transport(int mode)
 {
-    const char *item = mode == 0 ? "SYSTEM LINK" : "INTERNET";
+    const char *item = mode == 0 ? "LAN" : "INTERNET";
     if (s_sock != INVALID_SOCKET) {
+        if (mode == 1 && s_list) {
+            InterlockedExchange(&s_probe, FCI_LIST_PROBE_ENTRY);
+            return 1;
+        }
         fprintf(stderr, "[FCI] network: transport already up; ignoring %s\n", item);
         fflush(stderr);
         return 1;
     }
     if (mode == 0)
         return fci_nic_start_lan() ? 1 : 0;
-    return fci_nic_start_list_lazy(s_menu_list_url) ? 1 : 0;
+    if (!fci_nic_start_list_lazy(s_menu_list_url))
+        return 0;
+    InterlockedExchange(&s_probe, FCI_LIST_PROBE_ENTRY);
+    return 1;
 }
 
 /* Down before a relaunch (fci_manual.c): the next instance re-reads RECOMP_FCI_NET_PEERS and would find
@@ -465,7 +472,7 @@ static int route_frame(const uint8_t *f, uint32_t len)
                     sent = 1;
                 }
             }
-            InterlockedExchange(&s_probe, 1);
+            InterlockedCompareExchange(&s_probe, FCI_LIST_PROBE_DISCOVERY, 0);
             return sent;
         }
         for (i = 0; i < s_nlpeers; i++) {
@@ -2697,7 +2704,7 @@ int fci_nic_mmio(void *ctx, uint32_t va)
 
 /* the worker's probe flag: set by route_frame on broadcast, cleared by the worker after a fetch.
  * Returns 1 and clears the flag if a probe was pending. */
-int fci_nic_worker_probe_take(void) { return InterlockedExchange(&s_probe, 0) != 0; }
+int fci_nic_worker_probe_take(void) { return (int)InterlockedExchange(&s_probe, 0); }
 
 /* the list URL (for the worker). Returns NULL if not in LIST mode. */
 const char *fci_nic_list_url(void) { return s_list ? s_list_url : NULL; }

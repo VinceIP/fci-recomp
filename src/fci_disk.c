@@ -1,6 +1,7 @@
 /* Raw hard disk partitions: <save>\PartitionN.img starts empty and grows as the game writes; a partition
  * has its table length and no end of file, so never-written sectors read as zeros. Also movie skipping. */
 #include <windows.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -175,11 +176,56 @@ int fci_partition_length(HANDLE h, LARGE_INTEGER *length)
     return 1;
 }
 
+/* Patch the copied XML before the UI caches its glyphs. Keep archive offsets and lengths intact. */
+static void relabel_multiplayer_xml(HANDLE h, void *buffer, uint32_t bytes)
+{
+    static const char live[] = "<string enum=\"B_Live\" value=\"XBOX LIVE\"/>";
+    static const char internet[] = "<string enum=\"B_Live\" value=\"INTERNET\" />";
+    static const char system_link[] = "<string enum=\"B_SystemLink\" value=\"SYSTEM LINK\"/>";
+    static const char lan[] = "<string enum=\"B_SystemLink\" value=\"LAN\"        />";
+    _Static_assert(sizeof live == sizeof internet, "Internet row must keep its archive size");
+    _Static_assert(sizeof system_link == sizeof lan, "LAN row must keep its archive size");
+    char *cursor = buffer;
+    const char *end = cursor + bytes;
+    int common_dat = 0;
+    while (end - cursor >= (ptrdiff_t)(sizeof live - 1)) {
+        cursor = memchr(cursor, '<', (size_t)(end - cursor));
+        if (!cursor)
+            break;
+        const char *replacement = NULL;
+        size_t row_size = 0;
+        if (end - cursor >= (ptrdiff_t)(sizeof live - 1) && !memcmp(cursor, live, sizeof live - 1)) {
+            replacement = internet;
+            row_size = sizeof internet - 1;
+        } else if (end - cursor >= (ptrdiff_t)(sizeof system_link - 1) &&
+                   !memcmp(cursor, system_link, sizeof system_link - 1)) {
+            replacement = lan;
+            row_size = sizeof lan - 1;
+        }
+        if (replacement) {
+            if (!common_dat) {
+                char path[MAX_PATH];
+                if (!pak_file_name(h, path, sizeof path))
+                    return;
+                const char *base = strrchr(path, '\\');
+                if (_stricmp(base ? base + 1 : path, "common.dat"))
+                    return;
+                common_dat = 1;
+            }
+            memcpy(cursor, replacement, row_size);
+        }
+        cursor++;
+    }
+}
+
 uint32_t fci_partition_read_fill(HANDLE h, void *buf, uint32_t length, const LARGE_INTEGER *off,
                                  uint32_t status, uint32_t *got)
 {
     int p;
     ULONGLONG end;
+    extern int fci_nic_menu_mode(void);
+    if (status == 0 && *got && fci_nic_menu_mode())
+        relabel_multiplayer_xml(h, buf, *got);
     fci_pak_log_read(h, off, length, status, *got); /* inert unless RECOMP_FCI_PAK_LOG */
     if (*got >= length || (status != 0 && status != 0xC0000011u /* END_OF_FILE */) || !off)
         return status;

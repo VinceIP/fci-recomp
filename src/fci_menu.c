@@ -99,6 +99,9 @@ int fci_gate_0014EFF0(void)
     snprintf(extra, sizeof extra, ", \"elem\": %08x", hash);
     menu_log_line("main", "action", extra);
 
+    extern void fci_multiplayer_menu_action(uint32_t hash);
+    fci_multiplayer_menu_action(hash);
+
     /* B_Quit intercept: only when RECOMP_FCI_MENU_QUIT=1. */
     if (menu_quit_enabled && hash == 0x8bcdf569u) {
         menu_log_line("main", "quit", ", \"elem\": 8bcdf569, \"action\": \"exit\"");

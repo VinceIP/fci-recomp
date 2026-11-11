@@ -257,6 +257,7 @@ void fci_config_load(int *argc, char ***argv)
             menu_arg[40], punch_arg[40];
     static char *args[128];
     int n = 0, opts = 0, i, have_ini = 0, verbosity = 1, limit = 20, cap = 1;
+    int network_menu = -1;
     double rate = 30;
     char ini[MAX_PATH], *slash;
     FILE *f;
@@ -326,10 +327,7 @@ void fci_config_load(int *argc, char ***argv)
                 if (v[0])
                     snprintf(peers_arg, sizeof peers_arg, "RECOMP_FCI_NET_PEERS=%s", v);
             } else if (!_stricmp(key, "network-menu")) {
-                /* the online menu items are enabled at boot (link up, no transport); the player's pick
-                 * starts the transport. Default on for Evolution; 0 turns it off. (fci_nic.c) */
-                if (v[0] && strcmp(v, "0"))
-                    snprintf(menu_arg, sizeof menu_arg, "RECOMP_FCI_NET_MENU=1");
+                network_menu = v[0] && strcmp(v, "0");
             } else if (!_stricmp(key, "network-punch")) {
                 /* a test switch: 0 disables hole punching so every pair uses the relay (fci_nic.c) */
                 if (!strcmp(v, "0"))
@@ -372,6 +370,10 @@ void fci_config_load(int *argc, char ***argv)
     /* the network keys: one link at a time (the card refuses two and says so). network-menu is not a
      * link (no transport at boot): it does not set cap, the 30-updates lock engages on the pick. */
     {
+        if (network_menu == 1 ||
+            (network_menu < 0 && list_arg[0] && !hub_arg[0] && !lan_arg[0] && !peers_arg[0] &&
+             !_stricmp(FCI_IMAGE_FILENAME, "default.xbe")))
+            snprintf(menu_arg, sizeof menu_arg, "RECOMP_FCI_NET_MENU=1");
         char *nets[] = {hub_arg, lan_arg, list_arg, peers_arg, menu_arg, punch_arg};
         int k;
         for (k = 0; k < 6; k++)

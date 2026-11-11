@@ -101,10 +101,6 @@
     "sub_000FB0A2": [
       "gate",
       "the pre-game multiplayer action dispatcher (recomp_0023.c:27569; it tests B_SystemLink before B_Live and re-reads the hash in each): in menu mode, SYSTEM LINK starts LAN, XBOX LIVE starts the host list and is rewritten to B_SystemLink (fci_lan_menu.c)"
-    ],
-    "sub_0026A628": [
-      "gate",
-      "the string table lookup by id (recomp_0071.c:11496; returns the entry in eax): in menu mode the gate runs it and relabels the B_Live entry's UTF-16 text XBOX LIVE as INTERNET (fci_lan_menu.c)"
     ]
   },
   "evidence": "Exploratory Evolution profile: descriptor helper by masked bytes (unique match); code end = BINKDATA end (as Instincts' 0070C6E4).",

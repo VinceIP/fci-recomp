@@ -19,4 +19,6 @@
 
 #define FCI_NET_PROTO 2
 
+enum { FCI_LIST_PROBE_DISCOVERY = 1, FCI_LIST_PROBE_ENTRY = 2 };
+
 #endif
