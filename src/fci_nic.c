@@ -15,6 +15,7 @@
 #include "mmio_decode.h"
 #include "fci_image.h"
 #include "fci_frame.h"
+#include "fci_stun.h"
 #include "fci_net.h"
 #include "fci_net_worker.h"
 #include "fci_turn.h"
@@ -66,7 +67,6 @@ extern uint32_t fci_xbe_version; /* the XBE certificate's Version (fci_main.c): 
 #define PEER_EXPIRE_MS   15000
 #define TURN_OPEN_MS     1000 /* the host's datagram to a relayed guest: opens and keeps its NAT mapping */
 #define STUN_PERIOD_MS   60000
-#define STUN_MAGIC       0x2112A442u
 
 typedef enum { LP_PENDING, LP_LIVE, LP_RELAY, LP_TURN_WAIT } lp_state;
 
@@ -913,17 +913,11 @@ static void direct_knock(void)
  * card's public endpoint (the NAT mapping the punches will open) */
 static void stun_send(void)
 {
-    char buf[20];
+    uint8_t buf[20];
     if (!s_stun_srv_valid)
         return;
     s_stun_txn++;
-    /* type 0x0001 (binding request), length 0, magic, 12-byte transaction ID */
-    memcpy(buf, "\x00\x01\x00\x00", 4);
-    uint32_t m = htonl(STUN_MAGIC);
-    memcpy(buf + 4, &m, 4);
-    memset(buf + 8, 0, 12);
-    buf[8] = (char)(s_stun_txn >> 24), buf[9] = (char)(s_stun_txn >> 16);
-    buf[10] = (char)(s_stun_txn >> 8), buf[11] = (char)s_stun_txn;
+    fci_stun_build_request(buf, s_stun_txn);
     sendto(s_sock, buf, 20, 0, (const struct sockaddr *)&s_stun_srv, sizeof s_stun_srv);
 }
 
@@ -932,65 +926,29 @@ static void stun_send(void)
  * XOR-MAPPED-ADDRESS (0x0020), fall back to MAPPED-ADDRESS (0x0001). */
 static int stun_recv(const char *buf, int n, const struct sockaddr_in *from)
 {
-    uint32_t m, txn;
-    int off;
-    if (n < 20)
-        return 0;
-    if (buf[0] != 0x01 || buf[1] != 0x01)
-        return 0;
-    memcpy(&m, buf + 4, 4);
-    if (ntohl(m) != STUN_MAGIC)
-        return 0;
+    uint8_t ip[4];
+    uint16_t port;
+    int xor, r;
     /* only from the STUN server we sent to */
     if (from->sin_addr.s_addr != s_stun_srv.sin_addr.s_addr || from->sin_port != s_stun_srv.sin_port)
         return 0;
-    /* only our last transaction ID */
-    memcpy(&txn, buf + 8, 4);
-    if (txn != htonl(s_stun_txn))
+    r = fci_stun_parse_response((const uint8_t *)buf, n, s_stun_txn, ip, &port, &xor);
+    if (r != FCI_STUN_OK)
         return 0;
-    /* walk the attributes */
-    off = 20;
-    while (off + 4 <= n) {
-        uint16_t type = (uint16_t)((((uint8_t)buf[off] << 8) | (uint8_t)buf[off + 1]));
-        uint16_t len = (uint16_t)((((uint8_t)buf[off + 2] << 8) | (uint8_t)buf[off + 3]));
-        if (off + 4 + (int)len > n)
-            break;
-        if (type == 0x0020 && len == 8) {
-            /* XOR-MAPPED-ADDRESS */
-            uint16_t port = (uint16_t)((((uint8_t)buf[off + 6] << 8) | (uint8_t)buf[off + 7]) ^ 0x2112);
-            uint32_t addr;
-            memcpy(&addr, buf + off + 8, 4);
-            addr ^= htonl(STUN_MAGIC); /* addr is in network order */
-            s_stun_ep.sin_family = AF_INET;
-            s_stun_ep.sin_port = htons(port);
-            s_stun_ep.sin_addr.s_addr = addr;
-            if (!s_stun_known) {
-                s_stun_known = 1;
-                fprintf(stderr, "[FCI] network: STUN endpoint %s:%u\n", inet_ntoa(s_stun_ep.sin_addr),
-                        ntohs(s_stun_ep.sin_port));
-                fflush(stderr);
-            }
-            return 1;
-        }
-        if (type == 0x0001 && len == 8) {
-            /* MAPPED-ADDRESS (plain, not XOR) */
-            uint16_t port = (uint16_t)((((uint8_t)buf[off + 6] << 8) | (uint8_t)buf[off + 7]));
-            uint32_t addr;
-            memcpy(&addr, buf + off + 8, 4);
-            s_stun_ep.sin_family = AF_INET;
-            s_stun_ep.sin_port = htons(port);
-            s_stun_ep.sin_addr.s_addr = addr; /* already in network order */
-            if (!s_stun_known) {
-                s_stun_known = 1;
-                fprintf(stderr, "[FCI] network: STUN endpoint (MAPPED) %s:%u\n",
-                        inet_ntoa(s_stun_ep.sin_addr), ntohs(s_stun_ep.sin_port));
-                fflush(stderr);
-            }
-            return 1;
-        }
-        off += 4 + (((int)len + 3) & ~3); /* attributes are padded to 4 bytes */
+    s_stun_ep.sin_family = AF_INET;
+    s_stun_ep.sin_port = htons(port);
+    memcpy(&s_stun_ep.sin_addr.s_addr, ip, 4); /* wire order, as sin_addr holds it */
+    if (!s_stun_known) {
+        s_stun_known = 1;
+        if (xor)
+            fprintf(stderr, "[FCI] network: STUN endpoint %s:%u\n", inet_ntoa(s_stun_ep.sin_addr),
+                    ntohs(s_stun_ep.sin_port));
+        else
+            fprintf(stderr, "[FCI] network: STUN endpoint (MAPPED) %s:%u\n",
+                    inet_ntoa(s_stun_ep.sin_addr), ntohs(s_stun_ep.sin_port));
+        fflush(stderr);
     }
-    return 0;
+    return 1;
 }
 
 /* send a punch datagram (FCN1 'P' + 16-byte nonce) to a peer's endpoint (and its LAN address,
