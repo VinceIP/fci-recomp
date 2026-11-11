@@ -143,15 +143,23 @@ def test_list_no_url_then_list():
 
 def test_menu_xml_replacements_preserve_archive_offsets_and_action_ids():
     source = (Path(__file__).resolve().parents[1] / "src" / "fci_disk.c").read_text(encoding="utf-8")
+    internet_description = "Connect and play with fci-recomp players across the world"
+    lan_description = "Play with other players across your local network."
+    cases = (
+        ("live", "internet", "B_Live", "INTERNET"),
+        ("system_link", "lan", "B_SystemLink", "LAN"),
+        ("live_fci_desc_old", "live_fci_desc_new", "B_Live", internet_description),
+        ("live_evo_desc_old", "live_evo_desc_new", "B_Live", internet_description),
+        ("lan_desc_old", "lan_desc_new", "B_SystemLink", lan_description),
+        ("lan_alt_desc_old", "lan_alt_desc_new", "B_SystemLink_Alt", lan_description),
+    )
+    declarations = {f"static const char {name}" for case in cases for name in case[:2]}
     rows = {}
     for line in source.splitlines():
         declaration, sep, literal = line.strip().partition("[] = ")
-        if sep and declaration in {f"static const char {name}" for name in ("live", "internet", "system_link", "lan")}:
+        if sep and declaration in declarations:
             rows[declaration.split()[-1]] = json.loads(literal.removesuffix(";"))
-    for original, replacement, element, label in (
-        ("live", "internet", "B_Live", "INTERNET"),
-        ("system_link", "lan", "B_SystemLink", "LAN"),
-    ):
+    for original, replacement, element, label in cases:
         assert len(rows[original]) == len(rows[replacement])
         assert ElementTree.fromstring(rows[original]).get("enum") == element
         assert ElementTree.fromstring(rows[replacement]).attrib == {"enum": element, "value": label}

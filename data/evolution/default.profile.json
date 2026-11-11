@@ -98,6 +98,8 @@
       "gate",
       "per-frame join driver (recomp_0006.c:30575): refreshes the Internet browser's empty row before running the original state machine (fci_lan_menu.c)"
     ],
+    "sub_000CF7EE": ["gate", "set the native browser title at the System Link call site (fci_lan_menu.c)"],
+    "sub_000FE553": ["gate", "render host-list status on the browser page (fci_lan_menu.c)"],
     "sub_000FB0A2": [
       "gate",
       "the pre-game multiplayer action dispatcher (recomp_0023.c:27569; it tests B_SystemLink before B_Live and re-reads the hash in each): in menu mode, SYSTEM LINK starts LAN, XBOX LIVE starts the host list and is rewritten to B_SystemLink (fci_lan_menu.c)"

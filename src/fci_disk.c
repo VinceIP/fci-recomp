@@ -183,8 +183,31 @@ static void relabel_multiplayer_xml(HANDLE h, void *buffer, uint32_t bytes)
     static const char internet[] = "<string enum=\"B_Live\" value=\"INTERNET\" />";
     static const char system_link[] = "<string enum=\"B_SystemLink\" value=\"SYSTEM LINK\"/>";
     static const char lan[] = "<string enum=\"B_SystemLink\" value=\"LAN\"        />";
-    _Static_assert(sizeof live == sizeof internet, "Internet row must keep its archive size");
-    _Static_assert(sizeof system_link == sizeof lan, "LAN row must keep its archive size");
+    static const char live_fci_desc_old[] = "<string enum=\"B_Live\" value=\"Prove your skills to the world in four exciting game modes\"/>";
+    static const char live_fci_desc_new[] = "<string enum=\"B_Live\" value=\"Connect and play with fci-recomp players across the world\" />";
+    static const char live_evo_desc_old[] = "<string enum=\"B_Live\" value=\"Prove your skills to the world in five exciting game modes\"/>";
+    static const char live_evo_desc_new[] = "<string enum=\"B_Live\" value=\"Connect and play with fci-recomp players across the world\" />";
+    static const char lan_desc_old[] = "<string enum=\"B_SystemLink\" value=\"Link 2 to 16 Xbox video game systems for multiplayer mayhem\"/>";
+    static const char lan_desc_new[] = "<string enum=\"B_SystemLink\" value=\"Play with other players across your local network.\"         />";
+    static const char lan_alt_desc_old[] = "<string enum=\"B_SystemLink_Alt\" value=\"Link 2 to 14 Xbox video game systems for multiplayer mayhem\"/>";
+    static const char lan_alt_desc_new[] = "<string enum=\"B_SystemLink_Alt\" value=\"Play with other players across your local network.\"         />";
+    _Static_assert(sizeof live == sizeof internet, "Menu XML row size changed");
+    _Static_assert(sizeof system_link == sizeof lan, "Menu XML row size changed");
+    _Static_assert(sizeof live_fci_desc_old == sizeof live_fci_desc_new, "Menu XML row size changed");
+    _Static_assert(sizeof live_evo_desc_old == sizeof live_evo_desc_new, "Menu XML row size changed");
+    _Static_assert(sizeof lan_desc_old == sizeof lan_desc_new, "Menu XML row size changed");
+    _Static_assert(sizeof lan_alt_desc_old == sizeof lan_alt_desc_new, "Menu XML row size changed");
+    static const struct {
+        const char *old, *replacement;
+        size_t bytes;
+    } rows[] = {
+        {live, internet, sizeof live - 1},
+        {system_link, lan, sizeof system_link - 1},
+        {live_fci_desc_old, live_fci_desc_new, sizeof live_fci_desc_old - 1},
+        {live_evo_desc_old, live_evo_desc_new, sizeof live_evo_desc_old - 1},
+        {lan_desc_old, lan_desc_new, sizeof lan_desc_old - 1},
+        {lan_alt_desc_old, lan_alt_desc_new, sizeof lan_alt_desc_old - 1},
+    };
     char *cursor = buffer;
     const char *end = cursor + bytes;
     int common_dat = 0;
@@ -194,13 +217,12 @@ static void relabel_multiplayer_xml(HANDLE h, void *buffer, uint32_t bytes)
             break;
         const char *replacement = NULL;
         size_t row_size = 0;
-        if (end - cursor >= (ptrdiff_t)(sizeof live - 1) && !memcmp(cursor, live, sizeof live - 1)) {
-            replacement = internet;
-            row_size = sizeof internet - 1;
-        } else if (end - cursor >= (ptrdiff_t)(sizeof system_link - 1) &&
-                   !memcmp(cursor, system_link, sizeof system_link - 1)) {
-            replacement = lan;
-            row_size = sizeof lan - 1;
+        for (size_t i = 0; i < sizeof rows / sizeof *rows; i++) {
+            if ((size_t)(end - cursor) >= rows[i].bytes && !memcmp(cursor, rows[i].old, rows[i].bytes)) {
+                replacement = rows[i].replacement;
+                row_size = rows[i].bytes;
+                break;
+            }
         }
         if (replacement) {
             if (!common_dat) {

@@ -181,6 +181,8 @@ REPLACE = {
         "main menu action handler: logs the action hash for RECOMP_FCI_MENU_LOG; "
         "RECOMP_FCI_MENU_QUIT=1 intercepts B_Quit (0x8bcdf569) and exits (fci_menu.c)",
     ),
+    "sub_00109670": ("gate", "set the native browser title at the System Link call site (fci_lan_menu.c)"),
+    "sub_001536F0": ("gate", "render host-list status on the browser page (fci_lan_menu.c)"),
     "sub_00148170": (
         "prehook",
         "MP pause menu action handler: logs the action hash for RECOMP_FCI_MENU_LOG (fci_menu.c)",
