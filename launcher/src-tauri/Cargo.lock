@@ -979,7 +979,7 @@ checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
 name = "fci-launcher"
-version = "0.2.4"
+version = "0.3.0-beta.1"
 dependencies = [
  "chrono",
  "serde",

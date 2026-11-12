@@ -1,10 +1,28 @@
 # Changelog
 
-## [Unreleased]
+## [0.3.0-beta.1] - unreleased
+
+Private beta of online multiplayer. Draft: edited as the beta goes.
+
+### Added
+
+- Online multiplayer for Instincts and Evolution. Multiplayer > Internet lists matches from the fci-recomp match list, and hosting a match lists yours. Players connect directly when their networks allow it, and through a relay when they don't (phone hotspots, strict NATs, some VPNs).
+- Local network play: System Link between PCs and Steam Decks on the same network, under Multiplayer > Local Network.
+- The match browser shows whether the internet match list is reachable, and why a match can't be joined (for example LIST OFFLINE or HOST UNREACHABLE).
+- Players only see matches from the same game and disc version, running a compatible build.
+- A Network section in fci.ini and the launcher's settings, with the internet match list's address. Leaving it empty turns internet play off.
+- Every session now keeps its own log, including sessions that ended normally, so problems that aren't crashes can be reported too. The last 3 sessions are kept by default (`log-limit`).
 
 ### Fixed
 
-- Evolution: after installing into a new folder, loading could hang for good (on Start, or loading a System Link map), because the game rebuilt its music cache while it was playing from it. Game files now keep one fixed time, as on the disc, and a cache from an older install is cleared once.
+- Fixed saves being reported as damaged after closing the game while it was saving (#59). Closing the game now waits for a save in progress to finish.
+- Fixed Evolution loads hanging for good after installing into a new folder (on Start, or loading a System Link map).
+
+### Known issues
+
+- Players are named after their game profile.
+- Instincts online play has had less testing than Evolution.
+- Joining by IP address isn't available yet; matches are found through the match list or on the local network.
 
 ## [0.2.4] - 2026-11-07
 

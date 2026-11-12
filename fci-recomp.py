@@ -40,7 +40,7 @@ import sys
 import time
 import traceback
 
-VERSION = "0.2.4"
+VERSION = "0.3.0-beta.1"
 REPO = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO / "tools"))
 import events  # noqa: E402

@@ -95,13 +95,18 @@ pub fn save_state(state: &State) -> Result<(), String> {
     std::fs::write(state_file(), text).map_err(|e| format!("saving {}: {e}", state_file().display()))
 }
 
-/// "0.2.1" as numbers, for comparing; anything after the numbers ("-rc1") is ignored
+/// "0.2.1" as numbers, for comparing, then 1 for a release and 0 for a pre-release ("0.3.0-beta.1"), so
+/// a beta's launcher sees the release of the same numbers as newer
 pub fn version_key(v: &str) -> Vec<u64> {
-    v.trim_start_matches('v')
+    let v = v.trim_start_matches('v');
+    let numbers = v.split('-').next().unwrap_or("");
+    let mut key: Vec<u64> = numbers
         .split(|c: char| !c.is_ascii_digit())
         .take_while(|s| !s.is_empty())
         .map(|s| s.parse().unwrap_or(0))
-        .collect()
+        .collect();
+    key.push(if v.contains('-') { 0 } else { 1 });
+    key
 }
 
 pub fn newer(a: &str, b: &str) -> bool {
@@ -260,5 +265,13 @@ mod tests {
         std::env::set_var("FCI_LAUNCHER_ROOT", &target);
         assert_eq!(current_source().unwrap().path, copied); // the moved launcher finds the release
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_release_is_newer_than_its_beta() {
+        assert!(newer("0.3.0", "0.3.0-beta.1"));
+        assert!(newer("0.3.0-beta.1", "0.2.4"));
+        assert!(newer("0.2.10", "0.2.9"));
+        assert!(!newer("v0.2.4", "0.2.4"));
     }
 }
