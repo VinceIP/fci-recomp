@@ -838,12 +838,19 @@ static int peer_by_channel(int channel)
     return -1;
 }
 
-static int peer_by_ip(uint32_t ip)
+/* the peer at this address and port; else the only peer at this IP (its NAT moved the port); else -1,
+ * also when two peers share the IP and neither has this port (the frame cannot be told apart) */
+static int peer_by_addr(const struct sockaddr_in *a)
 {
-    for (int i = 0; i < s_npeers; i++)
-        if (s_peers[i].addr.sin_addr.s_addr == ip)
-            return i;
-    return -1;
+    int i, at_ip = -1, n_ip = 0;
+    for (i = 0; i < s_npeers; i++)
+        if (s_peers[i].addr.sin_addr.s_addr == a->sin_addr.s_addr) {
+            if (s_peers[i].addr.sin_port == a->sin_port)
+                return i;
+            at_ip = i;
+            n_ip++;
+        }
+    return n_ip == 1 ? at_ip : -1;
 }
 
 /* the peer's port changed: its old channel stays bound to the old address until it lapses
@@ -887,7 +894,7 @@ static void handle_data_indication(const char *d, int n)
     if (!data)
         return;
     {
-        int pi = peer_by_ip(peer.sin_addr.s_addr);
+        int pi = peer_by_addr(&peer);
         if (pi < 0)
             return;
         if (ntohs(s_peers[pi].addr.sin_port) != ntohs(peer.sin_port))
@@ -1081,12 +1088,12 @@ int fci_turn_add_peer(const struct sockaddr_in *peer)
     int i;
     if (s_state != FCI_TURN_READY)
         return -1;
+    /* by address and port: two hosts behind one public IP are two peers (a moved port is found by
+     * handle_data_indication, from the peer's own traffic) */
     for (i = 0; i < s_npeers; i++)
-        if (s_peers[i].addr.sin_addr.s_addr == peer->sin_addr.s_addr) {
-            if (s_peers[i].addr.sin_port != peer->sin_port)
-                peer_rebind(i, (uint16_t)ntohs(peer->sin_port));
+        if (s_peers[i].addr.sin_addr.s_addr == peer->sin_addr.s_addr
+            && s_peers[i].addr.sin_port == peer->sin_port)
             return s_peers[i].channel;
-        }
     if (s_npeers >= TURN_PEERS || s_next_channel > TURN_CHANNEL_LAST)
         return -1;
     s_peers[s_npeers].addr = *peer;

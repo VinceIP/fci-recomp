@@ -20,6 +20,7 @@
 #include "fci_net.h"
 #include "fci_net_worker.h"
 #include "fci_json.h"
+#include "fci_turn.h"
 
 /* the NIC's worker API (fci_nic.c): called under s_lock */
 extern int fci_nic_list_add_peer(const char *endpoint, const char *local, const uint8_t mac[6],
@@ -37,7 +38,7 @@ extern int fci_nic_list_turn_need_take(void);
 extern int fci_nic_list_turn_ready_take(void);
 extern int fci_nic_list_turn_wait(uint8_t *nonce);
 extern int fci_nic_list_turn_start(const char *hostport, const char *user, const char *pass);
-extern int fci_nic_list_turn_poll(char *ep, int len);
+extern int fci_nic_list_turn_post_take(uint8_t nonce[16], char *ep, int len);
 extern void fci_nic_list_turn_fail(void);
 extern int fci_nic_list_turn_peer(const uint8_t nonce[16], const uint8_t mac[6], const char *endpoint);
 extern void fci_nic_browse_clear_dropped(void); /* Q29 round 4: clear the dropped counter */
@@ -634,9 +635,6 @@ static void on_host_obj(const char *obj, int len)
 
 /* --- guest TURN: mint the credential when a punch fails, post the relayed connect when ready --- */
 
-static char s_turn_host_id[33];  /* the host the in-flight mint is for */
-static uint8_t s_turn_nonce[16]; /* the nonce the in-flight mint is under (the relayed connect reuses it) */
-
 /* a peer is in LP_TURN_WAIT: POST /v1/turn for its credential and start the allocation. The mint
  * is keyed by host id and nonce (fake_hostlist.py): the relayed connect, with the same nonce and
  * relay:true, is accepted only for a minted guest. */
@@ -644,11 +642,16 @@ static void turn_mint(void)
 {
     SRWLOCK *lock = fci_nic_lock();
     uint8_t nonce[16];
-    char buf[256], resp[1024], hostport[128], user[128], pass[128], nhex[33];
+    char buf[256], resp[1024], hostport[128], user[128], pass[128], nhex[33], host_id[33];
     int n, status, found = 0;
     const char *base;
 
     AcquireSRWLockExclusive(lock);
+    n = fci_turn_state();
+    if (n == FCI_TURN_ALLOCATING || n == FCI_TURN_READY) {
+        ReleaseSRWLockExclusive(lock);
+        return; /* the allocation serves this peer too: the tick gives it a channel, no new credential */
+    }
     if (!fci_nic_list_turn_wait(nonce)) {
         ReleaseSRWLockExclusive(lock);
         return; /* the peer expired in the meantime: nothing to mint for */
@@ -657,8 +660,7 @@ static void turn_mint(void)
 
     for (n = 0; n < s_conn_n; n++) /* the host id: the connect that seeded this nonce */
         if (!memcmp(s_conn_nonce[n], nonce, 16)) {
-            snprintf(s_turn_host_id, sizeof s_turn_host_id, "%s", s_conn_id[n]);
-            memcpy(s_turn_nonce, nonce, 16);
+            snprintf(host_id, sizeof host_id, "%s", s_conn_id[n]);
             found = 1;
             break;
         }
@@ -676,8 +678,7 @@ static void turn_mint(void)
     base = fci_nic_list_url();
     if (!base)
         return;
-    snprintf(buf, sizeof buf, "{\"id\":\"%s\",\"nonce\":\"%s\",\"token\":\"%s\"}", s_turn_host_id, nhex,
-             s_identity);
+    snprintf(buf, sizeof buf, "{\"id\":\"%s\",\"nonce\":\"%s\",\"token\":\"%s\"}", host_id, nhex, s_identity);
     if (http_request(base, "POST", "/v1/turn", buf, resp, sizeof resp, &status) != 0) {
         log_line("turn mint failed (no response)");
         AcquireSRWLockExclusive(lock);
@@ -744,40 +745,53 @@ static void turn_mint(void)
     log_line("turn mint ok (%s)", hostport);
 }
 
-/* the allocation is ready and the peer is relayed: POST /v1/connect with the relayed address and
- * relay:true. The host's worker turns its peer live at that address (fci_nic_list_turn_peer). */
+/* the allocation is ready: POST /v1/connect with our relayed address and relay:true to every relayed
+ * host not yet told, each under its own connect's nonce (one allocation serves them all; the Worker takes
+ * a relayed connect from a guest that minted lately for a host it connected to). The host's worker turns
+ * its peer live at that address (fci_nic_list_turn_peer). */
 static void turn_post_relay(void)
 {
     SRWLOCK *lock = fci_nic_lock();
-    char ep[64], buf[512], resp[256], macstr[32], nhex[33];
-    int n, status;
-    const char *base;
+    char ep[64], buf[512], resp[256], macstr[32], nhex[33], host[33];
+    uint8_t nonce[16];
+    int n, status, took;
+    const char *base = fci_nic_list_url();
 
-    AcquireSRWLockExclusive(lock);
-    n = fci_nic_list_turn_poll(ep, sizeof ep);
-    ReleaseSRWLockExclusive(lock);
-    if (n != 1) {
-        log_line("relay connect not posted: the allocation is not ready (%d)", n);
-        return;
-    }
-    base = fci_nic_list_url();
     if (!base) {
         log_line("relay connect not posted: no list url");
         return;
     }
     fci_nic_mac_str(macstr, sizeof macstr);
-    for (n = 0; n < 16; n++)
-        snprintf(nhex + n * 2, 3, "%02x", s_turn_nonce[n]);
-    nhex[32] = 0;
-    snprintf(buf, sizeof buf,
-             "{\"id\":\"%s\",\"endpoint\":\"%s\",\"nonce\":\"%s\",\"mac\":\"%s\",\"token\":\"%s\","
-             "\"relay\":true}",
-             s_turn_host_id, ep, nhex, macstr, s_identity);
-    if (http_request(base, "POST", "/v1/connect", buf, resp, sizeof resp, &status) != 0 || status != 200) {
-        log_line("relay connect to %s failed (status %d)", s_turn_host_id, status);
-        return;
+    for (;;) {
+        AcquireSRWLockExclusive(lock);
+        took = fci_nic_list_turn_post_take(nonce, ep, sizeof ep);
+        ReleaseSRWLockExclusive(lock);
+        if (!took)
+            return;
+        host[0] = 0;
+        for (n = 0; n < s_conn_n; n++) /* the host id: the connect that seeded this nonce */
+            if (!memcmp(s_conn_nonce[n], nonce, 16)) {
+                snprintf(host, sizeof host, "%s", s_conn_id[n]);
+                break;
+            }
+        for (n = 0; n < 16; n++)
+            snprintf(nhex + n * 2, 3, "%02x", nonce[n]);
+        nhex[32] = 0;
+        if (!host[0]) {
+            log_line("relay connect not posted: no host id for nonce %.8s", nhex);
+            continue;
+        }
+        snprintf(buf, sizeof buf,
+                 "{\"id\":\"%s\",\"endpoint\":\"%s\",\"nonce\":\"%s\",\"mac\":\"%s\",\"token\":\"%s\","
+                 "\"relay\":true}",
+                 host, ep, nhex, macstr, s_identity);
+        if (http_request(base, "POST", "/v1/connect", buf, resp, sizeof resp, &status) != 0
+            || status != 200) {
+            log_line("relay connect to %s failed (status %d)", host, status);
+            continue;
+        }
+        log_line("relay connect posted (%s at %s)", host, ep);
     }
-    log_line("relay connect posted (%s at %s)", s_turn_host_id, ep);
 }
 
 static void guest_fetch(void)

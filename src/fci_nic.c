@@ -79,6 +79,7 @@ typedef struct {
     lp_state state;
     int relay;            /* the relay socket (s_relsock) when in the relay room; -1 otherwise */
     int turn_ch;          /* the TURN channel (fci_turn) when the guest relays to this peer; -1 else */
+    int turn_post;        /* 1 when this relayed peer's host has not yet been sent our relayed address */
     int guest;            /* 1 on the guest side (we connected to this host): only a guest asks for TURN */
     int via_turn;         /* 1 when this peer's frames arrive over a TURN relay (the host side):
                               the source is the TURN server, so they are matched by MAC, not address */
@@ -1123,6 +1124,7 @@ int fci_nic_list_add_peer(const char *endpoint, const char *local, const uint8_t
         }
         p->relay = -1;
         p->turn_ch = -1;
+        p->turn_post = 0;
         p->via_turn = 0;
         /* the peer's LAN address (when the Worker forwarded one) */
         p->has_local = 0;
@@ -1261,17 +1263,22 @@ int fci_nic_list_turn_start(const char *hostport, const char *user, const char *
     return fci_turn_start(hostport, user, pass);
 }
 
-/* 0: allocating, 1: ready (the relayed address in ep), 2: failed. The ready/failed outcome is also
- * applied to the waiting peer by the tick (fci_turn_stop on failure). */
-int fci_nic_list_turn_poll(char *ep, int len)
+/* the next relayed peer whose host has not been sent our relayed address: its nonce (the worker finds
+ * the host id by it) and our relayed address in ep. 1 when one was taken (and marked posted), else 0. */
+int fci_nic_list_turn_post_take(uint8_t nonce[16], char *ep, int len)
 {
     struct sockaddr_in a;
-    int st = fci_turn_state();
-    if (st == FCI_TURN_READY && fci_turn_relayed(&a)) {
-        snprintf(ep, (size_t)len, "%s:%u", inet_ntoa(a.sin_addr), ntohs(a.sin_port));
-        return 1;
-    }
-    return st == FCI_TURN_FAILED ? 2 : 0;
+    int i;
+    if (fci_turn_state() != FCI_TURN_READY || !fci_turn_relayed(&a))
+        return 0;
+    for (i = 0; i < s_nlpeers; i++)
+        if (s_lpeers[i].state == LP_RELAY && s_lpeers[i].turn_ch >= 0 && s_lpeers[i].turn_post) {
+            s_lpeers[i].turn_post = 0;
+            memcpy(nonce, s_lpeers[i].nonce, 16);
+            snprintf(ep, (size_t)len, "%s:%u", inet_ntoa(a.sin_addr), ntohs(a.sin_port));
+            return 1;
+        }
+    return 0;
 }
 
 /* the mint was refused (503/403/429): the waiting peer falls back to the hub relay, if set */
@@ -1322,6 +1329,7 @@ int fci_nic_list_turn_peer(const uint8_t nonce[16], const uint8_t mac[6], const 
         s_lpeer_dropped = 0; /* a peer going live clears the dropped counter (Q29 r4) */
         p->relay = -1;
         p->turn_ch = -1;
+        p->turn_post = 0;
         p->via_turn = 1; /* its endpoint is the guest's relayed address */
         p->has_local = 0;
         p->next_punch = now; /* the tick opens our NAT to the relayed address */
@@ -1347,6 +1355,7 @@ int fci_nic_list_turn_peer(const uint8_t nonce[16], const uint8_t mac[6], const 
         p->report_receipt[0] = 0;
         p->relay = -1;
         p->turn_ch = -1;
+        p->turn_post = 0;
         p->via_turn = 1; /* its endpoint is the guest's relayed address */
         p->has_local = 0;
         p->next_punch = now; /* the tick opens our NAT to the relayed address */
@@ -1500,18 +1509,33 @@ static void receive_turn(void)
             continue;
         }
         n -= 5;
-        for (i = 0; i < s_nlpeers; i++) {
-            lpeer_t *p = &s_lpeers[i];
-            if (p->state != LP_RELAY || p->turn_ch < 0)
-                continue;
-            /* the peer's address as fci_turn reports it (the host's real address; a NAT rebind may
-             * move the port), then the pre-seeded source MAC, as receive_relays does */
-            p->endpoint = from;
-            if (!(f[6] & 1) && !memcmp(p->mac, f + 6, 6)) { /* the source: no card sends from a group address */
-                ok = 1;
-                p->last_frame = GetTickCount64();
+        {
+            /* the relayed peer at the address fci_turn reports (the host's real address); else the only
+             * one at that IP (a NAT rebind moved its port); then its pre-seeded source MAC, as
+             * receive_relays does. Several hosts may be relayed through the one allocation. */
+            lpeer_t *p = NULL;
+            int n_ip = 0;
+            for (i = 0; i < s_nlpeers; i++) {
+                lpeer_t *q = &s_lpeers[i];
+                if (q->state != LP_RELAY || q->turn_ch < 0
+                    || q->endpoint.sin_addr.s_addr != from.sin_addr.s_addr)
+                    continue;
+                if (q->endpoint.sin_port == from.sin_port) {
+                    p = q;
+                    n_ip = 1;
+                    break;
+                }
+                p = q;
+                n_ip++;
             }
-            break; /* the guest has one relayed peer */
+            if (p && n_ip == 1) {
+                p->endpoint = from;
+                if (!(f[6] & 1)
+                    && !memcmp(p->mac, f + 6, 6)) { /* the source: no card sends from a group address */
+                    ok = 1;
+                    p->last_frame = GetTickCount64();
+                }
+            }
         }
         if (!ok) {
             if (!s_stray++) {
@@ -1990,6 +2014,7 @@ static void list_tick(ULONGLONG now)
                 } else {
                     p->state = LP_RELAY;
                     p->turn_ch = ch;
+                    p->turn_post = 1; /* each relayed host gets its own relayed connect (the worker) */
                     p->relay = -1;
                     p->last_frame = now;
                     fprintf(stderr, "[FCI] network: turn ready, relayed %s:%u\n", inet_ntoa(a.sin_addr),
