@@ -42,6 +42,7 @@ static const struct {
         {"gfx-object-lod-distance", "RECOMP_CVAR_e_obj_lod_ratio"},
         {"gfx-foliage-lod", "RECOMP_CVAR_e_obj_sprite_switch_dist_ratio"},
         {"controls-mouse-keyboard", "RECOMP_KEYBOARD"},
+        {"controls-vibration", "RECOMP_VIBRATION"},
         {"controls-walk-speed", "RECOMP_WALK_SCALE"},
         {"controls-wheel-hold-ms", "RECOMP_WHEEL_HOLD_MS"},
         {"controls-mouse-sensitivity", "RECOMP_MOUSE_SENSITIVITY"},

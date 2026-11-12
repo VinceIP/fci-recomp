@@ -11,6 +11,7 @@ Private beta of online multiplayer. Draft: edited as the beta goes.
 - The match browser shows whether the internet match list is reachable, and why a match can't be joined (for example LIST OFFLINE or HOST UNREACHABLE).
 - Players only see matches from the same game and disc version, running a compatible build.
 - A Network section in fci.ini and the launcher's settings, with the internet match list's address. Leaving it empty turns internet play off.
+- Controller vibration: the game's rumble now reaches your controller. Turn it off with `controls-vibration = 0` ("Controller vibration" in the launcher).
 - In multiplayer, aim assist is off while you play with mouse and keyboard, and comes back as soon as you pick up a gamepad, even mid-match. Single-player is unchanged. To keep it with the mouse, set `controls-mouse-aim-assist = 1` ("Aim assist with the mouse" in the launcher).
 - Every session now keeps its own log, including sessions that ended normally, so problems that aren't crashes can be reported too. The last 3 sessions are kept by default (`log-limit`).
 

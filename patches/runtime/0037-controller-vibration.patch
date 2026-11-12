@@ -1,0 +1,95 @@
+Subject: Controller vibration: the title's rumble reaches the host pad
+
+The USB controller model accepted the title's output reports and discarded them, so no game rumble reached
+the player's controller. The pad's 6-byte output report (left and right motor speeds) now goes to
+xbox_InputSetState, from the interrupt OUT endpoint and from a control SET_REPORT's data stage. Unchanged
+speeds are not resent. RECOMP_VIBRATION=0 turns it off (fci-recomp: controls-vibration in fci.ini).
+
+---
+diff --git a/src/usb/ohci.c b/src/usb/ohci.c
+index 08fedec..990d2cd 100644
+--- a/src/usb/ohci.c
++++ b/src/usb/ohci.c
+@@ -644,9 +644,16 @@ static uint32_t ohci_do_td(OhciController *hc, uint32_t ed0, uint32_t td)
+          * pad unresponsive. */
+         moved = len;
+         if (endpoint == 0) {
++            /* SET_REPORT (class, interface: 21 09): its data stage is an
++             * output report, as on the interrupt endpoint */
++            if (g_setup_pending && len > 0 && g_setup.bmRequestType == 0x21
++                && g_setup.bRequest == 0x09 && guest_ptr(cbp, (uint32_t)len))
++                usb_gamepad_output(pad, guest_ptr(cbp, (uint32_t)len), len);
+             g_setup_pending = 0;
+             s_n_out_ep0++;
+         } else {
++            if (len > 0 && guest_ptr(cbp, (uint32_t)len))
++                usb_gamepad_output(pad, guest_ptr(cbp, (uint32_t)len), len);
+             s_n_out_other++;
+         }
+     }
+diff --git a/src/usb/usb_gamepad.c b/src/usb/usb_gamepad.c
+index b07209e..f5334bc 100644
+--- a/src/usb/usb_gamepad.c
++++ b/src/usb/usb_gamepad.c
+@@ -224,6 +224,46 @@ int usb_gamepad_control(int pad, const UsbSetup *setup, uint8_t *out, int max)
+     return -1;
+ }
+ 
++/* ---- the output report (rumble) ---------------------------------------- */
++
++#include "../input/xinput_xbox.h"
++
++/*
++ * The Xbox pad's output report is 6 bytes: report id 0, length 6, then the
++ * left (low-frequency) and right (high-frequency) motor speeds, 16 bits each,
++ * little-endian -- XInput's two motors, in XInput's order. RECOMP_VIBRATION=0
++ * keeps the host pad still.
++ */
++void usb_gamepad_output(int pad, const uint8_t *data, int len)
++{
++    static int enabled = -1;
++    static uint32_t last[4] = { 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu };
++    XBOX_VIBRATION v;
++    uint32_t both;
++
++    if (enabled < 0) {
++        const char *e = getenv("RECOMP_VIBRATION");
++        enabled = !(e && *e == '0');
++    }
++    if (!enabled || !data || len < 6 || data[0] != 0 || data[1] < 6)
++        return;
++    v.wLeftMotorSpeed  = (WORD)(data[2] | (data[3] << 8));
++    v.wRightMotorSpeed = (WORD)(data[4] | (data[5] << 8));
++    both = (uint32_t)v.wLeftMotorSpeed | ((uint32_t)v.wRightMotorSpeed << 16);
++    if (both == last[pad & 3])
++        return;   /* titles resend the same speeds every frame */
++    last[pad & 3] = both;
++    if (both) {
++        static int said;
++        if (!said++) {
++            fprintf(stderr, "  [USB] pad %d rumble: left %u right %u (the first; later ones are not logged)\n",
++                    pad, v.wLeftMotorSpeed, v.wRightMotorSpeed);
++            fflush(stderr);
++        }
++    }
++    xbox_InputSetState((DWORD)(pad & 3), &v);
++}
++
+ /* ---- the input report -------------------------------------------------- */
+ 
+ /* The host's own pad, through the layer that already maps one to XInput.
+diff --git a/src/usb/usb_gamepad.h b/src/usb/usb_gamepad.h
+index 969d5b4..7cb6544 100644
+--- a/src/usb/usb_gamepad.h
++++ b/src/usb/usb_gamepad.h
+@@ -36,6 +36,10 @@ int usb_gamepad_control(int pad, const UsbSetup *setup, uint8_t *out, int max);
+ /* Fill in pad `pad`'s 20-byte input report. Returns the byte count written. */
+ int usb_gamepad_report(int pad, uint8_t *out, int max);
+ 
++/* An output report from the title (rumble), on the interrupt OUT endpoint or
++ * as a control SET_REPORT's data: passed to the host pad. */
++void usb_gamepad_output(int pad, const uint8_t *data, int len);
++
+ /* The address the host assigned pad `pad` with SET_ADDRESS, 0 until it does,
+  * and whether it has been configured. */
+ uint8_t usb_gamepad_address(int pad);
