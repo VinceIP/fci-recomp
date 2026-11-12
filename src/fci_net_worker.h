@@ -18,7 +18,10 @@ void fci_net_worker_stop(void);
  * instead of waiting for its TTL. */
 void fci_net_leave(void);
 
-/* XNetRegisterKey (q5-hosting-hook.md): logs the session key, and whether it is this host's */
+/* XNetRegisterKey: logs the session key, and whether it is this host's */
 void fci_prehook_0051CDD4(void);
+
+/* 1 once this process hosted or joined a System Link match (a key was registered) */
+int fci_net_in_session(void);
 
 #endif

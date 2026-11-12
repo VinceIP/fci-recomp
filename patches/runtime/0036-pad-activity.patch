@@ -1,0 +1,29 @@
+Subject: The real pad's state to the project, before the keyboard is merged over it
+
+fci-recomp turns the game's aim assist off in multiplayer while the player uses mouse and keyboard and
+back on when they pick up the pad (src/fci_input.c, src/fci_aim.c). After the merge the game's state
+cannot tell the two apart, so port 0's real pad state is handed to fci_input_pad first.
+
+---
+diff --git a/src/input/xinput_device.c b/src/input/xinput_device.c
+index 2b591f8..2c36ba7 100644
+--- a/src/input/xinput_device.c
++++ b/src/input/xinput_device.c
+@@ -85,6 +85,7 @@ static SHORT axis_from_keys(int negative, int positive)
+ }
+ 
+ void fci_kbm_state(XBOX_INPUT_STATE *pState);   /* src/fci_input.c */
++void fci_input_pad(const XBOX_INPUT_STATE *pState); /* src/fci_input.c: the real pad, before the merge */
+ static void keyboard_state(XBOX_INPUT_STATE *pState)
+ {
+     static DWORD packet;
+@@ -183,6 +184,9 @@ DWORD xbox_InputGetState(DWORD dwPort, XBOX_INPUT_STATE *pState)
+     pState->Gamepad.sThumbRX = xi_state.Gamepad.sThumbRX;
+     pState->Gamepad.sThumbRY = xi_state.Gamepad.sThumbRY;
+ 
++    if (dwPort == 0)
++        fci_input_pad(pState);
++
+     /* Merge the keyboard on top rather than only standing in for a missing
+      * pad.
+      *

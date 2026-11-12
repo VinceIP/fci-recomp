@@ -126,7 +126,7 @@ static int parse_input(const char *s)
 static int binds[C_COUNT][MAX_BINDS];
 static struct {
     double sens, degrees, y_scale, curve, deadzone, walk;
-    int aim, invert_y, window_ms, capture, wheel_ms, log;
+    int aim, invert_y, window_ms, capture, wheel_ms, log, kbm, mp_assist;
 } opt;
 
 static double opt_num(const char *name, double fallback)
@@ -184,6 +184,8 @@ static BOOL CALLBACK load_config(PINIT_ONCE once, PVOID param, PVOID *ctx)
     opt.walk = opt_num("RECOMP_WALK_SCALE", 0.5);
     opt.wheel_ms = (int)opt_num("RECOMP_WHEEL_HOLD_MS", 80);
     opt.log = opt_num("RECOMP_INPUT_LOG", 0) != 0;
+    opt.kbm = opt_num("RECOMP_KEYBOARD", 0) != 0;
+    opt.mp_assist = opt_num("RECOMP_MOUSE_AIM_ASSIST", 0) != 0;
     if (opt.curve <= 0)
         opt.curve = 1.0;
     if (opt.window_ms < 4)
@@ -223,11 +225,60 @@ static struct {
 static unsigned motion_head;
 static SRWLOCK motion_lock = SRWLOCK_INIT;
 
+/* The device in use, for the multiplayer aim assist (fci_aim.c):
+ * the one with input now while the other has been idle a moment; both at once keep the last choice. */
+#define DEVICE_IDLE_MS   250
+#define MOUSE_DELIBERATE 4 /* mouse counts within 100 ms */
+static volatile LONGLONG kbm_at, pad_at;
+
+/* the real pad on port 0, before the keyboard is merged over it (patches/runtime/0036-pad-activity.patch).
+ * Only a change counts: a press, or a stick or trigger crossing its threshold, so a resting thumb or a
+ * drifting stick does not hold the pad as the device in use. */
+void fci_input_pad(const fci_input_state *s)
+{
+    static uint32_t was;
+    const fci_gamepad *g = &s->g;
+    uint32_t now = g->wButtons & 0xFFu;
+    for (int i = 0; i < 8; i++)
+        if (g->analog[i] > 30) /* XInput's trigger threshold; the face buttons are 0 or 255 */
+            now |= 1u << (8 + i);
+    /* XInput's dead zones: left 7849, right 8689 */
+    now |= (abs(g->lx) > 7849) << 16 | (abs(g->ly) > 7849) << 17 | (abs(g->rx) > 8689) << 18
+           | (abs(g->ry) > 8689) << 19;
+    if (now & ~was)
+        pad_at = (LONGLONG)GetTickCount64();
+    was = now;
+}
+
+/* 1 while the player uses mouse and keyboard, 0 on the pad (or before either was used) */
+int fci_input_on_kbm(void)
+{
+    static int on_kbm;
+    LONGLONG now = (LONGLONG)GetTickCount64(), k = kbm_at, p = pad_at;
+    config();
+    if (!opt.kbm)
+        return 0;
+    if (!on_kbm && k && now - k < DEVICE_IDLE_MS && now - p >= DEVICE_IDLE_MS)
+        on_kbm = 1;
+    else if (on_kbm && p && now - p < DEVICE_IDLE_MS && now - k >= DEVICE_IDLE_MS)
+        on_kbm = 0;
+    return on_kbm;
+}
+
+/* RECOMP_MOUSE_AIM_ASSIST=1 keeps the game's aim assist with mouse and keyboard in multiplayer */
+int fci_input_mp_assist_kept(void)
+{
+    config();
+    return opt.mp_assist;
+}
+
 /* a key (virtual key, left/right resolved by the caller) or mouse button: the generic Shift/Ctrl/Alt follow */
 void fci_input_key(int code, int is_down)
 {
     if (code < 0 || code >= IN_COUNT)
         return;
+    if (is_down)
+        kbm_at = (LONGLONG)GetTickCount64();
     InterlockedExchange(&down[code], is_down ? 1 : 0);
     if (code == VK_LSHIFT || code == VK_RSHIFT)
         InterlockedExchange(&down[VK_SHIFT], down[VK_LSHIFT] | down[VK_RSHIFT]);
@@ -246,6 +297,8 @@ void fci_input_release_all(void)
 void fci_input_wheel(int notches)
 {
     config();
+    if (notches)
+        kbm_at = (LONGLONG)GetTickCount64();
     if (notches)
         wheel_until[notches > 0 ? 0 : 1] = (LONGLONG)GetTickCount64() + opt.wheel_ms;
 }
@@ -278,6 +331,16 @@ int fci_input_aim(float *yaw, float *pitch)
 
 static void mouse_motion(int dx, int dy)
 {
+    static LONGLONG bucket_at;
+    static int bucket;
+    LONGLONG now = (LONGLONG)GetTickCount64();
+    if (now - bucket_at > 100) {
+        bucket_at = now;
+        bucket = 0;
+    }
+    bucket += abs(dx) + abs(dy);
+    if (bucket >= MOUSE_DELIBERATE) /* less in 100 ms is a desk bump, not a player picking up the mouse */
+        kbm_at = now;
     if (aim_live()) {
         InterlockedAdd(&aim_dx, dx);
         InterlockedAdd(&aim_dy, dy);

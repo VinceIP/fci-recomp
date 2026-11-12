@@ -88,7 +88,7 @@
     ],
     "sub_003D02D4": [
       "prehook",
-      "XNetRegisterKey (Instincts' 0051CDD4, research qwen/notes/q5-hosting-hook.md): logs the session key (fci_net_worker.c)",
+      "XNetRegisterKey (Instincts' 0051CDD4): logs the session key; a host or a joining guest is in a System Link match (fci_net_worker.c)",
       "0051CDD4"
     ],
     "sub_00063F01": [
@@ -112,6 +112,14 @@
   },
   "evidence": "Exploratory Evolution profile: descriptor helper by masked bytes (unique match); code end = BINKDATA end (as Instincts' 0070C6E4).",
   "constants": {
+    "FCI_AIM_SETTINGS": [
+      "0x0056B594",
+      "the console settings object: sub_00030CB2's aim assist gate reads cl_aimingHelper through it each frame (recomp_0003.c:17527)"
+    ],
+    "FCI_AIM_HELPER_SLOT": [
+      "0x000000A0",
+      "cl_aimingHelper's cvar in the settings object (registered with name 004AD9A4, stored at +0xA0)"
+    ],
     "FCI_GAMEVIEW_INPUT": [
       "0x000008C8",
       "the view's ViewInput block: Camera_BuildViews passes view+0x8C8 to Player_ProcessInput (000B9056)"

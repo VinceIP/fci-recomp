@@ -78,3 +78,18 @@ Checks (tools/game_driver.py `mouse:dx:dy`, which writes "mouse dx dy" to RECOMP
   path.
 - What the vehicle actors use in place of `Player_ProcessInput` (direct aim falls back to the
   stick there).
+
+## Aim assist (cl_aimingHelper)
+
+The game's aim helper is one console variable, read every frame by the look code; fci_aim.c turns it off
+in multiplayer while mouse and keyboard are in use (2026-11-12, read in the lifts).
+
+| | Instincts | Evolution |
+|---|---|---|
+| Created | `Console_CreateVariable` (001FD9E0) with name 005F9B44, stored at settings+0x9C (`recomp_0005.c`, the store after the call) | 0017ED53 with name 004AD9A4, stored at settings+0xA0 (`recomp_0006.c:10806`) |
+| Settings object | `MEM32(006B3984)` | `MEM32(0056B594)` |
+| Read | `Look_ComputeTurn` 0003D450: `MEM32(MEM32(cvar+0x10))`, 0 skips the scaling (`recomp_0003.c:19950`) | 00030CB2 at 00030F8B, same chain (`recomp_0003.c:17527`) |
+
+The cvar's +0x10 points at its int. 0008C840 (above) does not read the cvar; whether any part of the assist
+escapes it is untested in play. Each player's game applies its own assist; nothing of it is sent.
+

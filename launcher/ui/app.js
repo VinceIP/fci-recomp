@@ -666,7 +666,7 @@ const LABELS = {
   "gfx-anisotropic-filtering": "Anisotropic filtering", "gfx-ssao": "Ambient occlusion", "gfx-ssao-strength": "Ambient occlusion strength",
   "gfx-ssao-radius": "Ambient occlusion radius", "gfx-aa": "Anti-aliasing", "gfx-shadow-scale": "Shadow detail",
   "gfx-shadow-filter": "Soft shadows", "gfx-object-draw-distance": "Object draw distance", "gfx-object-lod-distance": "Object detail distance",
-  "gfx-foliage-lod": "Foliage detail distance", "controls-mouse-keyboard": "Mouse and keyboard", "controls-mouse-aim": "Direct mouse aim",
+  "gfx-foliage-lod": "Foliage detail distance", "controls-mouse-keyboard": "Mouse and keyboard", "controls-mouse-aim": "Direct mouse aim", "controls-mouse-aim-assist": "Aim assist with the mouse (multiplayer)",
   "controls-mouse-y-scale": "Vertical sensitivity", "controls-mouse-invert-y": "Invert vertical look", "controls-mouse-capture": "Capture the mouse",
 };
 // shorter names for choices the ini explains at length

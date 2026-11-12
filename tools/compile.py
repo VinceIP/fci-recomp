@@ -171,7 +171,10 @@ REPLACE = {
         "XNetCreateKey: only a host creates a key (a guest registers the host's), so this is host "
         "started; the worker thread registers with the host list (fci_net_worker.c)",
     ),
-    "sub_0051CDD4": ("prehook", "XNetRegisterKey: logs the session key (fci_net_worker.c)"),
+    "sub_0051CDD4": (
+        "prehook",
+        "XNetRegisterKey: logs the session key; a host or a joining guest is in a System Link match (fci_net_worker.c)",
+    ),
     "sub_002ACAF0": (
         "prehook",
         "pak name→hash: logs the looked-up name for RECOMP_FCI_PAK_LOG, paired with the "

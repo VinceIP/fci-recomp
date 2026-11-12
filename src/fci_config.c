@@ -47,6 +47,7 @@ static const struct {
         {"controls-mouse-sensitivity", "RECOMP_MOUSE_SENSITIVITY"},
         {"controls-mouse-degrees", "RECOMP_MOUSE_DEGREES"},
         {"controls-mouse-aim", "RECOMP_MOUSE_AIM"},
+        {"controls-mouse-aim-assist", "RECOMP_MOUSE_AIM_ASSIST"},
         {"controls-mouse-y-scale", "RECOMP_MOUSE_Y_SCALE"},
         {"controls-mouse-invert-y", "RECOMP_MOUSE_INVERT_Y"},
         {"controls-mouse-capture", "RECOMP_MOUSE_CAPTURE"},

@@ -58,6 +58,7 @@ static HINTERNET s_session;
 static volatile LONG s_host_started; /* set by fci_prehook_0051C5EA */
 static uint32_t s_host_kid_va;       /* XNetCreateKey's key id out-pointer (guest address) */
 static char s_host_kid[17];          /* this host's key id, hex, once registered */
+static volatile LONG s_session_key;  /* a System Link key was registered: host or guest of a match */
 
 /* the identity: 32 random bytes, hex (s_identity), stable across sessions. It lives in the data
  * folder (fci_save_dir\fci_token: %APPDATA%\fci-recomp\profile on Windows, the Wine prefix's
@@ -1118,7 +1119,7 @@ static void kid_hex(uint32_t va, char out[17])
         snprintf(out + i * 2, 3, "%02x", (unsigned)MEM8(va + (uint32_t)i));
 }
 
-/* XNetRegisterKey (q5-hosting-hook.md): logged with whether it is the key this host created */
+/* XNetRegisterKey: logged with whether it is the key this host created */
 void fci_prehook_0051CDD4(void)
 {
     char k[17];
@@ -1129,5 +1130,10 @@ void fci_prehook_0051CDD4(void)
         if (!strcmp(h, k))
             memcpy(s_host_kid, k, sizeof s_host_kid);
     }
+    InterlockedExchange(&s_session_key, 1);
     log_line("key registered %s%s", k, strcmp(k, s_host_kid) ? "" : " (this host's)");
 }
+
+/* 1 once this process hosted or joined a System Link match (single-player registers no key). Leaving a
+ * match relaunches the game, which clears it. */
+int fci_net_in_session(void) { return s_session_key != 0; }
