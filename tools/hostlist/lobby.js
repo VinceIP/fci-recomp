@@ -95,13 +95,14 @@ const TURN_TTL = 14400; // s; the credential must outlive the longest relayed se
 // refresh authenticates with the same long-term credential, so a short one would drop a running relay.
 const USAGE_READ_EVERY_MS = 5 * 60 * 1000; // the month's usage, read at most every 5 minutes
 const USAGE_STALE_MS = 60 * 60 * 1000; // a cached usage older than 1 h with a failed read: fail closed
+// per address: generous enough for players sharing one public IPv4 (carrier NAT, a university, one VPN exit)
 const LIMITS = {
-  hostsPerIp: 4,
-  hostsPerEndpointIp: 4, // live hosts that may list the same endpoint IP (a hostile endpoint is bounded)
+  hostsPerIp: 16,
+  hostsPerEndpointIp: 16, // live hosts that may list the same endpoint IP (a hostile endpoint is bounded)
   connectsPerEndpointIp: 8, // pending connects that may target the same endpoint IP
-  listsPerMinute: 30,
-  connectsPerMinute: 60,
-  registersPerMinute: 10,
+  listsPerMinute: 240, // a browsing game fetches every 10 s: 40 browsers on one address
+  connectsPerMinute: 120,
+  registersPerMinute: 40,
   unregistersPerMinute: 10, // a leaving host removes its own listing (one per session, in practice)
 };
 

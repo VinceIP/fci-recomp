@@ -46,10 +46,10 @@ RELAY_CONNECTS_PER_NONCE = 3  # re-POSTs of a relayed address (ICE restarts)
 DEFAULT_TURN_URL = "turn:127.0.0.1:3478?transport=udp"
 HOSTS_MAX = 1024  # the global live-host cap: the per-address caps bound one client, this bounds a flood of them
 LIMITS = {
-    "hostsPerIp": 4,
-    "listsPerMinute": 30,
-    "connectsPerMinute": 60,
-    "registersPerMinute": 10,
+    "hostsPerIp": 16,
+    "listsPerMinute": 240,
+    "connectsPerMinute": 120,
+    "registersPerMinute": 40,
     "unregistersPerMinute": 10,  # a leaving host removes its own listing (one per session, in practice)
 }
 

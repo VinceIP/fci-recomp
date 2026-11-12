@@ -395,40 +395,40 @@ test("flooding one host: 24 connects a minute, then busy; the queue keeps the 8 
   assert.equal(body.connects[0].endpoint, "93.184.100.17:41000"); // the oldest 16 were dropped
 });
 
-test("per-address rate limits: 30 listings, 10 registers, 60 connects a minute", async () => {
+test("per-address rate limits: 240 listings, 40 registers, 120 connects a minute", async () => {
   const lobby = mk();
   let status;
-  for (let i = 0; i < 30; i++) [status] = await r(lobby, req("/v1/hosts"));
+  for (let i = 0; i < 240; i++) [status] = await r(lobby, req("/v1/hosts"));
   assert.equal(status, 200);
   [status] = await r(lobby, req("/v1/hosts"));
   assert.equal(status, 429);
 
-  // re-registers of the same id count toward the register limit (the live-host cap is 4)
-  for (let i = 0; i < 10; i++) [status] = await r(lobby, reg({ token: "b".repeat(64) }));
+  // re-registers of the same id count toward the register limit (the live-host cap is 16)
+  for (let i = 0; i < 40; i++) [status] = await r(lobby, reg({ token: "b".repeat(64) }));
   assert.equal(status, 200);
   [status] = await r(lobby, reg({ token: "b".repeat(64) }));
   assert.equal(status, 429);
 
-  // spread over three hosts so the per-host budget (24 a minute) does not trip first
+  // spread over six hosts so the per-host budget (24 a minute) does not trip first
   const hosts = [];
-  for (let i = 0; i < 3; i++) {
+  for (let i = 0; i < 6; i++) {
     const [s, b] = await r(lobby, reg({ token: ("c" + i).repeat(32) }, `8.8.8.${10 + i}`));
     assert.equal(s, 200);
     hosts.push(b.id);
   }
-  for (let i = 0; i < 60; i++) {
-    [status] = await r(lobby, conn(hosts[i % 3], "93.184.100.200", "d".repeat(64)));
+  for (let i = 0; i < 120; i++) {
+    [status] = await r(lobby, conn(hosts[i % 6], "93.184.100.200", "d".repeat(64)));
     assert.equal(status, 200, `connect ${i + 1} accepted`);
   }
   [status] = await r(lobby, conn(hosts[0], "93.184.100.200", "d".repeat(64)));
   assert.equal(status, 429);
 });
 
-test("the hosts-per-address cap is 4", async () => {
+test("the hosts-per-address cap is 16", async () => {
   const lobby = mk();
   let status;
-  for (let i = 0; i < 4; i++) {
-    [status] = await r(lobby, reg({ token: ("a" + i).repeat(32) }));
+  for (let i = 0; i < 16; i++) {
+    [status] = await r(lobby, reg({ token: ("a" + i.toString(16)).repeat(32) }));
     assert.equal(status, 200);
   }
   [status] = await r(lobby, reg({ token: "f".repeat(64) }));
@@ -464,15 +464,15 @@ test("an IPv6 caller may register an IPv4 endpoint (the endpoint need not equal 
   assert.equal(body.id, sha16("a".repeat(64)));
 });
 
-test("the live-hosts-per-endpoint-IP cap is 4", async () => {
+test("the live-hosts-per-endpoint-IP cap is 16", async () => {
   const lobby = mk();
   let status, body;
-  // four different players (tokens, all from one address) listing the same endpoint IP on different ports
-  for (let i = 0; i < 4; i++) {
-    [status] = await r(lobby, reg({ token: ("a" + i).repeat(32), endpoint: "8.8.4.1:" + (40000 + i) }));
+  // sixteen different players (tokens, all from one address) listing the same endpoint IP on different ports
+  for (let i = 0; i < 16; i++) {
+    [status] = await r(lobby, reg({ token: ("a" + i.toString(16)).repeat(32), endpoint: "8.8.4.1:" + (40000 + i) }));
     assert.equal(status, 200);
   }
-  // a fifth host at the same endpoint IP is refused, from a fresh address (so the per-address cap
+  // a seventeenth host at the same endpoint IP is refused, from a fresh address (so the per-address cap
   // does not fire first and the endpoint-IP cap is the one under test)
   [status, body] = await r(lobby, reg({ token: "f".repeat(64), endpoint: "8.8.4.1:40999" }, "93.184.100.9"));
   assert.equal(status, 429);
