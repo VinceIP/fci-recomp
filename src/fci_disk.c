@@ -433,3 +433,72 @@ int fci_gate_00220200(void)
     g_esp += 4; /* ret: the caller pops the arguments */
     return 1;
 }
+
+/* Delete a directory and its contents; log and leave anything that cannot be deleted. A junction or
+ * symbolic link is removed as a link, never followed. */
+static void fci_remove_tree(const char *path)
+{
+    WIN32_FIND_DATAA fd;
+    char sub[MAX_PATH], pattern[MAX_PATH];
+    HANDLE h;
+    snprintf(pattern, sizeof(pattern), "%s\\*", path);
+    h = FindFirstFileA(pattern, &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if (lstrcmpA(fd.cFileName, ".") == 0 || lstrcmpA(fd.cFileName, "..") == 0)
+                continue;
+            snprintf(sub, sizeof(sub), "%s\\%s", path, fd.cFileName);
+            if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+                && !(fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
+                fci_remove_tree(sub);
+            else if (!((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? RemoveDirectoryA(sub)
+                                                                        : DeleteFileA(sub)))
+                fprintf(stderr, "[FCI] cache heal: cannot delete %s (err %lu)\n", sub, GetLastError());
+        } while (FindNextFileA(h, &fd));
+        FindClose(h);
+    }
+    if (!RemoveDirectoryA(path))
+        fprintf(stderr, "[FCI] cache heal: cannot remove %s (err %lu)\n", path, GetLastError());
+}
+
+/* Remove the Z: cache (<save>\Cache) when the disc time changed since it was built, so the game
+ * re-copies it under the new time; the marker records the disc time. Why: research/docs/internals.md. */
+void fci_disk_cache_heal(const char *save_dir, uint64_t disc_time)
+{
+    char cache_dir[MAX_PATH], marker[MAX_PATH], buf[32];
+    DWORD written;
+    HANDLE hf;
+
+    if (!save_dir || !*save_dir)
+        return;
+    snprintf(cache_dir, sizeof(cache_dir), "%s\\Cache", save_dir);
+    snprintf(marker, sizeof(marker), "%s\\fci-cache-disc-time.txt", save_dir);
+
+    /* Current marker: the cache was built under this disc time, so leave it. */
+    hf = CreateFileA(marker, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (hf != INVALID_HANDLE_VALUE) {
+        DWORD got = 0;
+        if (ReadFile(hf, buf, sizeof(buf) - 1, &got, NULL)) {
+            buf[got] = 0;
+            if (strtoull(buf, NULL, 16) == disc_time) {
+                CloseHandle(hf);
+                return;
+            }
+        }
+        CloseHandle(hf);
+    }
+
+    /* Stale, or first boot: clear the cache and record the disc time it is built under. */
+    if (GetFileAttributesA(cache_dir) != INVALID_FILE_ATTRIBUTES) {
+        fprintf(stderr, "[FCI] cache heal: removing %s\n", cache_dir);
+        fci_remove_tree(cache_dir);
+    }
+    CreateDirectoryA(cache_dir, NULL);
+    hf = CreateFileA(marker, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+    if (hf != INVALID_HANDLE_VALUE) {
+        int len = snprintf(buf, sizeof(buf), "%llX\n", (unsigned long long)disc_time);
+        if (len > 0)
+            WriteFile(hf, buf, len, &written, NULL);
+        CloseHandle(hf);
+    }
+}

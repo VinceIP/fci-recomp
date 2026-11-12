@@ -15,6 +15,8 @@
 
 extern void xbe_entry_point(void);
 extern void xbox_path_init(const char *game_dir, const char *save_dir);
+/* Declared in the toolkit's kernel.h (patch 0026); re-declared so the unpatched sandbox check compiles. */
+extern void xbox_SetDiscTime(unsigned long long filetime);
 
 static void dump_guest(const char *why)
 {
@@ -156,6 +158,7 @@ static BOOL WINAPI fci_console_ctrl(DWORD type)
     }
     return FALSE;
 }
+void fci_disk_cache_heal(const char *save_dir, uint64_t disc_time);
 
 static int install_kernel_header(void)
 {
@@ -350,6 +353,15 @@ int main(int argc, char **argv)
     fci_disk_init(argv[3]);
     fci_pak_log_init(); /* RECOMP_FCI_PAK_LOG (fci_disk.c): trace pak lookups and .dat reads */
     fci_menu_log_init(); /* RECOMP_FCI_MENU_LOG (fci_menu.c): trace menu action dispatch */
+    {
+        /* Fixed disc time = the XBE TimeDate (0x114, UNIX s); heal a Z: cache stamped under a
+         * different time. Why: research/docs/internals.md (Disk and saves). */
+        uint32_t unix_ts = *(const uint32_t *)((const uint8_t *)xbe + 0x114);
+        uint64_t disc_ft = (uint64_t)(unix_ts + 11644473600ull) * 10000000ull;
+        xbox_SetDiscTime((ULONGLONG)disc_ft);
+        fci_disk_cache_heal(argv[3], disc_ft);
+        fprintf(stderr, "[FCI] disc time %016llX (XBE unix %u)\n", (unsigned long long)disc_ft, unix_ts);
+    }
     xbox_kernel_bridge_init();
     { /* XeImageFileName names the image compiled into this process */
         const char name[] = "\\Device\\CdRom0\\" FCI_IMAGE_FILENAME;

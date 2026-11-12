@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- Evolution: after installing into a new folder, loading could hang for good (on Start, or loading a System Link map), because the game rebuilt its music cache while it was playing from it. Game files now keep one fixed time, as on the disc, and a cache from an older install is cleared once.
+
 ## [0.2.4] - 2026-11-07
 
 ### Added

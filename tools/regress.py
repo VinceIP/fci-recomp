@@ -30,6 +30,7 @@ import ctypes.wintypes as wt
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -504,17 +505,17 @@ def flow_timeline(sc, folder, start, child, frames, windows):
     return child.poll()
 
 
-def cache_time_problems(cache, disc):
-    """the game's copies in its Z: cache against the disc files: the game copies again when the times differ"""
-    originals = {p.name.lower(): p for p in disc.glob("*.ss2")} if disc.is_dir() else {}
+def cache_time_problems(cache, text):
+    """the game's copies in its Z: cache carry the disc's one time (the run logs it), or the game copies
+    them again on the next boot"""
+    m = re.search(r"\[FCI\] disc time ([0-9A-F]+)", text)
+    if not m:
+        return ["no disc time in the log"]
+    disc_ns = (int(m.group(1), 16) - 116444736000000000) * 100  # FILETIME to Unix nanoseconds
     copies = sorted(cache.glob("*.ss2")) if cache.is_dir() else []
     if not copies:
         return [f"no cache copies in {cache}"]
-    return [
-        f"cache copy {c.name} has another time than the disc's"
-        for c in copies
-        if c.name.lower() in originals and c.stat().st_mtime_ns != originals[c.name.lower()].stat().st_mtime_ns
-    ]
+    return [f"cache copy {c.name} has another time than the disc's" for c in copies if c.stat().st_mtime_ns != disc_ns]
 
 
 def check(name, sc, result, folder, bless):
@@ -534,7 +535,7 @@ def check(name, sc, result, folder, bless):
         if text.count(needle) < count:
             problems.append(f"log line {needle!r} seen {text.count(needle)} times, {count} expected")
     if sc.get("cache_times"):
-        problems += cache_time_problems(folder / "save" / "Cache" / "sounds_xb", GAME_DIR / "sounds_xb")
+        problems += cache_time_problems(folder / "save" / "Cache" / "sounds_xb", text)
     if "windows" in result:
         w = result["windows"]
         if any(x["frames"] != 1 for x in w):
