@@ -40,6 +40,7 @@ extern int fci_nic_list_turn_ready_take(void);
 extern int fci_nic_list_turn_wait(uint8_t *nonce);
 extern int fci_nic_list_turn_start(const char *hostport, const char *user, const char *pass);
 extern int fci_nic_list_turn_post_take(uint8_t nonce[16], char *ep, int len);
+extern int fci_nic_list_turn_post_retry(const uint8_t nonce[16]);
 extern void fci_nic_list_turn_fail(void);
 extern int fci_nic_list_turn_peer(const uint8_t nonce[16], const uint8_t mac[6], const char *endpoint);
 extern void fci_nic_browse_clear_dropped(void); /* Q29 round 4: clear the dropped counter */
@@ -757,8 +758,8 @@ static void turn_post_relay(void)
 {
     SRWLOCK *lock = fci_nic_lock();
     char ep[64], buf[512], resp[256], macstr[32], nhex[33], host[33];
-    uint8_t nonce[16];
-    int n, status, took;
+    uint8_t nonce[16], failed[8][16];
+    int n, status, took, nfailed = 0;
     const char *base = fci_nic_list_url();
 
     if (!base) {
@@ -771,7 +772,7 @@ static void turn_post_relay(void)
         took = fci_nic_list_turn_post_take(nonce, ep, sizeof ep);
         ReleaseSRWLockExclusive(lock);
         if (!took)
-            return;
+            break;
         host[0] = 0;
         for (n = 0; n < s_conn_n; n++) /* the host id: the connect that seeded this nonce */
             if (!memcmp(s_conn_nonce[n], nonce, 16)) {
@@ -789,13 +790,22 @@ static void turn_post_relay(void)
                  "{\"id\":\"%s\",\"endpoint\":\"%s\",\"nonce\":\"%s\",\"mac\":\"%s\",\"token\":\"%s\","
                  "\"relay\":true}",
                  host, ep, nhex, macstr, s_identity);
+        status = 0;
         if (http_request(base, "POST", "/v1/connect", buf, resp, sizeof resp, &status) != 0
             || status != 200) {
             log_line("relay connect to %s failed (status %d)", host, status);
+            if ((status == 0 || status >= 500) && nfailed < 8) /* no answer or the list's fault: retried */
+                memcpy(failed[nfailed++], nonce, 16);
             continue;
         }
         log_line("relay connect posted (%s at %s)", host, ep);
     }
+    /* re-armed after the loop, which would otherwise take them straight back */
+    AcquireSRWLockExclusive(lock);
+    for (n = 0; n < nfailed; n++)
+        if (fci_nic_list_turn_post_retry(failed[n]))
+            log_line("relay connect will be retried");
+    ReleaseSRWLockExclusive(lock);
 }
 
 static void guest_fetch(void)

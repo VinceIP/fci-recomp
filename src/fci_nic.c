@@ -80,6 +80,7 @@ typedef struct {
     int relay;            /* the relay socket (s_relsock) when in the relay room; -1 otherwise */
     int turn_ch;          /* the TURN channel (fci_turn) when the guest relays to this peer; -1 else */
     int turn_post;        /* 1 when this relayed peer's host has not yet been sent our relayed address */
+    int turn_retries;     /* relayed connects left to retry after a failed post */
     int guest;            /* 1 on the guest side (we connected to this host): only a guest asks for TURN */
     int via_turn;         /* 1 when this peer's frames arrive over a TURN relay (the host side):
                               the source is the TURN server, so they are matched by MAC, not address */
@@ -1321,6 +1322,22 @@ int fci_nic_list_turn_post_take(uint8_t nonce[16], char *ep, int len)
     return 0;
 }
 
+/* the worker's relayed connect under this nonce got no answer or a 5xx: the host learns our relayed
+ * address only from it, so it is posted again on a later tick, at most twice more. 1 when re-armed. */
+int fci_nic_list_turn_post_retry(const uint8_t nonce[16])
+{
+    for (int i = 0; i < s_nlpeers; i++) {
+        lpeer_t *p = &s_lpeers[i];
+        if (p->state == LP_RELAY && p->turn_ch >= 0 && !memcmp(p->nonce, nonce, 16) && p->turn_retries > 0) {
+            p->turn_retries--;
+            p->turn_post = 1;
+            InterlockedExchange(&s_turn_ready, 1);
+            return 1;
+        }
+    }
+    return 0;
+}
+
 /* the mint was refused (503/403/429): the waiting peer falls back to the hub relay, if set */
 void fci_nic_list_turn_fail(void)
 {
@@ -2055,6 +2072,7 @@ static void list_tick(ULONGLONG now)
                     p->state = LP_RELAY;
                     p->turn_ch = ch;
                     p->turn_post = 1; /* each relayed host gets its own relayed connect (the worker) */
+                    p->turn_retries = 2;
                     p->relay = -1;
                     p->last_frame = now;
                     fprintf(stderr, "[FCI] network: turn ready, relayed %s:%u\n", inet_ntoa(a.sin_addr),
