@@ -201,7 +201,7 @@ fn open(app: AppHandle, what: String) -> Result<(), String> {
         Some(("url", url)) => return opener.open_url(url, None::<&str>).map_err(|e| e.to_string()),
         Some(("log", file)) => return opener.reveal_item_in_dir(file).map_err(|e| e.to_string()),
         Some(("title", key)) => paths::install(titles::by_key(key)?),
-        // what the games themselves write: crash logs and saves
+        // what the games themselves write: session logs and saves
         Some(("gamelogs", key)) => game_folder(titles::by_key(key)?, "log-dir", "logs")?,
         Some(("saves", key)) => game_folder(titles::by_key(key)?, "save-dir", "profile")?,
         _ if what == "logs" => paths::logs(),

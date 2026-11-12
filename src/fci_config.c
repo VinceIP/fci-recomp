@@ -9,6 +9,8 @@
 #include "fci_image.h"
 
 #define SESSION_END "[FCI] session ended normally"
+/* the project's match list, as the fci.ini template shows it; a player's network-list replaces it */
+#define FCI_NET_LIST_DEFAULT "https://fci-hostlist.fci-recomp.workers.dev"
 
 /* what fci.ini got wrong, printed once the log is open */
 static char warnings[2048];
@@ -143,25 +145,11 @@ static void expand(const char *in, char *out, size_t size)
         out[--n] = 0;
 }
 
-/* the last bytes of a log name a clean exit */
-static int ended_normally(const char *path)
-{
-    char tail[256];
-    size_t n = 0;
-    FILE *f = fopen(path, "rb");
-    if (!f)
-        return 0;
-    if (!fseek(f, -(long)(sizeof tail - 1), SEEK_END) || !fseek(f, 0, SEEK_SET))
-        n = fread(tail, 1, sizeof tail - 1, f);
-    fclose(f);
-    tail[n] = 0;
-    return strstr(tail, SESSION_END) != NULL;
-}
-
 static int by_name(const void *a, const void *b) { return strcmp((const char *)a, (const char *)b); }
 
-/* delete the clean sessions' logs (verbosity 1), then the oldest until a new one fits in limit */
-static void prune_logs(const char *dir, int verbosity, int limit)
+/* delete the oldest logs until a new one fits in limit; clean exits are kept too, so a tester can
+ * send the log of a session that went wrong without crashing */
+static void prune_logs(const char *dir, int limit)
 {
     static char names[512][MAX_PATH];
     char pattern[MAX_PATH], path[MAX_PATH];
@@ -180,9 +168,7 @@ static void prune_logs(const char *dir, int verbosity, int limit)
     for (i = n - 1; i >= 0; i--) {
         int drop;
         snprintf(path, sizeof path, "%s\\%s", dir, names[i]);
-        drop = verbosity == 1 && ended_normally(path);
-        if (!drop && limit > 0 && kept >= limit - 1)
-            drop = 1;
+        drop = limit > 0 && kept >= limit - 1;
         if (!drop) {
             kept++;
             continue;
@@ -219,7 +205,7 @@ static void open_session_log(const char *dir, int verbosity, int limit, const ch
         localtime_s(&t, &now);
         strftime(stem, sizeof stem, "fci-%Y%m%d-%H%M%S", &t);
         make_dirs(dir);
-        prune_logs(dir, verbosity, limit);
+        prune_logs(dir, limit);
         snprintf(path, sizeof path, "%s\\%s.log", dir, stem);
         if (verbosity >= 2)
             snprintf(kernel, sizeof kernel, "%s\\%s-kernel.log", dir, stem);
@@ -228,13 +214,12 @@ static void open_session_log(const char *dir, int verbosity, int limit, const ch
     }
     _putenv_s("RECOMP_KERNEL_LOG_FILE", kernel);
     SetEnvironmentVariableA("RECOMP_FCI_RELAUNCH_LOG", path); /* relaunched instances append */
-    if (verbosity == 1)
-        _putenv("RECOMP_FCI_LOG_SESSION=1"); /* fci_log_session_end marks a clean exit */
+    _putenv("RECOMP_FCI_LOG_SESSION=1"); /* fci_log_session_end marks a clean exit */
     freopen(path, "w", stderr);
     freopen(path, "a", stdout);
 }
 
-/* the window was closed: with log-verbosity 1 the next start deletes this session's log */
+/* the window was closed: the log says so, to tell a clean exit from a crash */
 void fci_log_session_end(void)
 {
     const char *on = getenv("RECOMP_FCI_LOG_SESSION");
@@ -256,8 +241,8 @@ void fci_config_load(int *argc, char ***argv)
     static char lines[96][512], rate_arg[64], hub_arg[300], lan_arg[40], list_arg[300], peers_arg[300],
             menu_arg[40];
     static char *args[128];
-    int n = 0, opts = 0, i, have_ini = 0, verbosity = 1, limit = 20, cap = 1;
-    int network_menu = -1;
+    int n = 0, opts = 0, i, have_ini = 0, verbosity = 1, limit = 3, cap = 1;
+    int network_menu = -1, list_set = 0;
     double rate = 30;
     char ini[MAX_PATH], *slash;
     FILE *f;
@@ -273,6 +258,8 @@ void fci_config_load(int *argc, char ***argv)
     expand("%APPDATA%\\" FCI_APPDATA "\\logs", log_dir, sizeof log_dir);
     expand("%APPDATA%\\" FCI_APPDATA "\\shader-cache", shader_cache, sizeof shader_cache);
     xbe[0] = fixed_log[0] = 0;
+    if (!_stricmp(FCI_IMAGE_FILENAME, "default.xbe")) /* the game, not the map editor */
+        snprintf(list_arg, sizeof list_arg, "RECOMP_FCI_NET_LIST=%s", FCI_NET_LIST_DEFAULT);
     snprintf(ini, sizeof ini, "%s\\fci.ini", exe_dir);
     if ((f = fopen(ini, "r")) != NULL) {
         char line[512];
@@ -321,8 +308,11 @@ void fci_config_load(int *argc, char ***argv)
                 if (v[0] && strcmp(v, "0"))
                     snprintf(lan_arg, sizeof lan_arg, "RECOMP_FCI_NET_LAN=1");
             } else if (!_stricmp(key, "network-list")) {
+                list_set = 1;
                 if (v[0])
                     snprintf(list_arg, sizeof list_arg, "RECOMP_FCI_NET_LIST=%s", v);
+                else
+                    list_arg[0] = 0; /* "network-list =" turns internet play off */
             } else if (!_stricmp(key, "network-peers")) {
                 if (v[0])
                     snprintf(peers_arg, sizeof peers_arg, "RECOMP_FCI_NET_PEERS=%s", v);
@@ -366,6 +356,8 @@ void fci_config_load(int *argc, char ***argv)
     /* the network keys: one link at a time (the card refuses two and says so). network-menu is not a
      * link (no transport at boot): it does not set cap, the 30-updates lock engages on the pick. */
     {
+        if (!list_set && (hub_arg[0] || lan_arg[0] || peers_arg[0]))
+            list_arg[0] = 0; /* the default list gives way to a link the player chose */
         if (network_menu == 1 ||
             (network_menu < 0 && list_arg[0] && !hub_arg[0] && !lan_arg[0] && !peers_arg[0] &&
              !_stricmp(FCI_IMAGE_FILENAME, "default.xbe")))

@@ -490,7 +490,7 @@ function cardMenu(anchor, t) {
   const disc = t.disc && t.disc.ok ? t.disc : null;
   popover(anchor, [
     { label: "Open the game's folder", run: () => open("title:" + t.key) },
-    { label: "Open crash logs", run: () => open("gamelogs:" + t.key) },
+    { label: "Open logs", run: () => open("gamelogs:" + t.key) },
     { label: "Settings", run: () => { S.settings.title = t.key; switchTab("settings"); } },
     "-",
     { label: "Rebuild the game", run: () => (disc ? confirmRebuild(t) : pickDisc(t.key)) },
@@ -658,7 +658,8 @@ for (const b of document.querySelectorAll("[data-link]")) b.addEventListener("cl
 // ---------------------------------------------------------------- settings
 
 const LABELS = {
-  "save-dir": "Save folder", "shader-cache": "Shader cache folder", "log-verbosity": "Logging", "log-limit": "Log files kept",
+  "save-dir": "Save folder", "shader-cache": "Shader cache folder", "log-verbosity": "Logging", "log-limit": "Sessions logged",
+  "network-list": "Internet match list",
   "log-dir": "Log folder", "log-input": "Log controller input", "display-borderless": "Borderless fullscreen",
   "display-dimensions": "Window size", "display-aspect": "Aspect ratio", "display-frame-rate": "Frame rate",
   "engine-update-cap": "Engine update cap", "skip-intro-movies": "Skip intro movies", "gfx-res-scale": "Resolution scale",
@@ -809,7 +810,7 @@ function renderSettings() {
     return;
   }
   // what players change most first; the folders last
-  const order = ["Display", "Graphics", "Controls", "Mouse", "Keyboard", "Key bindings", "Mouse as right stick", "System"];
+  const order = ["Display", "Graphics", "Controls", "Mouse", "Keyboard", "Key bindings", "Mouse as right stick", "Network", "System"];
   const rank = (s) => (order.includes(s) ? order.indexOf(s) : order.length - 1);
   const sections = [...new Set(st.options.map((o) => o.section))].sort((a, b) => rank(a) - rank(b));
   nav.replaceChildren(...sections.map((s) => h("button", { onclick: () => $("sec-" + s.replace(/\W+/g, "-")).scrollIntoView() }, s)));
