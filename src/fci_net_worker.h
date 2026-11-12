@@ -4,6 +4,10 @@
 #ifndef FCI_NET_WORKER_H
 #define FCI_NET_WORKER_H
 
+#include <stdint.h>
+
+void fci_net_report_probe(const char *receipt, const char *path, const char *stage, uint64_t started);
+
 /* start the worker thread (LIST mode only; called from fci_nic_init) */
 void fci_net_worker_start(void);
 /* stop the worker thread and close its WinHTTP session (called from fci_nic_shutdown) */

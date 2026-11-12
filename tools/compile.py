@@ -530,6 +530,8 @@ def compile_groups(group, inputs, work, obj, tools, base, record):
     elif group == "host":
         for f in sorted((inputs / "host").glob("*.c")):
             flags = ["-O2", *DEBUG, "-Wall", "-Wno-unused", "-Werror=implicit-function-declaration"]
+            if f.name == "fci_net_worker.c" and os.environ.get("FCI_BETA_REPORTS") == "1":
+                flags.append("-DFCI_BETA_REPORTS")
             jobs.append((cc + flags + inc([gen] + rt_inc) + out(f.stem + ".obj") + [str(f)], [f]))
     elif group == "xbr":
         # Xbox XBE Recomp's D3D8 and DirectSound layers and the Direct3D 12 renderer (src/xbr), with the

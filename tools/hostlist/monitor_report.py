@@ -139,6 +139,28 @@ def render(snapshot, baseline=None):
         ],
         "",
     )
+    probe_section = ""
+    if probes := hostlist.get("probes"):
+        prior = before.get("probes", {})
+        results = [
+            (key, value - prior.get("results", {}).get(key, 0)) for key, value in sorted(probes["results"].items())
+        ]
+        first_frames = sum(count for key, count in results if key.endswith("/first_frame"))
+        first_ms = probes["firstFrameMs"] - prior.get("firstFrameMs", 0)
+        received = probes["received"] - prior.get("received", 0)
+        issued = probes["issued"] - prior.get("issued", 0)
+        average = number(first_ms / first_frames) if first_frames else "—"
+        result_table = table(("Game / path / stage", "Probes"), results, "No probe outcomes in this sample.")
+        builds = table(
+            ("Build", "Reports"),
+            [(key, value - prior.get("builds", {}).get(key, 0)) for key, value in sorted(probes["builds"].items())],
+            "No reported builds.",
+        )
+        probe_section = (
+            f'<section><h2>Opt-in peer probes</h2><p class="note">{window} · {received} reports, {issued} receipts '
+            f"issued · Mean time to first frame {average} ms. A probe can run before the player selects a match.</p>"
+            f"{result_table}{builds}</section>"
+        )
     start, end = escape(str(snapshot.get("from", "—"))), escape(str(snapshot.get("to", "—")))
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -170,6 +192,7 @@ th {{font-size:12px;color:var(--muted)}}
 <p class="note">{window}. Delivery counts host notifications.</p>{event_table}</section>
 <section><h2>TURN budget</h2>
 <p class="note">Month to date · {escape(str(relay.get("month", "—")))}</p>{relay_table}</section></div>
+{probe_section}
 <p class="note">Browsing players, players in matches, and matches in progress are currently unavailable.</p>
 </main></body></html>
 """

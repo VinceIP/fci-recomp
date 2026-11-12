@@ -74,6 +74,9 @@ const TITLES = new Set(["instincts", "evolution"]);
 const VERSION = /^[0-9]{1,5}$/;
 const MAC = /^02:46:43(:[0-9a-f]{2}){3}$/;
 const NONCE = /^[0-9a-f]{32}$/;
+const REPORT_BUILD = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,39}$/;
+const REPORT_LIMIT = 256;
+const REPORT_TTL = 120000;
 const ID = /^[0-9a-f]{32}$/; // 16 bytes of SHA-256(token), hex
 const TOKEN = /^[0-9a-f]{64}$/; // 32 random bytes, hex
 // Kept above the maximum long-poll wait (60 s) so a full-duration poll can never race the expiry
@@ -256,8 +259,11 @@ export class Lobby {
     this.mints = new Map(); // gid+":"+nonce -> {host, at, relay}: recent mints (the relay-connect gate)
     this.mintLimit = new RateLimit(TURN_WINDOW_MS); // mints per guest and per address
     this.abuse = { byIp: new Map(), ring: [] };
+    this.reportReceipts = new Map();
+    this.reportBuilds = new Map();
     this.metrics = {
       startedAt: Date.now(), routes: {},
+      probes: { issued: 0, received: 0, results: {}, firstFrameMs: 0 },
       connects: { directQueued: 0, relayQueued: 0, directDelivered: 0, relayDelivered: 0 },
       relay: { issued: 0, unconfigured: 0, budget: 0, disabled: 0, usageUnavailable: 0, providerError: 0 },
     };
@@ -513,6 +519,7 @@ export class Lobby {
         case "GET /v1/connects": response = await this.poll(url, ip); break;
         case "POST /v1/connect": response = await this.connect(request, ip); break;
         case "POST /v1/turn": response = await this.turn(request, ip); break;
+        case "POST /v1/probe-report": response = await this.probeReport(request, ip); break;
         case "POST /v1/unregister": response = await this.unregister(request, ip); break;
         default: return json({ error: "not found" }, 404);
       }
@@ -759,8 +766,44 @@ export class Lobby {
     // The host's LAN address is forwarded only when the guest and the host are behind the same
     // NAT (the Worker sees the same caller IP on both sides).
     const reply = { endpoint: host.endpoint, mac: host.mac };
+    if (!relay && this.env?.BETA_REPORTS === "1" && typeof msg.reportBuild === "string"
+        && REPORT_BUILD.test(msg.reportBuild)) {
+      for (const [receipt, entry] of this.reportReceipts) {
+        if (now - entry.at > REPORT_TTL) this.reportReceipts.delete(receipt);
+      }
+      if (this.reportReceipts.size < REPORT_LIMIT) {
+        const receipt = crypto.randomUUID().replaceAll("-", "");
+        this.reportReceipts.set(receipt, { at: now, title: host.title, build: msg.reportBuild });
+        reply.reportReceipt = receipt;
+        this.metrics.probes.issued++;
+      }
+    }
     if (host.local && sameNat(host.ip, ip, host.endpoint, msg.endpoint)) reply.local = host.local;
     return json(reply);
+  }
+
+  async probeReport(request, ip) {
+    if (this.env?.BETA_REPORTS !== "1") return json({ error: "not found" }, 404);
+    const msg = await this.readJson(request, ip);
+    if (msg === null) return this._refusal;
+    const paths = ["direct", "turn", "hub", "unknown"];
+    const stages = ["first_frame", "punch", "turn", "no_frame", "peer_setup"];
+    if (!NONCE.test(String(msg.receipt)) || !paths.includes(msg.path) || !stages.includes(msg.stage) ||
+        !Number.isInteger(msg.ms) || msg.ms < 0 || msg.ms > REPORT_TTL ||
+        (msg.stage === "first_frame" && msg.path === "unknown"))
+      return json({ error: "bad probe report" }, 400);
+    const entry = this.reportReceipts.get(msg.receipt);
+    if (!entry) return json({ error: "unknown probe receipt" }, 404);
+    this.reportReceipts.delete(msg.receipt);
+    if (Date.now() - entry.at > REPORT_TTL) return json({ error: "unknown probe receipt" }, 404);
+    const metrics = this.metrics.probes;
+    const key = entry.title + "/" + msg.path + "/" + msg.stage;
+    metrics.results[key] = (metrics.results[key] || 0) + 1;
+    metrics.received++;
+    if (msg.stage === "first_frame") metrics.firstFrameMs += msg.ms;
+    const build = this.reportBuilds.size < 16 || this.reportBuilds.has(entry.build) ? entry.build : "(other)";
+    this.reportBuilds.set(build, (this.reportBuilds.get(build) || 0) + 1);
+    return noContent();
   }
 
   // Mint a Cloudflare TURN credential for a guest. The guest must have connected to `id` with
@@ -914,7 +957,10 @@ export class Lobby {
         const key = h.title + "/" + h.proto;
         active[key] = (active[key] || 0) + 1;
       }
-      return json({ ...this.metrics, sampledAt: now, active });
+      return json({
+        ...this.metrics, sampledAt: now, active,
+        probes: { ...this.metrics.probes, builds: Object.fromEntries(this.reportBuilds) },
+      });
     }
     if (url.pathname === "/admin/relay" && request.method === "GET") {
       // the month's relay usage against the budget, and whether a mint would be allowed now

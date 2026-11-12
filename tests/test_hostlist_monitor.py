@@ -49,6 +49,13 @@ def test_html_report_compares_one_lobby_and_preserves_missing_sections(tmp_path)
         "hostlist": {
             "startedAt": 1000,
             "sampledAt": 3000,
+            "probes": {
+                "issued": 4,
+                "received": 3,
+                "results": {"evolution/direct/first_frame": 2, "evolution/direct/punch": 1},
+                "firstFrameMs": 550,
+                "builds": {"beta-smoke": 3},
+            },
             "active": {"instincts/2": 1},
             "routes": {"GET /v1/hosts": {"requests": 6, "totalMs": 31, "maxMs": 14, "status": {"200": 5, "503": 1}}},
         },
@@ -57,6 +64,13 @@ def test_html_report_compares_one_lobby_and_preserves_missing_sections(tmp_path)
         "hostlist": {
             "startedAt": 1000,
             "sampledAt": 2000,
+            "probes": {
+                "issued": 1,
+                "received": 1,
+                "results": {"evolution/direct/first_frame": 1},
+                "firstFrameMs": 150,
+                "builds": {"beta-smoke": 1},
+            },
             "routes": {"GET /v1/hosts": {"requests": 2, "totalMs": 11, "maxMs": 8, "status": {"200": 2}}},
         },
     }
@@ -80,6 +94,10 @@ def test_html_report_compares_one_lobby_and_preserves_missing_sections(tmp_path)
     assert "Since baseline" in page
     assert "<td>4</td><td>1</td><td>25.0%</td><td>5</td><td>14</td>" in page
     assert "&lt;unavailable&gt;" in page
+    assert "2 reports, 3 receipts issued" in page
+    assert "Mean time to first frame 400 ms" in page
+    assert "<td>evolution/direct/punch</td><td>1</td>" in page
+    assert "<td>beta-smoke</td><td>2</td>" in page
     baseline["hostlist"]["startedAt"] = 0
     previous.write_text(json.dumps(baseline), encoding="utf-8")
     subprocess.run(command, capture_output=True, text=True, check=False)

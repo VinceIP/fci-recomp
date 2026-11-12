@@ -22,7 +22,7 @@
 
 /* the NIC's worker API (fci_nic.c): called under s_lock */
 extern int fci_nic_list_add_peer(const char *endpoint, const char *local, const uint8_t mac[6],
-                                 const uint8_t nonce[16], int guest);
+                                 const uint8_t nonce[16], int guest, const char *receipt, ULONGLONG started);
 extern int fci_nic_list_endpoint(char *buf, int buflen);
 extern int fci_nic_list_local_port(void);
 extern void fci_nic_mac(uint8_t *mac);
@@ -548,6 +548,50 @@ static int s_known_n;
 
 /* the connects this worker made, by nonce: the TURN mint needs the host id of a waiting peer */
 static char s_conn_id[8][33];
+/* The NIC queues under its lock; only the worker sends HTTP. */
+#define PROBE_REPORT_QUEUE 16
+static char s_report_build[41];
+static struct {
+    char receipt[33];
+    const char *path, *stage;
+    uint64_t ms;
+} s_probe_reports[PROBE_REPORT_QUEUE];
+static unsigned s_report_head, s_report_count;
+
+void fci_net_report_probe(const char *receipt, const char *path, const char *stage, uint64_t started)
+{
+    const uint64_t ms = GetTickCount64() - started;
+    if (!receipt[0] || ms > 120000 || s_report_count == PROBE_REPORT_QUEUE)
+        return;
+    const unsigned slot = (s_report_head + s_report_count) % PROBE_REPORT_QUEUE;
+    memcpy(s_probe_reports[slot].receipt, receipt, sizeof s_probe_reports[slot].receipt);
+    s_probe_reports[slot].path = path;
+    s_probe_reports[slot].stage = stage;
+    s_probe_reports[slot].ms = ms;
+    s_report_count++;
+}
+
+static void send_probe_report(void)
+{
+    char body[160], reply[64];
+    const char *base = fci_nic_list_url();
+    SRWLOCK *lock = fci_nic_lock();
+    AcquireSRWLockExclusive(lock);
+    if (!base || !s_report_count) {
+        ReleaseSRWLockExclusive(lock);
+        return;
+    }
+    const unsigned slot = s_report_head;
+    snprintf(body, sizeof body, "{\"receipt\":\"%s\",\"path\":\"%s\",\"stage\":\"%s\",\"ms\":%llu}",
+             s_probe_reports[slot].receipt, s_probe_reports[slot].path, s_probe_reports[slot].stage,
+             (unsigned long long)s_probe_reports[slot].ms);
+    s_report_head = (slot + 1) % PROBE_REPORT_QUEUE;
+    s_report_count--;
+    ReleaseSRWLockExclusive(lock);
+    int status;
+    http_request_timed(base, "POST", "/v1/probe-report", body, reply, sizeof reply, &status, 1500);
+}
+
 static uint8_t s_conn_nonce[8][16];
 static int s_conn_n;
 
@@ -600,26 +644,31 @@ static void on_host_obj(const char *obj, int len)
                      "{\"id\":\"%s\",\"endpoint\":\"%s\",\"nonce\":\"%s\",\"mac\":\"%s\",\"token\":\"%s\"}",
                      id, my_ep, nhex, my_mac, s_identity);
     }
+    if (s_report_build[0]) {
+        const size_t length = strlen(buf);
+        if (length && buf[length - 1] == '}' && length + strlen(s_report_build) + 18 < sizeof buf)
+            snprintf(buf + length - 1, sizeof buf - length + 1, ",\"reportBuild\":\"%s\"}", s_report_build);
+    }
+    const ULONGLONG report_started = GetTickCount64();
     if (http_request(base, "POST", "/v1/connect", buf, resp, sizeof resp, &status) != 0 || status != 200) {
         log_line("connect to %s failed (status %d)", id, status);
         return;
     }
-    if (!json_str_val(resp, "endpoint", endpoint, sizeof endpoint))
-        return;
-    if (!json_str_val(resp, "mac", macstr, sizeof macstr))
-        return;
-    if (sscanf(macstr, "%2hhx:%2hhx:%2hhx:%2hhx:%2hhx:%2hhx", &mac[0], &mac[1], &mac[2], &mac[3], &mac[4],
-               &mac[5])
-        != 6)
-        return;
-
-    /* the host's LAN address (when the Worker forwarded one: both sides are behind the same NAT) */
-    char local[64];
+    char local[64] = {0}, receipt[33] = {0};
+    if (s_report_build[0] && json_str_val(resp, "reportReceipt", receipt, sizeof receipt) &&
+        (strlen(receipt) != 32 || strspn(receipt, "0123456789abcdef") != 32))
+        receipt[0] = 0;
+    int ready = json_str_val(resp, "endpoint", endpoint, sizeof endpoint) &&
+                json_str_val(resp, "mac", macstr, sizeof macstr) &&
+                sscanf(macstr, "%2hhx:%2hhx:%2hhx:%2hhx:%2hhx:%2hhx", &mac[0], &mac[1], &mac[2],
+                       &mac[3], &mac[4], &mac[5]) == 6;
     json_str_val(resp, "local", local, sizeof local);
-
     AcquireSRWLockExclusive(lock);
-    fci_nic_list_add_peer(endpoint, local[0] ? local : NULL, mac, nonce, 1); /* we joined: the guest side */
+    if (!ready || !fci_nic_list_add_peer(endpoint, local[0] ? local : NULL, mac, nonce, 1, receipt, report_started))
+        fci_net_report_probe(receipt, "unknown", "peer_setup", report_started);
     ReleaseSRWLockExclusive(lock);
+    if (!ready)
+        return;
 
     if (s_known_n < (int)(sizeof s_known / sizeof s_known[0]))
         snprintf(s_known[s_known_n++], sizeof s_known[0], "%s", id);
@@ -908,7 +957,7 @@ static void on_connect_obj(const char *obj, int len)
             /* the guest's relayed connect: its peer is live at the relayed address (TURN) */
             fci_nic_list_turn_peer(nonce, mac, endpoint);
         } else {
-            fci_nic_list_add_peer(endpoint, local[0] ? local : NULL, mac, nonce, 0); /* a guest joined us */
+            fci_nic_list_add_peer(endpoint, local[0] ? local : NULL, mac, nonce, 0, NULL, 0); /* a guest joined us */
         }
         ReleaseSRWLockExclusive(lock);
     }
@@ -1009,6 +1058,8 @@ static DWORD WINAPI worker_main(LPVOID arg)
             turn_mint();
         if (fci_nic_list_turn_ready_take())
             turn_post_relay();
+        if (s_report_build[0])
+            send_probe_report();
     }
 
     if (s_session) {
@@ -1033,6 +1084,17 @@ void fci_net_worker_browse_state(int *fetch_state, int *n_hosts, int *relay_refu
 
 void fci_net_worker_start(void)
 {
+    s_report_build[0] = 0;
+#ifdef FCI_BETA_REPORTS
+    const char *opt_in = getenv("RECOMP_FCI_BETA_REPORT");
+    const char *build = getenv("RECOMP_FCI_BETA_BUILD");
+    const char *alnum = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    const char *build_chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-";
+    if (opt_in && !strcmp(opt_in, "1") && build && build[0] && strchr(alnum, build[0]) &&
+        strlen(build) < sizeof s_report_build && strspn(build, build_chars) == strlen(build))
+        strcpy(s_report_build, build);
+#endif
+    s_report_head = s_report_count = 0;
     identity_init();
     s_stop = CreateEventA(NULL, TRUE, FALSE, NULL);
     s_thread = CreateThread(NULL, 0, worker_main, NULL, 0, NULL);

@@ -1334,3 +1334,29 @@ test("operator metrics aggregate fixed routes, delivery and refusals without pla
     assert.equal(serialized.includes(value), false);
   }
 });
+
+test("beta probe reports require opt-in and consume a private, single-use receipt", async () => {
+  const lobby = mk({ BETA_REPORTS: "1", ADMIN_SECRET: "test-only" });
+  const [, { id }] = await r(lobby, reg());
+  const optIn = conn(id, "93.184.100.9", "d".repeat(64));
+  const body = await optIn.json();
+  const [status, reply] = await r(lobby, req("/v1/connect", {
+    method: "POST", ip: "93.184.100.9", body: { ...body, reportBuild: "beta-1" },
+  }));
+  assert.equal(status, 200);
+  assert.match(reply.reportReceipt, /^[0-9a-f]{32}$/);
+  const report = (extra = {}) => req("/v1/probe-report", {
+    method: "POST", body: { receipt: reply.reportReceipt, path: "direct", stage: "first_frame", ms: 125, ...extra },
+  });
+  assert.equal((await r(lobby, report({ stage: "unexpected" })))[0], 400);
+  assert.equal((await r(lobby, report()))[0], 204);
+  assert.equal((await r(lobby, report()))[0], 404);
+  const [, metrics] = await r(lobby, req("/admin/metrics", { headers: { authorization: "Bearer test-only" } }));
+  assert.deepEqual(metrics.probes, {
+    issued: 1, received: 1, results: { "instincts/direct/first_frame": 1 }, firstFrameMs: 125, builds: { "beta-1": 1 },
+  });
+  assert.equal(JSON.stringify(metrics).includes(reply.reportReceipt), false);
+  assert.equal((await r(mk(), report()))[0], 404);
+  const [, ordinary] = await r(lobby, conn(id, "93.184.100.10", "f".repeat(64)));
+  assert.equal(ordinary.reportReceipt, undefined);
+});

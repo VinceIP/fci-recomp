@@ -85,6 +85,8 @@ typedef struct {
     ULONGLONG next_punch; /* next punch deadline (GetTickCount64) */
     ULONGLONG punch_end;  /* stop punching, transition or drop */
     ULONGLONG last_frame; /* last frame received (expiry) */
+    char report_receipt[33];
+    ULONGLONG report_started;
 } lpeer_t;
 
 static uint32_t regs[NIC_SIZE / 4];
@@ -191,6 +193,7 @@ static unsigned s_traced;
 static int s_list; /* 1 when RECOMP_FCI_NET_LIST is in use */
 static lpeer_t s_lpeers[LIST_PEER_MAX];
 static int s_nlpeers;
+static unsigned s_report_peers;
 static int s_lpending;                /* count of LP_PENDING peers (cap at LIST_PENDING_MAX) */
 static volatile LONG s_lpeer_dropped; /* count of peers dropped due to failure (no relay, punch failed) */
 static struct sockaddr_in s_stun_ep;  /* the card's public endpoint (from STUN or _ENDPOINT) */
@@ -684,6 +687,17 @@ static int rate_ok(const uint8_t *mac)
     return 1;
 }
 
+static void finish_probe(lpeer_t *peer, const char *stage)
+{
+    if (!peer->report_receipt[0])
+        return;
+    const char *path = peer->state == LP_RELAY ? (peer->turn_ch >= 0 ? "turn" : "hub")
+                       : peer->state == LP_TURN_WAIT ? "turn" : "direct";
+    fci_net_report_probe(peer->report_receipt, path, stage, peer->report_started);
+    peer->report_receipt[0] = 0;
+    s_report_peers--;
+}
+
 /* the gate between the wire and the guest's RX queue (q24): the frame sanity check
  * (src/fci_frame.c), the per-source-MAC rate cap, then the queue (the oldest goes when it is
  * full, as a full FIFO). 1 when enqueued, 0 when dropped (counted, logged rate-limited). */
@@ -712,6 +726,16 @@ static int rx_enqueue(const uint8_t *f, int n, const struct sockaddr_in *from)
         memcpy(s_rxq[slot], f, (size_t)n);
         s_rxq_len[slot] = n;
         s_rxq_count++;
+    }
+    if (s_list && s_report_peers) {
+        for (int i = 0; i < s_nlpeers; i++) {
+            lpeer_t *peer = &s_lpeers[i];
+            if (peer->report_receipt[0] && (peer->state == LP_LIVE || peer->state == LP_RELAY) &&
+                !memcmp(peer->mac, f + 6, sizeof peer->mac)) {
+                finish_probe(peer, "first_frame");
+                break;
+            }
+        }
     }
     return 1;
 }
@@ -1035,6 +1059,7 @@ static void punch_recv(const char *buf, char type, const struct sockaddr_in *fro
 static void lpeer_remove(int i)
 {
     lpeer_t *p = &s_lpeers[i];
+    finish_probe(p, p->state == LP_PENDING ? "punch" : p->state == LP_TURN_WAIT ? "turn" : "no_frame");
     if (p->state == LP_PENDING)
         s_lpending--;
     memmove(&s_lpeers[i], &s_lpeers[i + 1], (size_t)(s_nlpeers - i - 1) * sizeof(lpeer_t));
@@ -1046,7 +1071,7 @@ static void lpeer_remove(int i)
  * behind the same NAT); NULL or "" when there is none. The NIC punches both addresses and the
  * first valid answer wins. */
 int fci_nic_list_add_peer(const char *endpoint, const char *local, const uint8_t mac[6],
-                          const uint8_t nonce[16], int guest)
+                          const uint8_t nonce[16], int guest, const char *receipt, ULONGLONG started)
 {
     struct addrinfo hints, *ai = NULL;
     char host[128], port[16];
@@ -1089,6 +1114,12 @@ int fci_nic_list_add_peer(const char *endpoint, const char *local, const uint8_t
         memcpy(p->nonce, nonce, 16);
         p->state = LP_PENDING;
         p->guest = guest;
+        p->report_receipt[0] = 0;
+        if (guest && receipt && receipt[0]) {
+            memcpy(p->report_receipt, receipt, sizeof p->report_receipt);
+            p->report_started = started;
+            s_report_peers++;
+        }
         p->relay = -1;
         p->turn_ch = -1;
         p->via_turn = 0;
@@ -1312,6 +1343,7 @@ int fci_nic_list_turn_peer(const uint8_t nonce[16], const uint8_t mac[6], const 
         memcpy(p->nonce, nonce, 16);
         p->state = LP_LIVE;
         p->guest = 0;
+        p->report_receipt[0] = 0;
         p->relay = -1;
         p->turn_ch = -1;
         p->via_turn = 1; /* its endpoint is the guest's relayed address */
