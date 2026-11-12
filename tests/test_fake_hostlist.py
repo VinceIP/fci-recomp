@@ -606,6 +606,76 @@ def test_relay_requires_a_mint_and_is_capped_per_nonce():
         server.shutdown()
 
 
+def test_one_mint_covers_every_host_the_guest_connected_to():
+    """One mint (a TURN allocation) covers every host the guest connected to directly: relayed
+    connects to two hosts are both 200; a host the guest never connected to is 403; a gid with no
+    mint is 403; a mint older than the window is 403; the 4th relay for one nonce is 429."""
+    port, server, lobby = start_server(turn_user="user", turn_pass="pass")
+    try:
+        base = f"http://127.0.0.1:{port}"
+        host_id, _ = register(base)
+        host_id2, _ = register(base, endpoint="127.0.0.1:40002")
+        gtoken = secrets.token_hex(32)
+        nonce = "0123456789abcdef0123456789abcdef"
+
+        status, body = connect(base, host_id, gtoken, nonce=nonce)
+        assert status == 200, body
+        status, body = connect(base, host_id2, gtoken, nonce=nonce)
+        assert status == 200, body
+
+        # no mint yet: the relayed connect is refused
+        status, body = connect(base, host_id, gtoken, endpoint="127.0.0.1:3478", nonce=nonce, relay=True)
+        assert status == 403, body
+        assert body["error"] == "no relay"
+
+        status, body = mint(base, host_id, gtoken, nonce)
+        assert status == 200, body
+
+        # relayed connects to both hosts: both accepted, no second mint
+        status, body = connect(base, host_id, gtoken, endpoint="127.0.0.1:3471", nonce=nonce, relay=True)
+        assert status == 200, body
+        status, body = connect(base, host_id2, gtoken, endpoint="127.0.0.1:3472", nonce=nonce, relay=True)
+        assert status == 200, body
+        assert len(lobby.mints) == 1
+        assert len(lobby.gid_mints) == 1
+
+        # a host the guest never connected to: 403
+        host_id3, _ = register(base, endpoint="127.0.0.1:40003")
+        status, body = connect(base, host_id3, gtoken, endpoint="127.0.0.1:3473", nonce=nonce, relay=True)
+        assert status == 403, body
+        assert body["error"] == "no relay"
+
+        # the cap is per (gid, nonce) across hosts: the 4th relayed connect for the nonce is 429
+        status, body = connect(base, host_id, gtoken, endpoint="127.0.0.1:3474", nonce=nonce, relay=True)
+        assert status == 200, body
+        status, body = connect(base, host_id, gtoken, endpoint="127.0.0.1:3475", nonce=nonce, relay=True)
+        assert status == 429, body
+        assert body["error"] == "too many relays"
+
+        # a mint older than the window: 403 (age every record past the 10-minute window)
+        old = time.time() - 601
+        for m in (lobby.mints, lobby.gid_mints, lobby.pairs, lobby.relay_counts):
+            for v in m.values():
+                v["at"] = old
+        nonce2 = "f" * 32
+        status, body = connect(base, host_id, gtoken, nonce=nonce2)
+        assert status == 200, body  # fresh direct connect (a fresh pair, no mint)
+        status, body = connect(base, host_id, gtoken, endpoint="127.0.0.1:3476", nonce=nonce2, relay=True)
+        assert status == 403, body
+        assert body["error"] == "no relay"
+        status, body = mint(base, host_id, gtoken, nonce2)
+        assert status == 200, body
+        for m in (lobby.mints, lobby.gid_mints, lobby.pairs, lobby.relay_counts):
+            for v in m.values():
+                if v["at"] > old:
+                    v["at"] = old
+        status, body = connect(base, host_id, gtoken, endpoint="127.0.0.1:3477", nonce=nonce2, relay=True)
+        assert status == 403, body
+        assert body["error"] == "no relay"
+    finally:
+        server.shutdown()
+
+
 def test_post_without_json_content_type_is_415():
     """POSTs need content-type application/json, as the deployed Worker requires (a runtime bug hid here)."""
     port, server, lobby = start_server()

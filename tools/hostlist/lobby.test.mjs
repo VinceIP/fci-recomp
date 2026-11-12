@@ -5,7 +5,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
-import { Lobby } from "./lobby.js";
+import { Lobby, TURN_WINDOW_MS } from "./lobby.js";
 
 const env = { TTL_MS: 200, RELAY: "hub.example:4000" };
 
@@ -1002,6 +1002,136 @@ test("relay connects are capped at 3 per (gid, nonce)", async () => {
       body: { id: hid, endpoint: "198.41.200.1:30004", nonce: nonce2, mac: "02:46:43:aa:bb:cc", token: "d".repeat(64), relay: true },
     }));
     assert.equal(status, 200);
+  } finally {
+    restore();
+  }
+});
+
+test("one mint covers every host the guest reached: relayed connects to two hosts are both 200", async () => {
+  const lobby = mk(TURN_ENV);
+  const gToken = "d".repeat(64);
+  const nonce = "e".repeat(32);
+  const relay = (id, port) =>
+    r(lobby, req("/v1/connect", {
+      method: "POST",
+      ip: "93.184.100.9",
+      body: { id, endpoint: "198.41.200.1:" + port, nonce, mac: "02:46:43:aa:bb:cc", token: gToken, relay: true },
+    }));
+  const restore = stubFetch(async (url) => {
+    if (String(url).includes("generate-ice-servers")) return cfOk([STUN_ENTRY, TURN_ENTRY]);
+    throw new Error("unexpected fetch: " + url);
+  });
+  try {
+    // two hosts; the guest connects to both (the one TURN allocation covers both)
+    const h1 = (await r(lobby, reg({ token: "c".repeat(64) }, "8.8.8.13")))[1].id;
+    const h2 = (await r(lobby, reg({ token: "a".repeat(64) }, "8.8.8.14")))[1].id;
+    let [status, body] = await r(lobby, conn(h1, "93.184.100.9", gToken));
+    assert.equal(status, 200);
+    [status] = await r(lobby, conn(h2, "93.184.100.9", gToken));
+    assert.equal(status, 200);
+    // one mint (for the first host)
+    [status] = await r(lobby, req("/v1/turn", { method: "POST", body: { id: h1, nonce, token: gToken } }));
+    assert.equal(status, 200);
+    // relayed connects to both hosts: both accepted, and no second mint is made
+    [status] = await relay(h1, 30001);
+    assert.equal(status, 200, "relay to the minted host");
+    [status] = await relay(h2, 30002);
+    assert.equal(status, 200, "relay to the second host, no second mint");
+    assert.equal(lobby.gidMints.size, 1);
+    assert.equal(lobby.mints.size, 1);
+    // the cap is per (gid, nonce) across hosts: the 4th relayed connect for the nonce is 429
+    [status] = await relay(h1, 30003);
+    assert.equal(status, 200, "3rd relay for the nonce");
+    [status, body] = await relay(h1, 30004);
+    assert.equal(status, 429, "4th relay for the nonce");
+    assert.equal(body.error, "too many relays");
+  } finally {
+    restore();
+  }
+});
+
+test("a relayed connect to a host the guest never connected to is 403, and a mint for the exact nonce still qualifies", async () => {
+  const lobby = mk(TURN_ENV);
+  const gToken = "d".repeat(64);
+  const nonce = "e".repeat(32);
+  const relay = (id, port) =>
+    r(lobby, req("/v1/connect", {
+      method: "POST",
+      ip: "93.184.100.9",
+      body: { id, endpoint: "198.41.200.1:" + port, nonce, mac: "02:46:43:aa:bb:cc", token: gToken, relay: true },
+    }));
+  const restore = stubFetch(async (url) => {
+    if (String(url).includes("generate-ice-servers")) return cfOk([STUN_ENTRY, TURN_ENTRY]);
+    throw new Error("unexpected fetch: " + url);
+  });
+  try {
+    const h1 = (await r(lobby, reg({ token: "c".repeat(64) }, "8.8.8.13")))[1].id;
+    const h2 = (await r(lobby, reg({ token: "a".repeat(64) }, "8.8.8.14")))[1].id;
+    let [status, body] = await r(lobby, conn(h1, "93.184.100.9", gToken));
+    assert.equal(status, 200);
+    [status] = await r(lobby, req("/v1/turn", { method: "POST", body: { id: h1, nonce, token: gToken } }));
+    assert.equal(status, 200);
+    // the guest never connected to h2: its relayed connect is refused
+    [status, body] = await relay(h2, 30001);
+    assert.equal(status, 403);
+    assert.equal(body.error, "no relay");
+    // after a direct connect to h2 the same relayed connect is accepted (the one mint covers it)
+    [status] = await r(lobby, conn(h2, "93.184.100.9", gToken));
+    assert.equal(status, 200);
+    [status] = await relay(h2, 30001);
+    assert.equal(status, 200);
+    // the old path: a mint for the exact (gid, nonce, host) qualifies on its own
+    const nonce2 = "f".repeat(32);
+    [status] = await r(lobby, req("/v1/connect", {
+      method: "POST", ip: "93.184.100.9",
+      body: { id: h1, endpoint: "93.184.100.9:41000", nonce: nonce2, mac: "02:46:43:aa:bb:cc", token: gToken },
+    }));
+    assert.equal(status, 200);
+    [status] = await r(lobby, req("/v1/turn", { method: "POST", body: { id: h1, nonce: nonce2, token: gToken } }));
+    assert.equal(status, 200);
+    [status] = await relay(h1, 30002);
+    assert.equal(status, 200, "a mint for the exact nonce still qualifies");
+  } finally {
+    restore();
+  }
+});
+
+test("a relayed connect with no mint for the gid is 403", async () => {
+  const lobby = mk(TURN_ENV);
+  const { hid, nonce } = await hostAndConn(lobby, {});
+  const [status, body] = await r(lobby, req("/v1/connect", {
+    method: "POST",
+    ip: "93.184.100.9",
+    body: { id: hid, endpoint: "198.41.200.1:30000", nonce, mac: "02:46:43:aa:bb:cc", token: "d".repeat(64), relay: true },
+  }));
+  assert.equal(status, 403);
+  assert.equal(body.error, "no relay");
+});
+
+test("a relayed connect after a mint older than the window is 403", async () => {
+  const lobby = mk(TURN_ENV);
+  const gToken = "d".repeat(64);
+  const nonce = "e".repeat(32);
+  const restore = stubFetch(async (url) => {
+    if (String(url).includes("generate-ice-servers")) return cfOk([STUN_ENTRY, TURN_ENTRY]);
+    throw new Error("unexpected fetch: " + url);
+  });
+  try {
+    const { hid } = await hostAndConn(lobby, {});
+    let [status] = await r(lobby, req("/v1/turn", { method: "POST", body: { id: hid, nonce, token: gToken } }));
+    assert.equal(status, 200);
+    // age the records past the 10-minute window (the fresh pair is replaced by the stale mint's)
+    const old = Date.now() - TURN_WINDOW_MS - 1000;
+    lobby.mints.forEach((v) => (v.at = old));
+    lobby.gidMints.forEach((v) => (v.at = old));
+    lobby.pairs.forEach((v) => (v.at = old));
+    const [s, body] = await r(lobby, req("/v1/connect", {
+      method: "POST",
+      ip: "93.184.100.9",
+      body: { id: hid, endpoint: "198.41.200.1:30000", nonce, mac: "02:46:43:aa:bb:cc", token: gToken, relay: true },
+    }));
+    assert.equal(s, 403);
+    assert.equal(body.error, "no relay");
   } finally {
     restore();
   }

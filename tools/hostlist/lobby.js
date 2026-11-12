@@ -35,7 +35,11 @@
 //   last 10 minutes (the connect queue is drained by the host's poll, so the recent pairs live in
 //   their own small map). A guest that cannot hole-punch mints once, ALLOCATEs, and posts its
 //   relayed address back as a second /v1/connect with the same nonce and "relay": true (capped at
-//   3 per nonce: ICE restarts); the host receives it on its long-poll. The host never mints.
+//   3 per nonce: ICE restarts); the host receives it on its long-poll. One mint (a TURN
+//   allocation) covers every host the guest reached directly: a relayed connect is accepted with
+//   a mint for the guest within the window (any nonce, any host) and a non-relay connect of the
+//   (guest, nonce) to that host within the window; a mint for the exact (guest, nonce, host)
+//   still qualifies. The host never mints.
 //   The TURN key is env.TURN_KEY_API_TOKEN (a wrangler secret); the key id is env.TURN_KEY_ID
 //   (a wrangler secret). Neither is in the repo, and Cloudflare's answer is never echoed.
 // - The operator's relay budget: RELAY_BUDGET_GB (a wrangler secret, GB), TURN_USAGE_API_TOKEN
@@ -86,7 +90,7 @@ const CONNECTS_MAX = 8; // the NIC's pending-peer cap (src/fci_nic.c)
 const HOST_CONNECTS_PER_MINUTE = 24; // per-host flood budget (section 5)
 const MESSAGE_MAX = 512; // register, connect and admin bodies
 const BANS_RING = 1000; // recent refusals kept in memory
-const TURN_WINDOW_MS = 600000; // a mint (and a relayed connect) is valid for 10 minutes after the connect
+export const TURN_WINDOW_MS = 600000; // a mint (and a relayed connect) is valid for 10 minutes after the connect
 const TURN_MAPS_MAX = 1000; // the recent-pairs and mints maps are tiny by construction; cap them anyway
 const HOSTS_MAX = 1024; // the global live-host cap: the per-address caps bound one client, this bounds a flood of them
 const MINTS_PER_WINDOW = 6; // mints per guest and per address, per 10-minute window
@@ -256,8 +260,10 @@ export class Lobby {
     this.waiters = new Map(); // id -> {resolve, timer}
     this.limits = new RateLimit();
     this.hostConn = new Map(); // id -> {minute, n} (the per-host connect budget)
-    this.pairs = new Map(); // gid+":"+nonce -> {host, at}: recent guest connects (the mint gate)
-    this.mints = new Map(); // gid+":"+nonce -> {host, at, relay}: recent mints (the relay-connect gate)
+    this.pairs = new Map(); // gid+":"+nonce -> {at, hosts: {host: at}}: the guest's recent non-relay connects (the mint and relay gates)
+    this.mints = new Map(); // gid+":"+nonce -> {host, at}: recent mints (the relay gate's exact-nonce path)
+    this.gidMints = new Map(); // gid -> {at}: the guest's newest successful mint, any nonce (the relay gate)
+    this.relayCounts = new Map(); // gid+":"+nonce -> {at, n}: accepted relay connects per nonce
     this.mintLimit = new RateLimit(TURN_WINDOW_MS); // mints per guest and per address
     this.abuse = { byIp: new Map(), ring: [] };
     this.reportReceipts = new Map();
@@ -442,7 +448,9 @@ export class Lobby {
   pruneTurnState(now) {
     for (const [k, v] of this.pairs) if (now - v.at > TURN_WINDOW_MS) this.pairs.delete(k);
     for (const [k, v] of this.mints) if (now - v.at > TURN_WINDOW_MS) this.mints.delete(k);
-    for (const m of [this.pairs, this.mints])
+    for (const [k, v] of this.gidMints) if (now - v.at > TURN_WINDOW_MS) this.gidMints.delete(k);
+    for (const [k, v] of this.relayCounts) if (now - v.at > TURN_WINDOW_MS) this.relayCounts.delete(k);
+    for (const m of [this.pairs, this.mints, this.gidMints, this.relayCounts])
       if (m.size > TURN_MAPS_MAX) for (const k of [...m.keys()].slice(0, m.size - TURN_MAPS_MAX)) m.delete(k);
   }
 
@@ -715,23 +723,35 @@ export class Lobby {
       return json({ error: "host busy" }, 429);
     }
     // A relayed address: the guest's punch failed, it ALLOCATEd through Cloudflare TURN, and this
-    // is its second connect with the same nonce. It is only accepted after a mint for this
-    // (gid, nonce, host) within the last 10 minutes, and at most RELAY_CONNECTS_PER_NONCE times
-    // (ICE restarts re-POST a new address). It skips the per-endpoint-IP cap (many guests' relayed
-    // addresses share Cloudflare's IPs) and keeps every other check and budget.
+    // is its second connect with the same nonce. One mint (a TURN allocation) covers every host
+    // the guest reached directly: it is accepted with a mint for this gid within the window (any
+    // nonce, any host) and a non-relay connect of this (gid, nonce) to this host within the
+    // window; a mint for this exact (gid, nonce, host) still qualifies. At most
+    // RELAY_CONNECTS_PER_NONCE times per nonce (ICE restarts re-POST a new address). It skips the
+    // per-endpoint-IP cap (many guests' relayed addresses share Cloudflare's IPs) and keeps every
+    // other check and budget.
     const relay = msg.relay === true;
     const key = gid + ":" + msg.nonce;
-    let mint = null;
     if (relay) {
-      mint = this.mints.get(key);
-      if (!mint || mint.host !== msg.id || now - mint.at > TURN_WINDOW_MS) {
+      const pair = this.pairs.get(key);
+      const gidMint = this.gidMints.get(gid);
+      const exact = this.mints.get(key);
+      const direct = pair && pair.hosts[msg.id] != null && now - pair.hosts[msg.id] <= TURN_WINDOW_MS;
+      const gated =
+        (gidMint && now - gidMint.at <= TURN_WINDOW_MS && direct) ||
+        (exact && exact.host === msg.id && now - exact.at <= TURN_WINDOW_MS);
+      if (!gated) {
         this.note("bad", ip, gid);
         return json({ error: "no relay" }, 403);
       }
-      if (mint.relay >= RELAY_CONNECTS_PER_NONCE) {
+      const relays = this.relayCounts.get(key) || { at: now, n: 0 };
+      if (relays.n >= RELAY_CONNECTS_PER_NONCE) {
         this.note("rate", ip, gid);
         return json({ error: "too many relays" }, 429);
       }
+      relays.n++;
+      relays.at = now;
+      this.relayCounts.set(key, relays);
     }
     // The guest's endpoint IP is where the host will punch: cap how many pending connects target
     // one IP (a hostile guest endpoint is bounded), excluding this guest's own queued entry. A
@@ -744,8 +764,13 @@ export class Lobby {
       this.note("rate", ip, gid);
       return json({ error: "too many connects at this endpoint" }, 429);
     }
-    if (relay) mint.relay++;
-    this.pairs.set(key, { host: msg.id, at: now }); // the mint gate: this guest reached this host
+    if (!relay) {
+      // the mint and relay gates: this guest reached this host directly
+      const pair = this.pairs.get(key) || { at: now, hosts: {} };
+      pair.hosts[msg.id] = now;
+      pair.at = now;
+      this.pairs.set(key, pair);
+    }
     this.pruneTurnState(now);
     const glocal = localOk(msg.local) ? String(msg.local) : undefined;
     const q = this.connects.get(msg.id) || [];
@@ -834,7 +859,8 @@ export class Lobby {
       this.note("nohost", ip, msg.id);
       return json({ error: "no such host" }, 404);
     }
-    if (!pair || pair.host !== String(msg.id) || now - pair.at > TURN_WINDOW_MS) {
+    const direct = pair && pair.hosts[String(msg.id)] != null && now - pair.hosts[String(msg.id)] <= TURN_WINDOW_MS;
+    if (!direct) {
       this.note("bad", ip, gid);
       return json({ error: "no connect" }, 403);
     }
@@ -890,9 +916,8 @@ export class Lobby {
       this.note("norelay", ip, gid);
       return json({ error: "no relay" }, 503);
     }
-    // a re-mint keeps the nonce's relay-connect count: the 3-per-nonce cap is per nonce, not per mint
-    const prev = this.mints.get(gid + ":" + msg.nonce);
-    this.mints.set(gid + ":" + msg.nonce, { host: String(msg.id), at: now, relay: prev ? prev.relay : 0 });
+    this.mints.set(gid + ":" + msg.nonce, { host: String(msg.id), at: now });
+    this.gidMints.set(gid, { at: now }); // the relay gate: this guest holds a fresh TURN allocation
     this.pruneTurnState(now);
     this.metrics.relay.issued++;
     return json({ username: cred.username, credential: cred.credential, urls: cred.urls });

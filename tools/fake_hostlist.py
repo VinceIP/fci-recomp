@@ -130,8 +130,10 @@ class Lobby:
         self.connects = {}  # id -> [{endpoint, nonce, mac, gid, relay}]
         self.waiters = {}  # id -> {event, result}
         self.host_conn = {}  # id -> (minute, n)
-        self.pairs = {}  # gid+":"+nonce -> {host, at}: recent guest connects (the mint gate)
-        self.mints = {}  # gid+":"+nonce -> {host, at, relay}: recent mints (the relay gate)
+        self.pairs = {}  # gid+":"+nonce -> {at, hosts: {host: at}}: recent non-relay connects
+        self.mints = {}  # gid+":"+nonce -> {host, at}: recent mints (the relay gate's exact-nonce path)
+        self.gid_mints = {}  # gid -> {at}: the guest's newest successful mint, any nonce (the relay gate)
+        self.relay_counts = {}  # gid+":"+nonce -> {at, n}: accepted relay connects per nonce
         self.bans = {}  # id -> {id, reason, date}
         self.limits = RateLimit()
         self.mint_limits = RateLimit(TURN_WINDOW_SECONDS)
@@ -157,7 +159,7 @@ class Lobby:
     def _prune_turn_state(self, now):  # the lock is already held
         # The connect queue is drained by the host's poll, so the mint and relay-connect gates
         # keep their own recent (gid, nonce) records, pruned by age (10 minutes).
-        for m in (self.pairs, self.mints):
+        for m in (self.pairs, self.mints, self.gid_mints, self.relay_counts):
             for k in [k for k, v in m.items() if now - v["at"] > TURN_WINDOW_SECONDS]:
                 del m[k]
 
@@ -320,20 +322,37 @@ class Lobby:
                 self._note("rate", ip, id_)
                 return 429, {"error": "host busy"}
             # A relayed address: the guest's punch failed, it ALLOCATEd through TURN, and this is
-            # its second connect with the same nonce. Only after a mint for this (gid, nonce, host)
-            # within the last 10 minutes, and at most RELAY_CONNECTS_PER_NONCE times (ICE restarts).
-            # It keeps every other check and budget above.
+            # its second connect with the same nonce. One mint (a TURN allocation) covers every
+            # host the guest reached directly: accepted with a mint for this gid within the window
+            # (any nonce, any host) and a non-relay connect of this (gid, nonce) to this host
+            # within the window; a mint for this exact (gid, nonce, host) still qualifies. At most
+            # RELAY_CONNECTS_PER_NONCE times per nonce (ICE restarts). It keeps every other check
+            # and budget above.
             key = gid + ":" + nonce
-            mint = self.mints.get(key)
             if relay:
-                if mint is None or mint["host"] != id_ or now - mint["at"] > TURN_WINDOW_SECONDS:
+                pair = self.pairs.get(key)
+                gid_mint = self.gid_mints.get(gid)
+                exact = self.mints.get(key)
+                direct = pair is not None and id_ in pair["hosts"] and now - pair["hosts"][id_] <= TURN_WINDOW_SECONDS
+                gated = (gid_mint is not None and now - gid_mint["at"] <= TURN_WINDOW_SECONDS and direct) or (
+                    exact is not None and exact["host"] == id_ and now - exact["at"] <= TURN_WINDOW_SECONDS
+                )
+                if not gated:
                     self._note("bad", ip, gid)
                     return 403, {"error": "no relay"}
-                if mint["relay"] >= RELAY_CONNECTS_PER_NONCE:
+                relays = self.relay_counts.get(key, {"at": now, "n": 0})
+                if relays["n"] >= RELAY_CONNECTS_PER_NONCE:
                     self._note("rate", ip, gid)
                     return 429, {"error": "too many relays"}
-                mint["relay"] += 1
-            self.pairs[key] = {"host": id_, "at": now}  # the mint gate: this guest reached this host
+                relays["n"] += 1
+                relays["at"] = now
+                self.relay_counts[key] = relays
+            if not relay:
+                # the mint and relay gates: this guest reached this host directly
+                pair = self.pairs.get(key) or {"at": now, "hosts": {}}
+                pair["hosts"][id_] = now
+                pair["at"] = now
+                self.pairs[key] = pair
             self._prune_turn_state(now)
             glocal = body.get("local", "")
             glocal = glocal if local_ok(glocal) else None
@@ -398,7 +417,8 @@ class Lobby:
                 self._note("banned", ip, gid)
                 return 403, {"error": "banned"}
             pair = self.pairs.get(gid + ":" + nonce)
-            if pair is None or pair["host"] != id_ or now - pair["at"] > TURN_WINDOW_SECONDS:
+            direct = pair is not None and id_ in pair["hosts"] and now - pair["hosts"][id_] <= TURN_WINDOW_SECONDS
+            if not direct:
                 self._note("bad", ip, gid)
                 return 403, {"error": "no connect"}
             if not self.mint_limits.take("gid:" + gid, MINTS_PER_WINDOW, now) or not self.mint_limits.take(
@@ -409,7 +429,8 @@ class Lobby:
             if not self.turn_user or not self.turn_pass:
                 self._note("norelay", ip, gid)
                 return 503, {"error": "no relay"}
-            self.mints[gid + ":" + nonce] = {"host": id_, "at": now, "relay": 0}
+            self.mints[gid + ":" + nonce] = {"host": id_, "at": now}
+            self.gid_mints[gid] = {"at": now}  # the relay gate: this guest holds a fresh TURN allocation
             self._prune_turn_state(now)
             return 200, {"username": self.turn_user, "credential": self.turn_pass, "urls": [self.turn_url]}
 
