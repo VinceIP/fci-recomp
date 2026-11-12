@@ -46,7 +46,7 @@ extern uint32_t fci_xbe_version;
 extern const char *fci_save_dir;
 
 #define LIST_FETCH_INTERVAL_MS 10000
-#define POLL_WAIT_S            20
+#define POLL_WAIT_S            50 /* the Worker allows 60; a registration lives 90 s past a poll */
 #define WORKER_TICK_MS         500
 
 static HANDLE s_thread;
@@ -1030,9 +1030,9 @@ static DWORD WINAPI worker_main(LPVOID arg)
         log_line("WinHttpOpen failed (%u)", (unsigned)GetLastError());
         return 1;
     }
-    /* set a timeout: 25 s for the long-poll (20 s wait + 5 s margin) */
+    /* the long-poll's wait plus a margin: an idle host makes about 72 requests an hour, not 180 */
     {
-        DWORD t = 25000;
+        DWORD t = (POLL_WAIT_S + 5) * 1000;
         WinHttpSetOption(s_session, WINHTTP_OPTION_SEND_TIMEOUT, &t, sizeof t);
         WinHttpSetOption(s_session, WINHTTP_OPTION_RECEIVE_TIMEOUT, &t, sizeof t);
     }

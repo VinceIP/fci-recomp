@@ -490,7 +490,9 @@ class Lobby:
 def make_handler(lobby):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):
-            pass  # quiet
+            # quiet, unless FAKE_HOSTLIST_LOG=1: one line a request, to count a client's requests
+            if os.environ.get("FAKE_HOSTLIST_LOG") == "1":
+                print(f"{time.time():.1f} {fmt % args}", flush=True)
 
         def _send(self, status, body):
             if status == 204 or body is None:
@@ -578,7 +580,7 @@ def make_handler(lobby):
             elif url.path == "/v1/connects":
                 id_ = params.get("id", [""])[0]
                 token = params.get("token", [""])[0]
-                wait = min(30, max(1, int(params.get("wait", ["20"])[0])))
+                wait = min(60, max(1, int(params.get("wait", ["20"])[0])))  # the Worker's bound
                 status, resp = lobby.poll(id_, token, wait, ip)
             else:
                 status, resp = 404, {"error": "not found"}
