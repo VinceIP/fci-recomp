@@ -19,6 +19,7 @@
 #include "fci_image.h"
 #include "fci_net.h"
 #include "fci_net_worker.h"
+#include "fci_json.h"
 
 /* the NIC's worker API (fci_nic.c): called under s_lock */
 extern int fci_nic_list_add_peer(const char *endpoint, const char *local, const uint8_t mac[6],
@@ -260,55 +261,6 @@ static int json_bool(const char *buf, const char *key)
     if (strncmp(p, "false", 5) == 0)
         return 0;
     return -1;
-}
-
-/* extract an array of objects: calls fn(obj_buf, obj_len) for each '{...}' in the array */
-static void json_array(const char *buf, const char *key, void (*fn)(const char *, int))
-{
-    char pat[64];
-    const char *p;
-    snprintf(pat, sizeof pat, "\"%s\"", key);
-    p = strstr(buf, pat);
-    if (!p)
-        return;
-    p += strlen(pat);
-    while (*p && *p != '[')
-        p++;
-    if (*p != '[')
-        return;
-    p++;
-    while (*p) {
-        while (*p && *p != '{')
-            p++;
-        if (!*p)
-            break;
-        /* find the matching } */
-        {
-            const char *start = p;
-            int depth = 0;
-            while (*p) {
-                if (*p == '{')
-                    depth++;
-                else if (*p == '}') {
-                    depth--;
-                    if (depth == 0) {
-                        p++;
-                        break;
-                    }
-                }
-                p++;
-            }
-            fn(start, (int)(p - start));
-        }
-        while (*p && *p != '}')
-            p++;
-        if (*p == '}')
-            p++;
-        while (*p && *p != ']' && *p != '{')
-            p++;
-        if (*p == ']')
-            break;
-    }
 }
 
 /* --- WinHTTP helpers --- */
@@ -845,7 +797,8 @@ static void guest_fetch(void)
     }
     log_line("list fetched (%s)", net_title());
     s_seen_n = 0;
-    json_array(buf, "hosts", on_host_obj);
+    if (fci_json_array(buf, "hosts", on_host_obj) > 0)
+        log_line("host list: a listing too long to read, skipped");
     InterlockedExchange(&s_fetch_nhosts, (LONG)s_seen_n);
     if (s_seen_n == 0) {
         fci_nic_browse_clear_dropped();
@@ -989,7 +942,8 @@ static void host_poll(void)
         return;
     }
     if (status == 200) {
-        json_array(buf, "connects", on_connect_obj);
+        if (fci_json_array(buf, "connects", on_connect_obj) > 0)
+            log_line("connect poll: an entry too long to read, skipped");
     }
     /* 204: no connects, the poll timed out; loop */
 }
