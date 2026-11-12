@@ -122,8 +122,13 @@ void fci_multiplayer_menu_action(uint32_t hash)
 
 int fci_gate_000FB0A2(void)
 {
+    extern int fci_menu_quit_action(uint32_t hash); /* fci_menu.c */
     uint32_t hash;
-    if (fci_nic_menu_mode() && read_action_hash(&hash))
+    if (!read_action_hash(&hash))
+        return 0;
+    if (fci_menu_quit_action(hash))
+        return 0; /* the body ignores B_Quit */
+    if (fci_nic_menu_mode())
         fci_multiplayer_menu_action(hash);
     return 0;
 }

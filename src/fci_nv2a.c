@@ -677,6 +677,19 @@ static LRESULT CALLBACK window_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
     return DefWindowProcA(w, msg, wp, lp);
 }
 
+/* close the game as the window's close button does (QUIT GAME, fci_menu.c); with no window, the same
+ * steps here */
+void fci_window_close(void)
+{
+    extern void fci_exit_wait(void);
+    extern void fci_net_leave(void);
+    if (window && PostMessageA(window, WM_CLOSE, 0, 0))
+        return;
+    fci_exit_wait();
+    fci_net_leave();
+    TerminateProcess(GetCurrentProcess(), 0);
+}
+
 static DWORD WINAPI window_thread(LPVOID unused)
 {
     WNDCLASSA wc;

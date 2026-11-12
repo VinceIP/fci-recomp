@@ -176,8 +176,56 @@ int fci_partition_length(HANDLE h, LARGE_INTEGER *length)
     return 1;
 }
 
-/* Patch the copied XML before the UI caches its glyphs. Keep archive offsets and lengths intact. */
-static void relabel_multiplayer_xml(HANDLE h, void *buffer, uint32_t bytes)
+/* QUIT GAME on the main menu: the hidden CHEATS (DEBUG) item of each title's main menu layout
+ * (magma/crypregame.mgb in common.dat) becomes B_Quit: its element ID at every site, same size, and its
+ * position lined up with the items above. Only a read that is exactly that file, with the old ID and
+ * position at every site, is changed; the archive on disk is not. Evidence: re/notes/MENUS.md. */
+#define MGB_CHEATS_DEBUG 0xE5B2EC52u /* CRC-32 of the element name */
+#define MGB_QUIT         0x8BCDF569u
+static const struct quit_layout {
+    const char *title;
+    uint32_t size, record, sites[3], old_x, old_y, x, y;
+} quit_layouts[] = {
+        {"Instincts", 62654, 0xA24, {0x4C7, 0xA24, 0xA33}, 0x00460000u, 0x17C, 0x003E0000u, 0x181},
+        {"Evolution", 68737, 0xB05, {0x4C7, 0xB05, 0xB14}, 0x00400000u, 0x162, 0x00300000u, 0x162},
+};
+
+static void add_quit_item(void *buffer, uint32_t bytes)
+{
+    static const uint32_t pos[] = {0x30, 0x54, 0x78}; /* the record's three X, Y pairs */
+    uint8_t *b = buffer;
+    extern int fci_menu_quit_enabled(void);
+    if (bytes < 16 || memcmp(b, "MAGMA", 5) || !fci_menu_quit_enabled())
+        return;
+    for (size_t l = 0; l < sizeof quit_layouts / sizeof *quit_layouts; l++) {
+        const struct quit_layout *q = &quit_layouts[l];
+        uint32_t v;
+        int ok = bytes == q->size;
+        for (int i = 0; ok && i < 3; i++) {
+            memcpy(&v, b + q->sites[i], 4);
+            ok = v == MGB_CHEATS_DEBUG;
+        }
+        for (int i = 0; ok && i < 3; i++) {
+            uint32_t xy[2];
+            memcpy(xy, b + q->record + pos[i], 8);
+            ok = xy[0] == q->old_x && xy[1] == q->old_y;
+        }
+        if (!ok)
+            continue;
+        for (int i = 0; i < 3; i++) {
+            const uint32_t id = MGB_QUIT, xy[2] = {q->x, q->y};
+            memcpy(b + q->sites[i], &id, 4);
+            memcpy(b + q->record + pos[i], xy, 8);
+        }
+        fprintf(stderr, "[FCI] menu: QUIT GAME added to the %s main menu\n", q->title);
+        fflush(stderr);
+        return;
+    }
+}
+
+/* Patch the copied XML before the UI caches its glyphs. Keep archive offsets and lengths intact.
+ * mp: the multiplayer rows (menu mode); quit: QUIT GAME's label and tooltip. */
+static void relabel_xml(HANDLE h, void *buffer, uint32_t bytes, int mp, int quit)
 {
     static const char live[] = "<string enum=\"B_Live\" value=\"XBOX LIVE\"/>";
     static const char internet[] = "<string enum=\"B_Live\" value=\"INTERNET\" />";
@@ -197,27 +245,38 @@ static void relabel_multiplayer_xml(HANDLE h, void *buffer, uint32_t bytes)
     _Static_assert(sizeof live_evo_desc_old == sizeof live_evo_desc_new, "Menu XML row size changed");
     _Static_assert(sizeof lan_desc_old == sizeof lan_desc_new, "Menu XML row size changed");
     _Static_assert(sizeof lan_alt_desc_old == sizeof lan_alt_desc_new, "Menu XML row size changed");
+    static const char quit_old[] = "<string enum=\"B_CheatsDebug\" value=\"CHEATS (DEBUG)\"/>";
+    static const char quit_new[] = "<string enum=\"B_Quit\" value=\"QUIT GAME\"            />";
+    static const char quit_desc_old[] = "<string enum=\"B_CheatsDebug\" value=\"Debugging Cheats (DEBUG)\"/>";
+    static const char quit_desc_new[] = "<string enum=\"B_Quit\" value=\"Exit the game\"                  />";
+    _Static_assert(sizeof quit_old == sizeof quit_new, "Menu XML row size changed");
+    _Static_assert(sizeof quit_desc_old == sizeof quit_desc_new, "Menu XML row size changed");
     static const struct {
         const char *old, *replacement;
         size_t bytes;
+        int quit; /* 1: a QUIT GAME row, 0: a multiplayer row */
     } rows[] = {
-        {live, internet, sizeof live - 1},
-        {system_link, lan, sizeof system_link - 1},
-        {live_fci_desc_old, live_fci_desc_new, sizeof live_fci_desc_old - 1},
-        {live_evo_desc_old, live_evo_desc_new, sizeof live_evo_desc_old - 1},
-        {lan_desc_old, lan_desc_new, sizeof lan_desc_old - 1},
-        {lan_alt_desc_old, lan_alt_desc_new, sizeof lan_alt_desc_old - 1},
+            {live, internet, sizeof live - 1, 0},
+            {system_link, lan, sizeof system_link - 1, 0},
+            {live_fci_desc_old, live_fci_desc_new, sizeof live_fci_desc_old - 1, 0},
+            {live_evo_desc_old, live_evo_desc_new, sizeof live_evo_desc_old - 1, 0},
+            {lan_desc_old, lan_desc_new, sizeof lan_desc_old - 1, 0},
+            {lan_alt_desc_old, lan_alt_desc_new, sizeof lan_alt_desc_old - 1, 0},
+            {quit_old, quit_new, sizeof quit_old - 1, 1},
+            {quit_desc_old, quit_desc_new, sizeof quit_desc_old - 1, 1},
     };
     char *cursor = buffer;
     const char *end = cursor + bytes;
     int common_dat = 0;
-    while (end - cursor >= (ptrdiff_t)(sizeof live - 1)) {
+    while (end - cursor >= (ptrdiff_t)(sizeof live - 1)) { /* the shortest row */
         cursor = memchr(cursor, '<', (size_t)(end - cursor));
         if (!cursor)
             break;
         const char *replacement = NULL;
         size_t row_size = 0;
         for (size_t i = 0; i < sizeof rows / sizeof *rows; i++) {
+            if (!(rows[i].quit ? quit : mp))
+                continue;
             if ((size_t)(end - cursor) >= rows[i].bytes && !memcmp(cursor, rows[i].old, rows[i].bytes)) {
                 replacement = rows[i].replacement;
                 row_size = rows[i].bytes;
@@ -246,8 +305,13 @@ uint32_t fci_partition_read_fill(HANDLE h, void *buf, uint32_t length, const LAR
     int p;
     ULONGLONG end;
     extern int fci_nic_menu_mode(void);
-    if (status == 0 && *got && fci_nic_menu_mode())
-        relabel_multiplayer_xml(h, buf, *got);
+    extern int fci_menu_quit_enabled(void);
+    if (status == 0 && *got) {
+        int mp = fci_nic_menu_mode(), quit = fci_menu_quit_enabled();
+        if (mp || quit)
+            relabel_xml(h, buf, *got, mp, quit);
+        add_quit_item(buf, *got);
+    }
     fci_pak_log_read(h, off, length, status, *got); /* inert unless RECOMP_FCI_PAK_LOG */
     if (*got >= length || (status != 0 && status != 0xC0000011u /* END_OF_FILE */) || !off)
         return status;

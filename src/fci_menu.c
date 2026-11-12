@@ -1,5 +1,6 @@
 /* RECOMP_FCI_MENU_LOG=<file>: JSON-lines trace of menu action dispatch.
- * RECOMP_FCI_MENU_QUIT=1: intercept B_Quit on the main menu and exit.
+ * QUIT GAME on the main menu (both titles): fci_disk.c turns the hidden CHEATS (DEBUG) item into B_Quit;
+ * fci_menu_quit_action closes the game as the window's close button does. RECOMP_FCI_MENU_QUIT=0: off.
  *
  * Two hooks:
  *   - gate on sub_0014EFF0 (main menu handler, recomp_0020.c:1103)
@@ -22,15 +23,41 @@
 static FILE *menu_log;
 static volatile LONG menu_seq;
 static SRWLOCK menu_lock = SRWLOCK_INIT;
-static int menu_quit_enabled;
+void menu_log_line(const char *handler, const char *ev, const char *extra);
 
 void fci_menu_log_init(void)
 {
     const char *path = getenv("RECOMP_FCI_MENU_LOG");
     if (path && *path)
         menu_log = fopen(path, "w");
-    const char *quit = getenv("RECOMP_FCI_MENU_QUIT");
-    menu_quit_enabled = (quit && quit[0] == '1');
+}
+
+/* QUIT GAME on the main menu, on unless RECOMP_FCI_MENU_QUIT=0 (then the item stays hidden) */
+int fci_menu_quit_enabled(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("RECOMP_FCI_MENU_QUIT");
+        on = !(e && *e == '0');
+    }
+    return on;
+}
+
+/* a main menu action: B_Quit (0x8bcdf569) closes the game through the window's close path, so a save in
+ * progress finishes, the host list is left and the log is kept. 1 when it was B_Quit. */
+int fci_menu_quit_action(uint32_t hash)
+{
+    extern void fci_window_close(void);
+    if (!fci_menu_quit_enabled() || hash != 0x8bcdf569u)
+        return 0;
+    static volatile LONG asked; /* Evolution's dispatcher re-reads the action, so one request per press */
+    if (InterlockedExchange(&asked, 1))
+        return 1;
+    menu_log_line("main", "quit", ", \"elem\": 8bcdf569, \"action\": \"close\"");
+    fprintf(stderr, "[FCI] menu: QUIT GAME chosen, closing\n");
+    fflush(stderr);
+    fci_window_close();
+    return 1;
 }
 
 /* guest address is safely readable: inside the guest window and mapped. Shared with fci_lan_menu.c. */
@@ -102,33 +129,7 @@ int fci_gate_0014EFF0(void)
     extern void fci_multiplayer_menu_action(uint32_t hash);
     fci_multiplayer_menu_action(hash);
 
-    /* B_Quit intercept: only when RECOMP_FCI_MENU_QUIT=1. */
-    if (menu_quit_enabled && hash == 0x8bcdf569u) {
-        menu_log_line("main", "quit", ", \"elem\": 8bcdf569, \"action\": \"exit\"");
-        /*
-         * Draft: exit directly. This skips the confirm dialog that the MP
-         * handler (sub_00148170) shows via sub_00105FF0. The dialog function
-         * takes 12 parameters and interacts with the Magma UI system; calling
-         * it safely from a gate requires setting up the full parameter stack
-         * and ensuring the UI system is in the correct state. For a draft that
-         * proves the button works end-to-end, ExitProcess(0) is the safest
-         * equivalent — it is the same call the kernel bridge makes at
-         * kernel_hal.c:519 when HalReturnToFirmware fires.
-         *
-         * Proper implementation (future):
-         *   1. Set a global "quit requested" flag here, return 1.
-         *   2. In a hook on the frame loop (e.g. Input_PollPads sub_001F6C00),
-         *      check the flag. When set, call sub_00105FF0 with the same
-         *      parameters as sub_00148170's B_Quit branch (~0x001484C2):
-         *        - eax = 0x2D (45, dialog type)
-         *        - stack: title string VA, body string VA, callback, ...
-         *      The dialog's confirm callback then calls HalReturnToFirmware.
-         *   3. This requires the Magma UI to be in the "main menu" state,
-         *      which it is when the frame loop runs.
-         */
-        fprintf(stderr, "[MENU_QUIT] B_Quit intercepted on main menu — exiting\n");
-        ExitProcess(0);
-    }
+    fci_menu_quit_action(hash); /* the body ignores B_Quit */
 
     return 0; /* let the body handle it */
 }
