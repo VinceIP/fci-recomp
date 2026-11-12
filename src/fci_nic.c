@@ -228,7 +228,8 @@ static volatile LONG s_probe; /* A browser entry takes precedence over a discove
 static volatile LONG s_turn_need;  /* a peer is in LP_TURN_WAIT: the worker should mint a credential */
 static volatile LONG s_turn_ready; /* the allocation is ready: the worker should post the relayed connect */
 static int s_turn_ok;              /* RECOMP_FCI_NET_TURN != "0" */
-static int s_punch_off;            /* RECOMP_FCI_NET_PUNCH == "0": a test switch, every pair goes to the relay */
+static int s_punch_off;            /* test builds only (FCI_NET_TEST): RECOMP_FCI_NET_PUNCH=0 sends every pair to
+                                      the relay. Players get no such switch: the relay costs its operator */
 
 #define TRACE(...)                                                                                           \
     do {                                                                                                     \
@@ -2278,12 +2279,14 @@ static int connect_list(const char *url, char *err, int errlen)
         fflush(stderr);
     }
     s_turn_ok = !(turn && turn[0] == '0'); /* the TURN relay, on unless disabled */
+#ifdef FCI_NET_TEST
     {
         const char *punch = getenv("RECOMP_FCI_NET_PUNCH");
         s_punch_off = punch && punch[0] == '0';
         if (s_punch_off)
             fprintf(stderr, "[FCI] network: hole punching disabled (RECOMP_FCI_NET_PUNCH=0): a test of the relay\n");
     }
+#endif
     if (!s_turn_ok)
         fprintf(stderr, "[FCI] network: TURN relay disabled (RECOMP_FCI_NET_TURN=0)\n");
     /* the card socket: bound to a local port, unconnected (punches and STUN go to any address) */

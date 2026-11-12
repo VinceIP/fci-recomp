@@ -45,7 +45,7 @@ DATA = REPO / "data"
 HOST = REPO / "src"
 BUILD_TOOLS = ("compile.py", "image_profile.py")
 # environment variables that change what tools/compile.py builds (diagnostic builds)
-DIAGNOSTIC_ENV = ("FCI_PROBE", "FCI_CALL_PROFILE", "FCI_BETA_REPORTS")
+DIAGNOSTIC_ENV = ("FCI_PROBE", "FCI_CALL_PROFILE", "FCI_BETA_REPORTS", "FCI_NET_TEST")
 
 
 def default_jobs():

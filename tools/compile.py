@@ -532,6 +532,8 @@ def compile_groups(group, inputs, work, obj, tools, base, record):
             flags = ["-O2", *DEBUG, "-Wall", "-Wno-unused", "-Werror=implicit-function-declaration"]
             if f.name == "fci_net_worker.c" and os.environ.get("FCI_BETA_REPORTS") == "1":
                 flags.append("-DFCI_BETA_REPORTS")
+            if f.name == "fci_nic.c" and os.environ.get("FCI_NET_TEST") == "1":
+                flags.append("-DFCI_NET_TEST")  # the relay test switch (RECOMP_FCI_NET_PUNCH)
             jobs.append((cc + flags + inc([gen] + rt_inc) + out(f.stem + ".obj") + [str(f)], [f]))
     elif group == "xbr":
         # Xbox XBE Recomp's D3D8 and DirectSound layers and the Direct3D 12 renderer (src/xbr), with the
