@@ -86,6 +86,11 @@
       "XNetCreateKey (Instincts' 0051C5EA, research qwen/notes/q5-hosting-hook.md): only a host creates a key; RegisterKey also runs on a joining guest here. The worker thread registers with the host list (fci_net_worker.c)",
       "0051C5EA"
     ],
+    "sub_003D02D4": [
+      "prehook",
+      "XNetRegisterKey (Instincts' 0051CDD4, research qwen/notes/q5-hosting-hook.md): logs the session key (fci_net_worker.c)",
+      "0051CDD4"
+    ],
     "sub_00063F01": [
       "prehook",
       "the CEntity constructor (the entity is the first stack argument; it stores the vtable 004B04E8 at recomp_0010.c:7114): registers the entity with RECOMP_FCI_TELEMETRY (fci_telemetry.c)"

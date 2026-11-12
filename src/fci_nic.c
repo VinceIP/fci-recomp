@@ -453,6 +453,44 @@ static void relay_out(const lpeer_t *p, const uint8_t *f, uint32_t len)
     }
 }
 
+/* RECOMP_FCI_NET_TRACE: each new kind of broadcast the game sends (ethertype, IP protocol, UDP ports,
+ * length), to tell a browser's search from a host's or a match's own broadcasts */
+static void trace_broadcast(const uint8_t *f, uint32_t len)
+{
+    static uint32_t seen[32];
+    static int nseen;
+    uint32_t sport = 0, dport = 0, proto = 0, type = len >= 14 ? (uint32_t)(f[12] << 8 | f[13]) : 0, key;
+    if (s_trace <= 0)
+        return;
+    if (type == 0x0800 && len >= 14 + 20 + 4) {
+        uint32_t ihl = (f[14] & 15u) * 4u;
+        proto = f[23];
+        if (proto == 17 && len >= 14 + ihl + 4) {
+            sport = (uint32_t)(f[14 + ihl] << 8 | f[15 + ihl]);
+            dport = (uint32_t)(f[16 + ihl] << 8 | f[17 + ihl]);
+        }
+    }
+    key = (sport * 31u + dport) * 2654435761u ^ (len << 8) ^ proto ^ type << 20;
+    for (int i = 0; i < nseen; i++)
+        if (seen[i] == key)
+            return;
+    if (nseen < 32)
+        seen[nseen++] = key;
+    fprintf(stderr, "[FCI] network: trace: broadcast type %04x proto %u udp %u->%u len %u\n", type, proto,
+            sport, dport, len);
+    fflush(stderr);
+}
+
+/* an IPv4 UDP datagram to the DHCP server port (67) */
+static int is_dhcp(const uint8_t *f, uint32_t len)
+{
+    uint32_t ihl;
+    if (len < 14 + 20 + 4 || f[12] != 0x08 || f[13] != 0x00 || f[23] != 17)
+        return 0;
+    ihl = (f[14] & 15u) * 4u;
+    return len >= 14 + ihl + 4 && f[16 + ihl] == 0 && f[17 + ihl] == 67;
+}
+
 static int route_frame(const uint8_t *f, uint32_t len)
 {
     int i;
@@ -477,7 +515,9 @@ static int route_frame(const uint8_t *f, uint32_t len)
                     sent = 1;
                 }
             }
-            InterlockedCompareExchange(&s_probe, FCI_LIST_PROBE_DISCOVERY, 0);
+            trace_broadcast(f, len);
+            if (!is_dhcp(f, len)) /* the network stack's DHCP at boot is not a search */
+                InterlockedCompareExchange(&s_probe, FCI_LIST_PROBE_DISCOVERY, 0);
             return sent;
         }
         for (i = 0; i < s_nlpeers; i++) {

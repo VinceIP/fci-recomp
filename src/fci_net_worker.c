@@ -21,6 +21,7 @@
 #include "fci_net_worker.h"
 #include "fci_json.h"
 #include "fci_turn.h"
+#include "recomp_types.h"
 
 /* the NIC's worker API (fci_nic.c): called under s_lock */
 extern int fci_nic_list_add_peer(const char *endpoint, const char *local, const uint8_t mac[6],
@@ -55,6 +56,8 @@ static HANDLE s_thread;
 static HANDLE s_stop;
 static HINTERNET s_session;
 static volatile LONG s_host_started; /* set by fci_prehook_0051C5EA */
+static uint32_t s_host_kid_va;       /* XNetCreateKey's key id out-pointer (guest address) */
+static char s_host_kid[17];          /* this host's key id, hex, once registered */
 
 /* the identity: 32 random bytes, hex (s_identity), stable across sessions. It lives in the data
  * folder (fci_save_dir\fci_token: %APPDATA%\fci-recomp\profile on Windows, the Wine prefix's
@@ -1017,6 +1020,10 @@ static DWORD WINAPI worker_main(LPVOID arg)
         if (s_registered)
             host_poll();
         int probe = fci_nic_worker_probe_take();
+        /* a host's broadcasts answer other players' searches: it does not browse (no list fetch, so no
+         * connects or relay credentials). Leaving a hosted match relaunches the game, which clears this. */
+        if (probe == FCI_LIST_PROBE_DISCOVERY && s_host_started)
+            probe = 0;
         if (probe == FCI_LIST_PROBE_ENTRY ||
             (probe == FCI_LIST_PROBE_DISCOVERY &&
              (!s_last_fetch_attempt || GetTickCount64() - s_last_fetch_attempt >= LIST_FETCH_INTERVAL_MS)))
@@ -1101,4 +1108,26 @@ void fci_prehook_0051C5EA(void)
 {
     /* XNetCreateKey: the game is creating a host's key. Set the flag; the worker picks it up. */
     InterlockedExchange(&s_host_started, 1);
+    s_host_kid_va = MEM32(g_esp + 4); /* the XNKID it fills; read at RegisterKey */
+}
+
+/* the 8-byte key id at va, as hex */
+static void kid_hex(uint32_t va, char out[17])
+{
+    for (int i = 0; i < 8; i++)
+        snprintf(out + i * 2, 3, "%02x", (unsigned)MEM8(va + (uint32_t)i));
+}
+
+/* XNetRegisterKey (q5-hosting-hook.md): logged with whether it is the key this host created */
+void fci_prehook_0051CDD4(void)
+{
+    char k[17];
+    kid_hex(MEM32(g_esp + 4), k);
+    if (s_host_kid_va) {
+        char h[17];
+        kid_hex(s_host_kid_va, h);
+        if (!strcmp(h, k))
+            memcpy(s_host_kid, k, sizeof s_host_kid);
+    }
+    log_line("key registered %s%s", k, strcmp(k, s_host_kid) ? "" : " (this host's)");
 }

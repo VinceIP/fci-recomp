@@ -18,7 +18,7 @@ void fci_net_worker_stop(void);
  * instead of waiting for its TTL. */
 void fci_net_leave(void);
 
-/* the game's XNetRegisterKey import thunk: the worker registers as a host from here */
+/* XNetRegisterKey (q5-hosting-hook.md): logs the session key, and whether it is this host's */
 void fci_prehook_0051CDD4(void);
 
 #endif
