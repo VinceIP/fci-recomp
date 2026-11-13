@@ -179,6 +179,7 @@ static void local_addr_detect(void)
 
 static char s_host_id[64];
 static int s_registered;
+static unsigned long long s_conn_seq; /* the last connect handled (the list's seq): sent back as ack */
 static ULONGLONG s_last_fetch_attempt;    /* last /v1/hosts attempt (GetTickCount64) */
 static ULONGLONG s_host_start_ms; /* when "host started" was set (for the endpoint-wait log) */
 static ULONGLONG s_reg_fail_ms;   /* last failed register (back off 5 s; a banned id gets 403 forever) */
@@ -267,6 +268,21 @@ static int json_bool(const char *buf, const char *key)
     if (strncmp(p, "false", 5) == 0)
         return 0;
     return -1;
+}
+
+/* extract a non-negative integer value; 0 when absent */
+static unsigned long long json_u64(const char *buf, const char *key)
+{
+    char pat[64];
+    const char *p;
+    snprintf(pat, sizeof pat, "\"%s\":", key);
+    p = strstr(buf, pat);
+    if (!p)
+        return 0;
+    p += strlen(pat);
+    while (*p == ' ' || *p == '\t')
+        p++;
+    return strtoull(p, NULL, 10);
 }
 
 /* --- WinHTTP helpers --- */
@@ -909,6 +925,8 @@ static void host_register(void)
     }
     s_reg_fail_ms = 0;
     json_str_val(buf, "id", s_host_id, sizeof s_host_id);
+    /* connects queued before this listing are stale; a list without seq (older Worker) gives 0 */
+    s_conn_seq = json_u64(buf, "seq");
     s_registered = 1;
     log_line("registered as host %s (endpoint %s)", s_host_id, endpoint);
 }
@@ -918,7 +936,13 @@ static void on_connect_obj(const char *obj, int len)
     char endpoint[128], nonce_hex[64], macstr[32], local[64];
     uint8_t mac[6], nonce[16];
     int n, relay;
+    unsigned long long seq = json_u64(obj, "seq");
     (void)len;
+    /* the list repeats a connect until a poll acknowledges it: handle each one once */
+    if (seq && seq <= s_conn_seq)
+        return;
+    if (seq) /* counted even if malformed below, or the list would answer every poll with it */
+        s_conn_seq = seq;
     if (!json_str_val(obj, "endpoint", endpoint, sizeof endpoint))
         return;
     if (!json_str_val(obj, "nonce", nonce_hex, sizeof nonce_hex))
@@ -968,7 +992,9 @@ static void host_poll(void)
 
     if (!base || !s_registered)
         return;
-    snprintf(path, sizeof path, "/v1/connects?id=%s&token=%s&wait=%d", s_host_id, s_identity, POLL_WAIT_S);
+    /* ack: every connect up to it is handled, so the list keeps the rest even if this poll dies */
+    snprintf(path, sizeof path, "/v1/connects?id=%s&token=%s&wait=%d&ack=%llu", s_host_id, s_identity, POLL_WAIT_S,
+             s_conn_seq);
     if (http_request(base, "GET", path, NULL, buf, sizeof buf, &status) != 0) {
         log_line("connect poll failed, backing off 5 s");
         Sleep(5000);

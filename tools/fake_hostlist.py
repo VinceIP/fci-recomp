@@ -78,7 +78,7 @@ def same_nat(ip_a, ip_b, ep_a, ep_b):
     return a != "" and a == str(ep_b or "").rpartition(":")[0]
 
 
-def _entries(q, host_ip="", host_ep=""):
+def _entries(q, host_ip="", host_ep="", keep=False):
     # The host sees {endpoint, nonce, mac} per connect (plus relay: true for a relayed
     # address, and local: the guest's LAN address when both sides are behind the same NAT);
     # the guest's id is the object's business. The local is forwarded only when same_nat holds.
@@ -89,6 +89,8 @@ def _entries(q, host_ip="", host_ep=""):
             e["relay"] = True
         if c.get("local") and same_nat(c.get("ip"), host_ip, c["endpoint"], host_ep):
             e["local"] = c["local"]
+        if keep:
+            e["seq"] = c["seq"]
         out.append(e)
     return out
 
@@ -127,7 +129,8 @@ class Lobby:
     def __init__(self, break_punch=False, secret=None, turn_user=None, turn_pass=None, turn_url=DEFAULT_TURN_URL):
         self.lock = threading.Lock()
         self.hosts = {}  # id -> {id, ip, proto, title, version, mac, endpoint, expires}
-        self.connects = {}  # id -> [{endpoint, nonce, mac, gid, relay}]
+        self.connects = {}  # id -> [{endpoint, nonce, mac, gid, relay, seq}]
+        self.seq = 0  # one counter for every host, as in lobby.js
         self.waiters = {}  # id -> {event, result}
         self.host_conn = {}  # id -> (minute, n)
         self.pairs = {}  # gid+":"+nonce -> {at, hosts: {host: at}}: recent non-relay connects
@@ -236,7 +239,7 @@ class Lobby:
                 "local": local,
                 "expires": now + TTL_SECONDS,
             }
-        return 200, {"id": id_}  # no token back: the runtime already has it
+        return 200, {"id": id_, "seq": self.seq}  # no token back: the runtime already has it
 
     def hosts_list(self, title, version, max_):
         with self.lock:
@@ -254,7 +257,7 @@ class Lobby:
                 body["relay"] = RELAY
             return 200, body
 
-    def poll(self, id_, token, wait, ip):
+    def poll(self, id_, token, wait, ip, ack=None):
         if not ID_RE.match(id_) or not TOKEN_RE.match(token) or derive_id(token) != id_:
             return 404, {"error": "no such host"}
         with self.lock:
@@ -265,12 +268,20 @@ class Lobby:
                 self._expire(id_)
                 return 404, {"error": "no such host"}
             self._refresh(id_)
+            keep = ack is not None
+            if keep:  # lobby.js dropAcked: the host handled every connect up to seq ack
+                q = [c for c in self.connects.get(id_, []) if c["seq"] > ack]
+                if q:
+                    self.connects[id_] = q
+                else:
+                    self.connects.pop(id_, None)
             q = self.connects.get(id_)
             if q:
-                del self.connects[id_]
-                return 200, {"connects": _entries(q, h["ip"], h["endpoint"])}
+                if not keep:
+                    del self.connects[id_]
+                return 200, {"connects": _entries(q, h["ip"], h["endpoint"], keep)}
             event = threading.Event()
-            waiter = {"event": event, "result": None}
+            waiter = {"event": event, "result": None, "keep": keep}
             old = self.waiters.pop(id_, None)
             if old:
                 old["result"] = (204, None)
@@ -358,35 +369,29 @@ class Lobby:
             glocal = glocal if local_ok(glocal) else None
             q = self.connects.setdefault(id_, [])
             i = next((j for j, c in enumerate(q) if c["gid"] == gid), -1)
+            self.seq += 1
+            entry = {
+                "endpoint": endpoint,
+                "nonce": nonce,
+                "mac": mac,
+                "gid": gid,
+                "relay": relay,
+                "local": glocal,
+                "ip": ip,
+                "seq": self.seq,
+            }
             if i >= 0:
-                q[i] = {
-                    "endpoint": endpoint,
-                    "nonce": nonce,
-                    "mac": mac,
-                    "gid": gid,
-                    "relay": relay,
-                    "local": glocal,
-                    "ip": ip,
-                }
+                q[i] = entry
             else:
                 if len(q) >= CONNECTS_MAX:
                     q.pop(0)
-                q.append(
-                    {
-                        "endpoint": endpoint,
-                        "nonce": nonce,
-                        "mac": mac,
-                        "gid": gid,
-                        "relay": relay,
-                        "local": glocal,
-                        "ip": ip,
-                    }
-                )
+                q.append(entry)
             w = self.waiters.get(id_)
             if w:
                 self.waiters.pop(id_, None)
-                del self.connects[id_]
-                w["result"] = (200, {"connects": _entries(q, h["ip"], h["endpoint"])})
+                if not w["keep"]:
+                    del self.connects[id_]
+                w["result"] = (200, {"connects": _entries(q, h["ip"], h["endpoint"], w["keep"])})
                 w["event"].set()
         # The host's endpoint and MAC are the reply; the host's LAN address is forwarded only
         # when the guest and the host are behind the same NAT (same_nat).
@@ -602,7 +607,9 @@ def make_handler(lobby):
                 id_ = params.get("id", [""])[0]
                 token = params.get("token", [""])[0]
                 wait = min(60, max(1, int(params.get("wait", ["20"])[0])))  # the Worker's bound
-                status, resp = lobby.poll(id_, token, wait, ip)
+                ack = params.get("ack", [""])[0]
+                ack = int(ack) if ack.isdigit() and len(ack) <= 15 else None
+                status, resp = lobby.poll(id_, token, wait, ip, ack)
             else:
                 status, resp = 404, {"error": "not found"}
             self._send(status, resp)

@@ -256,7 +256,8 @@ export class Lobby {
     this.ttl = (env && env.TTL_MS) || TTL_MS;
     this.relay = (env && env.RELAY) || "";
     this.hosts = new Map(); // id -> {id, ip, proto, title, version, mac, endpoint, expires, timer}
-    this.connects = new Map(); // id -> [{endpoint, nonce, mac, gid}]
+    this.connects = new Map(); // id -> [{endpoint, nonce, mac, gid, seq}]
+    this.seq = 0; // connect numbers: one counter for every host, so a re-register never reuses one
     this.waiters = new Map(); // id -> {resolve, timer}
     this.limits = new RateLimit();
     this.hostConn = new Map(); // id -> {minute, n} (the per-host connect budget)
@@ -491,23 +492,34 @@ export class Lobby {
     }
   }
 
-  release(id) {
+  release(id, keep = false) {
     // The host sees {endpoint, nonce, mac} per connect (plus relay: true for a relayed address,
     // and local: the guest's LAN address when both sides are behind the same NAT);
     // the guest's id is the object's business. The host's IP is the caller IP that registered
     // the host; the guest's IP is the caller IP that posted the connect. The local is forwarded
-    // only when the two match (same NAT).
+    // only when the two match (same NAT). keep (a poll with ack): the entries carry their seq and
+    // stay queued until a later poll acknowledges them, so a poll that dies on the way loses none.
     const host = this.hosts.get(id);
     const hostIp = host ? host.ip : "";
     const hostEp = host ? host.endpoint : "";
-    const q = (this.connects.get(id) || []).map(({ endpoint, nonce, mac, relay, local, ip: gip }) => {
-      this.metrics.connects[relay ? "relayDelivered" : "directDelivered"]++;
+    const q = (this.connects.get(id) || []).map((c) => {
+      const { endpoint, nonce, mac, relay, local, ip: gip } = c;
+      if (!c.delivered) this.metrics.connects[relay ? "relayDelivered" : "directDelivered"]++;
+      c.delivered = true;
       const e = relay ? { endpoint, nonce, mac, relay: true } : { endpoint, nonce, mac };
       if (local && host && sameNat(gip, hostIp, endpoint, hostEp)) e.local = local;
+      if (keep) e.seq = c.seq;
       return e;
     });
-    this.connects.delete(id);
+    if (!keep) this.connects.delete(id);
     return json({ connects: q });
+  }
+
+  // A poll with ack=N: the host has handled every connect up to seq N.
+  dropAcked(id, ack) {
+    const q = (this.connects.get(id) || []).filter((c) => c.seq > ack);
+    if (q.length) this.connects.set(id, q);
+    else this.connects.delete(id);
   }
 
   // Only fixed route keys reach these counters. Long-poll latency includes the wait.
@@ -614,7 +626,9 @@ export class Lobby {
       timer: null,
     });
     this.refresh(id);
-    return json({ id }); // no token back: the player's runtime already has it
+    // no token back: the player's runtime already has it. seq: connects queued before this
+    // registration predate the listing, so an acknowledging host starts from here.
+    return json({ id, seq: this.seq });
   }
 
   // A host that is leaving (its process is shutting down) removes its own listing here, so the
@@ -665,8 +679,11 @@ export class Lobby {
       return json({ error: "no such host" }, 404);
     }
     this.refresh(id);
+    const ack = url.searchParams.get("ack");
+    const keep = ack !== null && /^\d{1,15}$/.test(ack);
+    if (keep) this.dropAcked(id, Number(ack));
     const q = this.connects.get(id);
-    if (q) return this.release(id);
+    if (q) return this.release(id, keep);
     return new Promise((resolve) => {
       const old = this.waiters.get(id);
       if (old) {
@@ -679,7 +696,7 @@ export class Lobby {
         resolve(json({ connects: [] })); // a timed-out poll is an empty, successful poll
       }, Math.min(60, Math.max(1, Number(url.searchParams.get("wait")) || 20)) * 1000);
       if (typeof timer.unref === "function") timer.unref();
-      this.waiters.set(id, { resolve, timer });
+      this.waiters.set(id, { resolve, timer, keep });
     });
   }
 
@@ -775,10 +792,11 @@ export class Lobby {
     const glocal = localOk(msg.local) ? String(msg.local) : undefined;
     const q = this.connects.get(msg.id) || [];
     const i = q.findIndex((c) => c.gid === gid);
-    if (i >= 0) q[i] = { endpoint: msg.endpoint, nonce: msg.nonce, mac: msg.mac, gid, relay, local: glocal, ip };
+    const entry = { endpoint: msg.endpoint, nonce: msg.nonce, mac: msg.mac, gid, relay, local: glocal, ip, seq: ++this.seq };
+    if (i >= 0) q[i] = entry;
     else {
       if (q.length >= CONNECTS_MAX) q.shift(); // drop the oldest: the NIC can only hold 8 pending
-      q.push({ endpoint: msg.endpoint, nonce: msg.nonce, mac: msg.mac, gid, relay, local: glocal, ip });
+      q.push(entry);
     }
     this.connects.set(msg.id, q);
     this.metrics.connects[relay ? "relayQueued" : "directQueued"]++;
@@ -786,7 +804,7 @@ export class Lobby {
     if (w) {
       this.waiters.delete(msg.id);
       clearTimeout(w.timer);
-      w.resolve(this.release(msg.id));
+      w.resolve(this.release(msg.id, w.keep));
     }
     // The host's endpoint and MAC are the reply: the listing shows ids only.
     // The host's LAN address is forwarded only when the guest and the host are behind the same

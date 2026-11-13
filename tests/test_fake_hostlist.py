@@ -1004,3 +1004,42 @@ def test_local_cgnat_rejected():
         assert body.get("local") is None
     finally:
         server.shutdown()
+
+
+def test_ack_keeps_connects_until_acknowledged():
+    """ack=N: a connect is repeated until a poll acknowledges it; register reports the counter."""
+    port, server, lobby = start_server()
+    try:
+        base = f"http://127.0.0.1:{port}"
+        host_id, host_token = register(base)
+        assert connect(base, host_id)[0] == 200
+        poll = f"{base}/v1/connects?id={host_id}&token={host_token}&wait=1"
+        for _ in range(2):  # the reply was lost: the same connect comes back
+            status, body = http_json(poll + "&ack=0")
+            assert status == 200 and [c["seq"] for c in body["connects"]] == [1]
+        status, body = http_json(poll + "&ack=1")
+        assert body in (None, {"connects": []})  # the wait ran out: nothing queued
+        # a re-register reports the counter, so connects queued before it are not taken as new
+        status, body = http_json(
+            f"{base}/v1/register",
+            method="POST",
+            body={
+                "proto": 2,
+                "title": "evolution",
+                "version": "3",
+                "mac": "02:46:43:12:34:56",
+                "endpoint": "127.0.0.1:40000",
+                "token": host_token,
+            },
+        )
+        assert status == 200 and body["seq"] == 1
+        assert connect(base, host_id, endpoint="127.0.0.1:50001")[0] == 200
+        status, body = http_json(poll + "&ack=1")
+        assert [c["seq"] for c in body["connects"]] == [2]
+        # no ack: delivered once, without seq (older clients)
+        status, body = http_json(poll)
+        assert "seq" not in body["connects"][0]
+        status, body = http_json(poll)
+        assert body in (None, {"connects": []})
+    finally:
+        server.shutdown()

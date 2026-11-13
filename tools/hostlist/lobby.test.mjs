@@ -1490,3 +1490,86 @@ test("beta probe reports require opt-in and consume a private, single-use receip
   const [, ordinary] = await r(lobby, conn(id, "93.184.100.10", "f".repeat(64)));
   assert.equal(ordinary.reportReceipt, undefined);
 });
+
+// --- acknowledged delivery (backlog 51): a poll with ack keeps connects until the host has them ---
+
+test("ack: a delivered connect stays until acknowledged, so a poll lost on the way loses nothing", async () => {
+  const lobby = mk({ TTL_MS: 5000 });
+  const hToken = "c".repeat(64);
+  const [, regBody] = await r(lobby, reg({ token: hToken }));
+  const hid = regBody.id;
+  assert.equal((await r(lobby, conn(hid, "93.184.100.9", "d".repeat(64))))[0], 200);
+
+  // delivered with its seq; the host never saw it (the poll died): the next ack=0 poll repeats it
+  let [status, body] = await r(lobby, req(`/v1/connects?id=${hid}&token=${hToken}&wait=1&ack=0`));
+  assert.equal(status, 200);
+  assert.equal(body.connects.length, 1);
+  assert.equal(body.connects[0].seq, 1);
+  [status, body] = await r(lobby, req(`/v1/connects?id=${hid}&token=${hToken}&wait=1&ack=0`));
+  assert.deepEqual(body.connects.map((c) => c.seq), [1]);
+
+  // acknowledged: gone, and the next poll waits and returns empty
+  [status, body] = await r(lobby, req(`/v1/connects?id=${hid}&token=${hToken}&wait=1&ack=1`));
+  assert.equal(status, 200);
+  assert.deepEqual(body.connects, []);
+  // the operator counts it as delivered once
+  assert.equal(lobby.metrics.connects.directDelivered, 1);
+});
+
+test("ack: a held poll answered by a connect keeps it; later connects get higher seqs", async () => {
+  const lobby = mk({ TTL_MS: 5000 });
+  const hToken = "c".repeat(64);
+  const [, regBody] = await r(lobby, reg({ token: hToken }));
+  const hid = regBody.id;
+  const held = r(lobby, req(`/v1/connects?id=${hid}&token=${hToken}&wait=10&ack=0`));
+  await new Promise((res) => setTimeout(res, 50));
+  assert.equal((await r(lobby, conn(hid, "93.184.100.9", "d".repeat(64))))[0], 200);
+  const [, first] = await held;
+  assert.deepEqual(first.connects.map((c) => c.seq), [1]);
+  assert.equal((await r(lobby, conn(hid, "93.184.100.10", "f".repeat(64))))[0], 200);
+  // the first poll's reply was lost: both come back until acknowledged
+  const [, both] = await r(lobby, req(`/v1/connects?id=${hid}&token=${hToken}&wait=1&ack=0`));
+  assert.deepEqual(both.connects.map((c) => c.seq), [1, 2]);
+  const [, second] = await r(lobby, req(`/v1/connects?id=${hid}&token=${hToken}&wait=1&ack=1`));
+  assert.deepEqual(second.connects.map((c) => c.seq), [2]);
+});
+
+test("ack: a poll without ack is unchanged (delivered once, no seq field)", async () => {
+  const lobby = mk({ TTL_MS: 5000 });
+  const hToken = "c".repeat(64);
+  const [, regBody] = await r(lobby, reg({ token: hToken }));
+  const hid = regBody.id;
+  assert.equal((await r(lobby, conn(hid, "93.184.100.9", "d".repeat(64))))[0], 200);
+  let [, body] = await r(lobby, req(`/v1/connects?id=${hid}&token=${hToken}&wait=1`));
+  assert.equal(body.connects.length, 1);
+  assert.equal("seq" in body.connects[0], false);
+  [, body] = await r(lobby, req(`/v1/connects?id=${hid}&token=${hToken}&wait=1`));
+  assert.deepEqual(body.connects, []);
+});
+
+test("ack: a malformed ack is treated as no ack", async () => {
+  const lobby = mk({ TTL_MS: 5000 });
+  const hToken = "c".repeat(64);
+  const [, regBody] = await r(lobby, reg({ token: hToken }));
+  const hid = regBody.id;
+  assert.equal((await r(lobby, conn(hid, "93.184.100.9", "d".repeat(64))))[0], 200);
+  let [status, body] = await r(lobby, req(`/v1/connects?id=${hid}&token=${hToken}&wait=1&ack=-1`));
+  assert.equal(status, 200);
+  assert.equal("seq" in body.connects[0], false);
+  [, body] = await r(lobby, req(`/v1/connects?id=${hid}&token=${hToken}&wait=1&ack=0`));
+  assert.deepEqual(body.connects, []); // the malformed poll delivered it the old way
+});
+
+test("ack: register reports the connect counter, and a re-register never reuses a seq", async () => {
+  const lobby = mk({ TTL_MS: 5000 });
+  const hToken = "c".repeat(64);
+  let [, regBody] = await r(lobby, reg({ token: hToken }));
+  assert.equal(regBody.seq, 0);
+  const hid = regBody.id;
+  assert.equal((await r(lobby, conn(hid, "93.184.100.9", "d".repeat(64))))[0], 200);
+  [, regBody] = await r(lobby, reg({ token: hToken }));
+  assert.equal(regBody.seq, 1);
+  assert.equal((await r(lobby, conn(hid, "93.184.100.10", "f".repeat(64))))[0], 200);
+  const [, body] = await r(lobby, req(`/v1/connects?id=${hid}&token=${hToken}&wait=1&ack=1`));
+  assert.deepEqual(body.connects.map((c) => c.seq), [2]);
+});
