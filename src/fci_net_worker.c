@@ -316,6 +316,13 @@ static int parse_base(const char *base_url, char *host, int hostlen, int *port, 
     return 0;
 }
 
+/* the path without its query, for logs: the host's poll carries its token there, and players share logs */
+static int path_len(const char *path)
+{
+    const char *q = strchr(path, '?');
+    return q ? (int)(q - path) : (int)strlen(path);
+}
+
 /* do a request on an open session; returns the response body in buf (up to buflen), 0 on success,
  * -1 on error. method: "GET" or "POST"; path: the URL path+query; body: POST body or NULL.
  * Returns the HTTP status code in *status. */
@@ -347,7 +354,7 @@ static int http_request_on(HINTERNET session, const char *host, int port, int se
     if (!WinHttpSendRequest(hrequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0, (void *)body,
                             body ? (DWORD)strlen(body) : 0, body ? (DWORD)strlen(body) : 0, 0)) {
         int err = GetLastError();
-        log_line("winhttp send %s %s failed (%u)", method, path, (unsigned)err);
+        log_line("winhttp send %s %.*s failed (%u)", method, path_len(path), path, (unsigned)err);
         WinHttpCloseHandle(hrequest);
         WinHttpCloseHandle(hconnect);
         return -1;
@@ -355,7 +362,7 @@ static int http_request_on(HINTERNET session, const char *host, int port, int se
 
     if (!WinHttpReceiveResponse(hrequest, NULL)) {
         int err = GetLastError();
-        log_line("winhttp receive %s %s failed (%u)", method, path, (unsigned)err);
+        log_line("winhttp receive %s %.*s failed (%u)", method, path_len(path), path, (unsigned)err);
         WinHttpCloseHandle(hrequest);
         WinHttpCloseHandle(hconnect);
         return -1;
@@ -418,6 +425,11 @@ static int http_request_timed(const char *base_url, const char *method, const ch
         return -1;
     /* resolve, connect (the TLS handshake), send, receive: they sum to the budget */
     WinHttpSetTimeouts(session, budget_ms / 5, 2 * budget_ms / 5, budget_ms / 5, budget_ms / 5);
+    {
+        /* the wait for the reply has its own timeout, which WinHttpSetTimeouts leaves alone (worker_main) */
+        DWORD t = budget_ms / 5;
+        WinHttpSetOption(session, WINHTTP_OPTION_RECEIVE_RESPONSE_TIMEOUT, &t, sizeof t);
+    }
     r = http_request_on(session, host, port, secure, method, path, body, buf, buflen, status);
     WinHttpCloseHandle(session);
     return r;
@@ -1017,6 +1029,9 @@ static DWORD WINAPI worker_main(LPVOID arg)
         DWORD t = (POLL_WAIT_S + 5) * 1000;
         WinHttpSetOption(s_session, WINHTTP_OPTION_SEND_TIMEOUT, &t, sizeof t);
         WinHttpSetOption(s_session, WINHTTP_OPTION_RECEIVE_TIMEOUT, &t, sizeof t);
+        /* the wait for the reply's headers: Windows defaults it to 90 s, Proton reports infinite but
+         * gives up after 21 s, which failed every poll longer than that on the Steam Deck */
+        WinHttpSetOption(s_session, WINHTTP_OPTION_RECEIVE_RESPONSE_TIMEOUT, &t, sizeof t);
     }
 
     local_addr_detect(); /* the card's LAN address (RECOMP_FCI_NET_LOCAL or auto-detect) */
