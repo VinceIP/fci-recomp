@@ -1,8 +1,27 @@
 # Changelog
 
-## [0.3.0-beta.1] - unreleased
+## [0.3.0-beta.2] - unreleased
 
-Private beta of online multiplayer. Draft: edited as the beta goes.
+An update to the online multiplayer beta. Draft: edited as the beta goes.
+
+### Added
+
+- The online server can now ask players on an older build to update, and pause online play for maintenance. The match browser shows UPDATE REQUIRED or SERVER PAUSED when this happens.
+- FCI Launcher on a beta now offers the next beta as an update. Players on a regular release are never offered a beta.
+- Added typing with your keyboard in the map editor's on-screen keyboard (Save Map name and description), in both games.
+
+### Fixed
+
+- Fixed a host dropping off the match list, or being listed twice, when the next map in its rotation loaded.
+- Fixed a Steam Deck host missing players' connections.
+- Fixed switching between LAN and INTERNET in the multiplayer menu without restarting the game.
+- Fixed two copies of the game on one PC showing up as one player online.
+- Fixed a blurry game window on displays scaled above 100% (#4).
+- FCI Launcher now says when a release needs a newer launcher, instead of saying the release is too old.
+
+## [0.3.0-beta.1] - 2026-11-12
+
+Private beta of online multiplayer.
 
 ### Added
 
