@@ -221,7 +221,7 @@ static void log_line(const char *fmt, ...)
 /* --- WinHTTP helpers --- */
 
 /* convert a UTF-8 string to a wide string in dst (up to dstlen wide chars) */
-/* The list's answer to a player route (research/docs/online-architecture.md 7a): 426 means this build is
+/* The list's answer to a player route (tools/hostlist/lobby.js gate): 426 means this build is
  * below the operator's minimum, 503 "maintenance" that online play is paused. Remembered for the browser
  * and logged once per change; 1 when it was such a refusal. Any 200 clears it. */
 static int note_refusal(int status, const char *body)

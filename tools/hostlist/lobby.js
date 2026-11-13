@@ -76,7 +76,8 @@
 // RELAY_KILL, RELAY_ALERT_WEBHOOK, MIN_BUILD, MAINTENANCE) is a secret (`wrangler secret put`): secrets survive `wrangler deploy`, which replaces
 // plain variables with wrangler.toml's (none), and no deployment's values live in the repo.
 // Free tier.
-// The how-to is research/docs/online-architecture.md, sections 7 and 7a (versions and updates).
+// MIN_BUILD (a version, see compareBuilds) turns older builds away with 426; MAINTENANCE (any
+// non-empty value) answers 503 on every player route. Unregister and admin routes are never gated.
 
 const PROTO = 2; // the net protocol (src/fci_net.h): title + version + this must all match
 const LIST_MAX = 64;

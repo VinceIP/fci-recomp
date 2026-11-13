@@ -16,7 +16,7 @@ enum {
     BROWSE_ONLINE_PAUSED = 7,    /* "ONLINE PAUSED" - the operator paused online play (503 maintenance) */
 };
 
-/* list_refused: why the host list turned this build away (research/docs/online-architecture.md 7a) */
+/* list_refused: why the host list turned this build away (tools/hostlist/lobby.js gate) */
 enum { FCI_LIST_REFUSED_NONE = 0, FCI_LIST_REFUSED_UPDATE = 1, FCI_LIST_REFUSED_MAINTENANCE = 2 };
 
 /* fetch_state: the three-valued fetch state.

@@ -56,8 +56,7 @@ fn github(path: &str) -> Result<serde_json::Value, String> {
 
 /// The release this launcher's players should be on. A release launcher reads GitHub's "latest", which
 /// leaves pre-releases out, so players on a release never get a beta. A pre-release launcher reads the
-/// release list and takes the newest of all: the next beta, or the release that replaces the betas
-/// (research/docs/online-architecture.md 7a).
+/// release list and takes the newest of all: the next beta, or the release that replaces the betas.
 pub fn latest_release() -> Result<Release, String> {
     if !paths::is_prerelease(env!("CARGO_PKG_VERSION")) {
         return Ok(release_from(&github("releases/latest")?));
