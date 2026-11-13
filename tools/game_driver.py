@@ -262,6 +262,10 @@ class Game:
             with open(self.control, "a") as f:
                 f.write(f"mouse {dx} {dy}\n")
             time.sleep(0.3)  # read within 100 ms, applied on the next frame
+        elif kind in ("type", "key"):  # type:TEXT (~ is a space), key:VK in hex (0D Enter, 1B Esc, 08 Backspace)
+            with open(self.control, "a") as f:
+                f.write(f"{kind} {arg.replace('~', ' ') if kind == 'type' else arg}\n")
+            time.sleep(0.3)  # read within 100 ms, replayed on the next frame
         elif kind == "set":
             with open(self.control, "a") as f:
                 f.write(f"set {arg}\n")

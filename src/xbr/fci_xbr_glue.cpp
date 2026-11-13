@@ -47,6 +47,9 @@ void fci_framebuffer_key(int vk, int down);   // keyboard pad, fci_nv2a.c
 // mouse and keyboard as the controller (fci_input.c)
 void fci_input_key(int code, int down);
 void fci_input_release_all(void);
+// typing into the game's on-screen keyboard (fci_vkb.c)
+int fci_vkb_key(int vk);
+void fci_vkb_char(unsigned c);
 void fci_input_wheel(int notches);
 void fci_input_mouse_move(int dx, int dy);
 int fci_input_capture_enabled(void);
@@ -434,8 +437,12 @@ LRESULT CALLBACK WindowProc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
     switch (msg) {
     case WM_KEYDOWN:
     case WM_KEYUP:
+        if (msg == WM_KEYDOWN && fci_vkb_key(int(wp))) return 0;  // typing into the on-screen keyboard
         fci_framebuffer_key(int(wp), msg == WM_KEYDOWN);
         fci_input_key(SpecificKey(wp, lp), msg == WM_KEYDOWN);
+        return 0;
+    case WM_CHAR:
+        fci_vkb_char(unsigned(wp));
         return 0;
     case WM_SYSKEYDOWN:
     case WM_SYSKEYUP:

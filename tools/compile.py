@@ -129,6 +129,9 @@ REPLACE = {
         "until it reads 0; the hook registers that address with the APU "
         "acknowledgement (fci_manual.c)",
     ),
+    "sub_000675B0": ("prehook", "the UI input manager's router (ecx the manager, its vtable slot 1, from the game loop sub_001FCD40): recorded, so typing stops while a popup takes the pad input (fci_vkb.c)"),
+    "sub_0010B500": ("prehook", "the on-screen keyboard's open (eax keyboard): typing on the PC keyboard starts (fci_vkb.c)"),
+    "sub_0010B5E0": ("prehook", "the on-screen keyboard's close: typing stops (fci_vkb.c)"),
     "sub_001F6C00": ("prehook", "Input_PollPads (re/symbols): counts polls for RECOMP_FCI_STATUS"),
     "sub_000F0500": (
         "prehook",
@@ -183,7 +186,7 @@ REPLACE = {
     "sub_0014EFF0": (
         "gate",
         "main menu action handler: logs the action hash for RECOMP_FCI_MENU_LOG; "
-        "RECOMP_FCI_MENU_QUIT=1 intercepts B_Quit (0x8bcdf569) and exits (fci_menu.c)",
+        "QUIT GAME (B_Quit, 0x8bcdf569) closes the game; RECOMP_FCI_MENU_QUIT=0 leaves the item out (fci_menu.c)",
     ),
     "sub_00109670": ("gate", "set the native browser title at the System Link call site (fci_lan_menu.c)"),
     "sub_001536F0": ("gate", "render host-list status on the browser page (fci_lan_menu.c)"),

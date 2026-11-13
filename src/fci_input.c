@@ -253,7 +253,7 @@ void fci_input_pad(const fci_input_state *s)
 /* 1 while the player uses mouse and keyboard, 0 on the pad (or before either was used) */
 int fci_input_on_kbm(void)
 {
-    static int on_kbm;
+    static volatile LONG on_kbm; /* the game thread (aim assist) and the render thread (prompts) both ask */
     LONGLONG now = (LONGLONG)GetTickCount64(), k = kbm_at, p = pad_at;
     config();
     if (!opt.kbm)
@@ -265,12 +265,26 @@ int fci_input_on_kbm(void)
     return on_kbm;
 }
 
+/* a control's first input by the control's name ("A", "DPAD_UP"): a virtual key or IN_MOUSE1 on, -1 when
+ * unbound; the button prompts show it (src/xbr/fci_glyphs.cpp) */
+int fci_input_binding(const char *control)
+{
+    config();
+    for (int c = 0; c < C_COUNT; c++)
+        if (!strcmp(control, control_names[c]))
+            return binds[c][0];
+    return -1;
+}
+
 /* RECOMP_MOUSE_AIM_ASSIST=1 keeps the game's aim assist with mouse and keyboard in multiplayer */
 int fci_input_mp_assist_kept(void)
 {
     config();
     return opt.mp_assist;
 }
+
+/* a key the on-screen keyboard took for typing (fci_vkb.c): the keyboard is in use all the same */
+void fci_input_typed(void) { kbm_at = (LONGLONG)GetTickCount64(); }
 
 /* a key (virtual key, left/right resolved by the caller) or mouse button: the generic Shift/Ctrl/Alt follow */
 void fci_input_key(int code, int is_down)

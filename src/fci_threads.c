@@ -614,7 +614,12 @@ void fci_status_counts(long *presents, long *polls, long *frames3d, long *movies
     *frames3d = status_frames3d;
     *movies = status_movies;
 }
-void fci_prehook_001F6C00(void) { InterlockedIncrement(&status_polls); }
+void fci_vkb_frame(void); /* fci_vkb.c */
+void fci_prehook_001F6C00(void)
+{
+    InterlockedIncrement(&status_polls);
+    fci_vkb_frame();
+}
 static volatile uint32_t
         status_view; /* Camera_BuildViews' argument: the game view (re/notes/INPUT-CAMERA.md) */
 void fci_prehook_000F0500(void)
@@ -719,6 +724,18 @@ static DWORD WINAPI status_thread(LPVOID param)
                             int dx = 0, dy = 0;
                             if (sscanf(line + 6, "%d %d", &dx, &dy) == 2)
                                 fci_input_mouse_inject(dx, dy);
+                        } else if (!strncmp(line, "type ", 5)) { /* as WM_CHAR, one per character */
+                            extern void fci_vkb_char(unsigned c);
+                            for (const char *ch = line + 5; *ch; ch++)
+                                fci_vkb_char((unsigned char)*ch);
+                        } else if (!strncmp(line, "key ", 4)) { /* a key press, down then up (VK in hex) */
+                            extern int fci_vkb_key(int vk);
+                            extern void fci_input_key(int code, int down);
+                            int vk = (int)strtol(line + 4, NULL, 16);
+                            if (!fci_vkb_key(vk)) {
+                                fci_input_key(vk, 1);
+                                fci_input_key(vk, 0);
+                            }
                         } else if (!strncmp(line, "set ", 4)) {
                             extern int fci_gfx_set(const char *key_value);  /* xbr/fci_enhance.cpp */
                             extern int fci_cvar_set(const char *key_value); /* fci_cvars.c */

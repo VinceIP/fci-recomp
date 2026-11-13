@@ -13,6 +13,7 @@
 
 #include "core/log.h"
 #include "fci_gfx.h"
+#include "fci_glyphs.h"
 #include "gpu/ext.h"
 
 // ---- options ---------------------------------------------------------------------------------
@@ -225,6 +226,7 @@ class FciExtension final : public gpu::Extension {
   public:
     bool Settings() override
     {
+        fci_glyphs::Poll();
         uint32_t gen = fci_gfx::Generation();
         if (gen == gen_)
             return false;
@@ -261,6 +263,10 @@ class FciExtension final : public gpu::Extension {
     }
 
     const gpu::ShaderHooks* Shaders() const override { return &hooks_; }
+
+    void Decoded(const gpu::TextureDesc& d, const gpu::FormatInfo& fi, uint32_t, uint32_t level, std::vector<uint8_t>& px,
+                 uint32_t pitch, uint8_t&) override
+    { fci_glyphs::Patch(d, fi, level, px, pitch); }
 
     void Constants(float (*)[4], float* ext, const Target*, uint32_t) override
     { ext[0] = float(shadow_filter_); }

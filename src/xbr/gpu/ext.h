@@ -81,8 +81,8 @@ public:
     virtual void Sample(uint32_t /*data*/, bool /*depth*/, int /*stage*/, uint64_t& /*key*/, float& /*k*/, bool& /*box*/) {}
     // bound: the target, or a texture with the flags Decoded gave it
     virtual void Sampled(const TextureDesc&, const Target*, uint8_t /*flags*/, TexInfo&) {}
-    // a texture level decoded for upload
-    virtual void Decoded(const TextureDesc&, const FormatInfo&, uint32_t /*face*/, uint32_t /*level*/, const std::vector<uint8_t>& /*px*/,
+    // a texture level decoded for upload; px may be changed, guest memory keeps the original
+    virtual void Decoded(const TextureDesc&, const FormatInfo&, uint32_t /*face*/, uint32_t /*level*/, std::vector<uint8_t>& /*px*/,
                          uint32_t /*pitch*/, uint8_t& /*flags*/) {}
     // a draw's constants: the vertex registers as uploaded, DrawConstants::ext; src_blend 1 without blending
     virtual void Constants(float (*/*vsc*/)[4], float* /*ext*/, const Target* /*rt*/, uint32_t /*src_blend*/) {}

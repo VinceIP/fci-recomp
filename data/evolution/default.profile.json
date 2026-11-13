@@ -108,10 +108,23 @@
     "sub_000FB0A2": [
       "gate",
       "the pre-game multiplayer action dispatcher (recomp_0023.c:27569; it tests B_SystemLink before B_Live and re-reads the hash in each): in menu mode, SYSTEM LINK starts LAN, XBOX LIVE starts the host list and is rewritten to B_SystemLink (fci_lan_menu.c)"
-    ]
+    ],
+    "sub_0005022C": ["prehook", "the UI input manager's router (ecx the manager, its vtable slot 1; the function table at 004AF750 gives 0005022C-000508CF), as Instincts' 000675B0; its popup root is +0x24 (FCI_VKB_MODAL): typing stops under a popup (fci_vkb.c)", "000675B0"],
+    "sub_000D0750": ["prehook", "the on-screen keyboard's open, as Instincts' 0010B500: typing starts (fci_vkb.c)", "0010B500"],
+    "sub_000D07EC": ["prehook", "the on-screen keyboard's close, as Instincts' 0010B5E0: typing stops (fci_vkb.c)", "0010B5E0"]
   },
   "evidence": "Exploratory Evolution profile: descriptor helper by masked bytes (unique match); code end = BINKDATA end (as Instincts' 0070C6E4).",
   "constants": {
+    "FCI_VKB_OBJECT": [
+      "0x0056ADCC",
+      "the virtual keyboard object's pointer, read by its methods (fci_vkb.c, re/notes/KEYBOARD.md)"
+    ],
+    "FCI_VKB_INSERT": ["0x00000000", "Evolution takes the string on the stack instead (FCI_VKB_CHAR)"],
+    "FCI_VKB_CHAR": ["0x000D0DFB", "insert a string at the cursor (X's space): eax keyboard, the string on the stack"],
+    "FCI_VKB_DELETE": ["0x000D0E83", "the keyboard's delete (Y): eax keyboard"],
+    "FCI_VKB_A": ["0x000D0C0B", "the keyboard's A: eax keyboard; accepts with the wheel on its first slot"],
+    "FCI_VKB_BACK": ["0x000D0940", "the keyboard's back (B): esi keyboard"],
+    "FCI_VKB_MODAL": ["0x00000024", "the UI input manager's popup root (Instincts +0x20; read at 000506CE in its router 00050440): typing stops under a popup (fci_vkb.c)"],
     "FCI_AIM_SETTINGS": [
       "0x0056B594",
       "the console settings object: sub_00030CB2's aim assist gate reads cl_aimingHelper through it each frame (recomp_0003.c:17527)"

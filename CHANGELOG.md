@@ -14,6 +14,8 @@ Private beta of online multiplayer. Draft: edited as the beta goes.
 - Controller vibration: the game's rumble now reaches your controller. Turn it off with `controls-vibration = 0` ("Controller vibration" in the launcher).
 - In multiplayer, aim assist is off while you play with mouse and keyboard, and comes back as soon as you pick up a gamepad, even mid-match. Single-player is unchanged. To keep it with the mouse, set `controls-mouse-aim-assist = 1` ("Aim assist with the mouse" in the launcher).
 - QUIT GAME on the main menu closes the game.
+- Type on your keyboard in the on-screen keyboard (profile names, cheat codes): Backspace deletes, Enter accepts, Esc goes back.
+- Button prompts show a modern controller's buttons, or the keys and mouse buttons you have bound when you play with mouse and keyboard. They switch as soon as you change device.
 - Every session now keeps its own log, including sessions that ended normally, so problems that aren't crashes can be reported too. The last 3 sessions are kept by default (`log-limit`).
 
 ### Fixed
