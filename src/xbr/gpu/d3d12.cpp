@@ -2766,6 +2766,15 @@ void D3D12Backend::CaptureDraw(const State& s, uint32_t prim, uint32_t count, co
     // FCI: the raw states the pipeline key reduces (ZEnable 2 is W-buffering), and the combiner constants
     fprintf(cap_, " rawz %u spec %u sign %X %X %X %X", s.rs[kRsZEnable], s.rs[kRsSpecularEnable],
             s.tss[0][kTssColorSign], s.tss[1][kTssColorSign], s.tss[2][kTssColorSign], s.tss[3][kTssColorSign]);
+    // FCI: fog as the draw uses it (Q69): enable, table mode, start, end, density, colour
+    fprintf(cap_, " fog %u %u %.3f %.3f %.6f %08X", s.rs[kRsFogEnable], s.rs[kRsFogTableMode], c.fog[0], c.fog[1],
+            c.fog[2], s.rs[kRsFogColor]);
+    if (s.rs[kRsFogEnable]) {   // and the camera the fog would need: the view transform, zscale
+        const float* vm = s.transforms[kTsView].data();
+        fprintf(cap_, " view");
+        for (int i = 0; i < 16; i++) fprintf(cap_, " %g", vm[i]);
+        fprintf(cap_, " zscale %g", s.zscale);
+    }
     if (s.ps)
         for (int i = 1; i < 18; i++)
             fprintf(cap_, " pc%d %.3f %.3f %.3f %.3f", i, c.pc[i][0], c.pc[i][1], c.pc[i][2], c.pc[i][3]);

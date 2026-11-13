@@ -159,9 +159,11 @@ class Game:
         (self.folder / "capture").mkdir()
         if editor:
             exe, xbe = EDITOR_EXE, GAME_DIR / "ige.xbe"
-            shutil.copytree(FIXTURES / "editor-save", self.folder / "save")
-            shutil.copy2(FIXTURES / "editor-launch.bin", self.folder / "launch.bin")
-            extra = ["RECOMP_LAUNCH_DATA=" + str(self.folder / "launch.bin")]
+            shutil.copytree(FIXTURES / (save or "editor-save"), self.folder / "save")
+            extra = []
+            if (FIXTURES / "editor-launch.bin").exists():  # the game's switch; without it, as the launcher starts it
+                shutil.copy2(FIXTURES / "editor-launch.bin", self.folder / "launch.bin")
+                extra = ["RECOMP_LAUNCH_DATA=" + str(self.folder / "launch.bin")]
         else:
             exe, xbe = GAME_EXE, GAME_DIR / "default.xbe"
             if save:
