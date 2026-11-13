@@ -37,6 +37,7 @@ extern int fci_nic_list_local_port(void);
 extern void fci_nic_mac(uint8_t *mac);
 extern void fci_nic_mac_str(char *buf, int buflen);
 extern int fci_nic_list_has_peer(const char *endpoint);
+extern int fci_nic_list_gone_take(uint8_t nonce[16], int *was_live);
 extern int fci_nic_worker_probe_take(void);
 extern const char *fci_nic_list_url(void);
 extern SRWLOCK *fci_nic_lock(void); /* the NIC's s_lock */
@@ -534,13 +535,18 @@ derive:
 
 /* --- guest path: fetch hosts and connect --- */
 
+static void note_ended_peers(void);
+
 /* the hosts this fetch listed (to prune s_known: a host that left the list can be joined again) */
 static char s_seen[16][33];
 static int s_seen_n;
 
-/* the hosts we are connected to, by id (the listing has no endpoints to compare) */
+/* the hosts we are connected to, by id (the listing has no endpoints to compare). A host whose peer
+ * ended is retried from s_known_until (0: connected, wait while it is listed) */
 static char s_known[16][33];
+static ULONGLONG s_known_until[16];
 static int s_known_n;
+#define RETRY_FAILED_MS 30000 /* a connect that never got through: the same host again after 30 s */
 
 /* the connects this worker made, by nonce: the TURN mint needs the host id of a waiting peer */
 static char s_conn_id[8][33];
@@ -589,7 +595,8 @@ static void send_probe_report(void)
 }
 
 static uint8_t s_conn_nonce[8][16];
-static int s_conn_n;
+static int s_conn_n;    /* entries in use (at most 8) */
+static int s_conn_next; /* the slot the next connect takes: the oldest once full */
 
 static void on_host_obj(const char *obj, int len)
 {
@@ -608,8 +615,15 @@ static void on_host_obj(const char *obj, int len)
     if (s_seen_n < (int)(sizeof s_seen / sizeof s_seen[0]))
         snprintf(s_seen[s_seen_n++], sizeof s_seen[0], "%s", id);
     for (n = 0; n < s_known_n; n++)
-        if (strcmp(s_known[n], id) == 0)
-            return; /* already connected to this host */
+        if (strcmp(s_known[n], id) == 0) {
+            if (!s_known_until[n] || GetTickCount64() < s_known_until[n])
+                return; /* connected to this host, or its last attempt failed moments ago */
+            memmove(&s_known[n], &s_known[n + 1], (size_t)(s_known_n - n - 1) * sizeof s_known[0]);
+            memmove(&s_known_until[n], &s_known_until[n + 1],
+                    (size_t)(s_known_n - n - 1) * sizeof s_known_until[0]);
+            s_known_n--;
+            break; /* its peer ended: connect again (a relaunched host is on a new port under its id) */
+        }
 
     base = fci_nic_list_url();
     if (!base)
@@ -667,13 +681,16 @@ static void on_host_obj(const char *obj, int len)
     if (!ready)
         return;
 
-    if (s_known_n < (int)(sizeof s_known / sizeof s_known[0]))
+    if (s_known_n < (int)(sizeof s_known / sizeof s_known[0])) {
+        s_known_until[s_known_n] = 0;
         snprintf(s_known[s_known_n++], sizeof s_known[0], "%s", id);
-    if (s_conn_n < (int)(sizeof s_conn_id / sizeof s_conn_id[0])) {
-        snprintf(s_conn_id[s_conn_n], sizeof s_conn_id[0], "%s", id);
-        memcpy(s_conn_nonce[s_conn_n], nonce, 16);
-        s_conn_n++;
     }
+    /* a ring: reconnects must not fill it and leave a new nonce without its host (the TURN mint) */
+    snprintf(s_conn_id[s_conn_next], sizeof s_conn_id[0], "%s", id);
+    memcpy(s_conn_nonce[s_conn_next], nonce, 16);
+    s_conn_next = (s_conn_next + 1) % (int)(sizeof s_conn_id / sizeof s_conn_id[0]);
+    if (s_conn_n < (int)(sizeof s_conn_id / sizeof s_conn_id[0]))
+        s_conn_n++;
     log_line("connected to host %s (%s)", id, endpoint);
 }
 
@@ -865,6 +882,7 @@ static void guest_fetch(void)
     }
     note_refusal(status, buf);
     log_line("list fetched (%s)", net_title());
+    note_ended_peers();
     s_seen_n = 0;
     if (fci_json_array(buf, "hosts", on_host_obj) > 0)
         log_line("host list: a listing too long to read, skipped");
@@ -883,9 +901,40 @@ static void guest_fetch(void)
             }
         if (!keep) {
             memmove(&s_known[n], &s_known[n + 1], (size_t)(s_known_n - n - 1) * sizeof s_known[0]);
+            memmove(&s_known_until[n], &s_known_until[n + 1],
+                    (size_t)(s_known_n - n - 1) * sizeof s_known_until[0]);
             s_known_n--;
             n--;
         }
+    }
+}
+
+/* The guest's peers that ended since the last fetch: their hosts become connectable again, at once when
+ * the peer had been live (the host left or relaunched), after RETRY_FAILED_MS when it never got through.
+ * Before, a host stayed known while listed, and a host that relaunched under its id was never rejoined. */
+static void note_ended_peers(void)
+{
+    SRWLOCK *lock = fci_nic_lock();
+    uint8_t nonce[16];
+    int n, k, was_live;
+    for (;;) {
+        AcquireSRWLockExclusive(lock);
+        const int got = fci_nic_list_gone_take(nonce, &was_live);
+        ReleaseSRWLockExclusive(lock);
+        if (!got)
+            return;
+        for (n = 0; n < s_conn_n; n++)
+            if (!memcmp(s_conn_nonce[n], nonce, 16))
+                break;
+        if (n == s_conn_n)
+            continue; /* no connect of ours left in the ring: nothing to retry */
+        for (k = 0; k < s_known_n; k++)
+            if (!strcmp(s_known[k], s_conn_id[n]) && !s_known_until[k]) {
+                s_known_until[k] = GetTickCount64() + (was_live ? 0 : RETRY_FAILED_MS);
+                log_line("host %s: the connection ended; connecting again %s", s_conn_id[n],
+                         was_live ? "at the next listing" : "in 30 s");
+                break;
+            }
     }
 }
 
@@ -1129,7 +1178,7 @@ void fci_net_worker_start(void)
 #endif
     s_report_head = s_report_count = 0;
     /* a restart (the menu's other pick, then this one again) begins with no hosts seen or joined */
-    s_seen_n = s_known_n = s_conn_n = 0;
+    s_seen_n = s_known_n = s_conn_n = s_conn_next = 0;
     s_last_fetch_attempt = 0;
     s_fetch_state = s_fetch_nhosts = s_relay_refused = s_list_refused = 0;
     identity_init();

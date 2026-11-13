@@ -6,13 +6,16 @@ the token-derived id (sha256(token), first 16 bytes, hex), the id-only listing, 
 admin routes. It skips the public-address check so 127.0.0.1 registers and connects work, and it
 keeps the bans and the rate limits in memory (lobby.js keeps the bans in the object's SQLite).
 
-Usage: python tools/fake_hostlist.py [port] [--break-punch] [--secret S] [--min-build V] [--maintenance]
+Usage: python tools/fake_hostlist.py [port] [--break-punch] [--lose-unregister] [--secret S] [--min-build V]
+       [--maintenance]
        [--turn-user U --turn-pass P --turn-url URL]   (default port 47801)
 
 --break-punch rewrites the endpoint in every direct connect it forwards to the host (port + 1000),
 so the host punches a dead port and ignores the guest's punches (endpoint mismatch): both 3 s
 windows fail and both sides fall back to the relay. A relayed connect (relay: true, the guest's
 TURN address) is forwarded untouched: the host punches that address for real.
+--lose-unregister answers no unregister and keeps the listing, as when a host's unregister times out
+(seen from Proton on the Steam Deck): the host comes back under its id without ever leaving the list.
 --secret sets the admin secret (default $FAKE_HOSTLIST_SECRET, else none: admin is off).
 --min-build V and --maintenance set the operator's switches (lobby.js MIN_BUILD, MAINTENANCE): a request
 whose X-FCI-Build is below V, or carries none, gets 426 update; maintenance answers 503 on every player
@@ -176,6 +179,7 @@ class Lobby:
         self.mint_limits = RateLimit(TURN_WINDOW_SECONDS)
         self.abuse = {"byIp": {}, "ring": []}
         self.break_punch = break_punch  # rewrite the endpoint in direct connects (port + 1000)
+        self.lose_unregister = False  # answer no unregister (the server's --lose-unregister)
         self.secret = secret
         self.min_build = ""  # the operator's switches (lobby.js gate)
         self.maintenance = False
@@ -638,6 +642,9 @@ def make_handler(lobby):
             elif url.path == "/v1/turn":
                 status, resp = lobby.turn(body, ip)
             elif url.path == "/v1/unregister":
+                if lobby.lose_unregister:
+                    self.close_connection = True  # no answer: the caller's 1.5 s budget runs out
+                    return
                 status, resp = lobby.unregister(body, ip)
             else:
                 status, resp = 404, {"error": "not found"}
@@ -694,6 +701,9 @@ def main():
         action="store_true",
         help="rewrite the endpoint in every direct connect to the host (port + 1000); relayed connects are untouched",
     )
+    ap.add_argument(
+        "--lose-unregister", action="store_true", help="answer no unregister and keep the listing (a lost one)"
+    )
     ap.add_argument("--secret", default=None, help="admin secret (default $FAKE_HOSTLIST_SECRET, else admin off)")
     ap.add_argument(
         "--turn-user",
@@ -717,6 +727,7 @@ def main():
         turn_url=args.turn_url,
     )
     lobby.min_build = args.min_build if args.min_build is not None else os.environ.get("FAKE_HOSTLIST_MIN_BUILD", "")
+    lobby.lose_unregister = args.lose_unregister
     lobby.maintenance = args.maintenance or os.environ.get("FAKE_HOSTLIST_MAINTENANCE") == "1"
     server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(lobby))
     server.daemon_threads = True
