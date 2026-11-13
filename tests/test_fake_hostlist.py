@@ -15,7 +15,7 @@ import urllib.error
 import urllib.request
 
 # tools/ is on the path (conftest); a `tools.` import hides the toolkit's
-from fake_hostlist import DEFAULT_TURN_URL, Lobby, derive_id, make_handler
+from fake_hostlist import DEFAULT_TURN_URL, Lobby, compare_builds, derive_id, make_handler
 
 
 def start_server(break_punch=False, secret=None, turn_user=None, turn_pass=None, turn_url=None):
@@ -1041,5 +1041,51 @@ def test_ack_keeps_connects_until_acknowledged():
         assert "seq" not in body["connects"][0]
         status, body = http_json(poll)
         assert body in (None, {"connects": []})
+    finally:
+        server.shutdown()
+
+
+# ---- versions and updates (lobby.js gate; research/docs/online-architecture.md 7a) ----
+
+
+def test_compare_builds_matches_lobby_js_order():
+    order = ["", "garbage", "1.0", "0.2.4", "0.3.0-alpha.3", "0.3.0-beta.1", "0.3.0-beta.2", "0.3.0-beta.10",
+             "0.3.0-rc.1", "0.3.0", "0.3.1-beta.1", "0.10.0"]
+    for i, a in enumerate(order):
+        for j, b in enumerate(order):
+            want = 0 if i < 3 and j < 3 else (i > j) - (i < j)
+            assert compare_builds(a, b) == want, (a, b)
+    assert compare_builds("v0.3.0-beta.2", "0.3.0-beta2") == 0
+    assert compare_builds("0.3.0+abc123", "0.3.0") == 0
+
+
+def test_min_build_refuses_old_builds_but_not_unregister():
+    port, server, lobby = start_server()
+    try:
+        base = f"http://127.0.0.1:{port}"
+        lobby.min_build = "0.3.0-beta.2"
+        for headers in ({}, {"x-fci-build": "0.3.0-beta.1"}):
+            status, body = http_json(f"{base}/v1/hosts?title=evolution&version=3", headers=headers)
+            assert (status, body) == (426, {"error": "update", "minBuild": "0.3.0-beta.2"})
+            status, _ = http_json(f"{base}/v1/register", method="POST", body={}, headers=headers)
+            assert status == 426
+        status, _ = http_json(f"{base}/v1/hosts?title=evolution&version=3", headers={"x-fci-build": "0.3.0"})
+        assert status == 200
+        status, _ = http_json(f"{base}/v1/unregister", method="POST", body={})
+        assert status != 426
+        lobby.min_build = "not a version"
+        assert http_json(f"{base}/v1/hosts?title=evolution&version=3")[0] == 200
+    finally:
+        server.shutdown()
+
+
+def test_maintenance_pauses_every_player_route():
+    port, server, lobby = start_server()
+    try:
+        base = f"http://127.0.0.1:{port}"
+        lobby.maintenance = True
+        assert http_json(f"{base}/v1/hosts?title=evolution&version=3") == (503, {"error": "maintenance"})
+        assert http_json(f"{base}/v1/connect", method="POST", body={})[0] == 503
+        assert http_json(f"{base}/v1/unregister", method="POST", body={})[0] != 503
     finally:
         server.shutdown()

@@ -5,7 +5,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
-import { Lobby, TURN_WINDOW_MS } from "./lobby.js";
+import { Lobby, TURN_WINDOW_MS, compareBuilds } from "./lobby.js";
 
 const env = { TTL_MS: 200, RELAY: "hub.example:4000" };
 
@@ -1782,4 +1782,72 @@ test("ack: register reports the connect counter, and a re-register never reuses 
   assert.equal((await r(lobby, conn(hid, "93.184.100.10", "f".repeat(64))))[0], 200);
   const [, body] = await r(lobby, req(`/v1/connects?id=${hid}&token=${hToken}&wait=1&ack=1`));
   assert.deepEqual(body.connects.map((c) => c.seq), [2]);
+});
+
+// ---- versions and updates (research/docs/online-architecture.md 7a) ----
+
+test("builds: numbers, then a release above its pre-releases, then label and number", () => {
+  const order = ["", "garbage", "1.0", "0.2.4", "0.3.0-alpha.3", "0.3.0-beta.1", "0.3.0-beta.2", "0.3.0-beta.10",
+    "0.3.0-rc.1", "0.3.0", "0.3.1-beta.1", "0.10.0"];
+  for (let i = 0; i < order.length; i++)
+    for (let j = 0; j < order.length; j++) {
+      const want = i < 3 && j < 3 ? 0 : Math.sign(i - j); // the three unparsable strings are equal
+      assert.equal(compareBuilds(order[i], order[j]), want, `${order[i]} vs ${order[j]}`);
+    }
+  assert.equal(compareBuilds("v0.3.0-beta.2", "0.3.0-beta2"), 0, "a leading v and a missing dot are the same build");
+  assert.equal(compareBuilds("0.3.0+abc123", "0.3.0"), 0, "build metadata is ignored");
+  assert.equal(compareBuilds(undefined, "0.3.0"), -1);
+});
+
+const withBuild = (build, extra = {}) => ({ ...extra, headers: { ...(extra.headers || {}), ...(build ? { "x-fci-build": build } : {}) } });
+
+test("MIN_BUILD: a build below it, or none, is told to update on every player route", async () => {
+  const lobby = mk({ ...env, MIN_BUILD: "0.3.0-beta.2" });
+  for (const build of [null, "0.3.0-beta.1", "nonsense"]) {
+    for (const request of [
+      req("/v1/hosts?title=instincts&version=1", withBuild(build)),
+      req("/v1/register", withBuild(build, { method: "POST", body: {} })),
+      req("/v1/connects?id=" + "a".repeat(32), withBuild(build)),
+      req("/v1/connect", withBuild(build, { method: "POST", body: {} })),
+      req("/v1/turn", withBuild(build, { method: "POST", body: {} })),
+    ]) {
+      const [status, body] = await r(lobby, request);
+      assert.equal(status, 426, `${build} ${request.url}`);
+      assert.deepEqual(body, { error: "update", minBuild: "0.3.0-beta.2" });
+    }
+  }
+  for (const build of ["0.3.0-beta.2", "0.3.0-beta.3", "0.3.0"]) {
+    const [status] = await r(lobby, req("/v1/hosts?title=instincts&version=1", withBuild(build)));
+    assert.equal(status, 200, build);
+  }
+});
+
+test("MIN_BUILD: unregister is never refused, and admin routes are not gated", async () => {
+  const lobby = mk({ ...env, MIN_BUILD: "9.9.9", MAINTENANCE: "1", ADMIN_SECRET: "s".repeat(32) });
+  const [status] = await r(lobby, req("/v1/unregister", { method: "POST", body: {} }));
+  assert.notEqual(status, 426);
+  assert.notEqual(status, 503);
+  const [admin] = await r(lobby, req("/admin/hosts", { headers: { authorization: "Bearer " + "s".repeat(32) } }));
+  assert.equal(admin, 200);
+});
+
+test("MIN_BUILD: unset or not a version refuses nobody", async () => {
+  for (const MIN_BUILD of [undefined, "", "latest"]) {
+    const lobby = mk({ ...env, MIN_BUILD });
+    const [status] = await r(lobby, req("/v1/hosts?title=instincts&version=1"));
+    assert.equal(status, 200, String(MIN_BUILD));
+  }
+});
+
+test("MAINTENANCE: every gated route answers 503 maintenance, whatever the build", async () => {
+  const lobby = mk({ ...env, MAINTENANCE: "back at 20:00 UTC" });
+  for (const request of [
+    req("/v1/hosts?title=instincts&version=1", withBuild("0.3.0-beta.2")),
+    req("/v1/register", withBuild("0.3.0-beta.2", { method: "POST", body: {} })),
+    req("/v1/connect", { method: "POST", body: {} }),
+  ]) {
+    const [status, body] = await r(lobby, request);
+    assert.equal(status, 503);
+    assert.deepEqual(body, { error: "maintenance" });
+  }
 });

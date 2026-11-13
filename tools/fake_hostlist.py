@@ -6,7 +6,7 @@ the token-derived id (sha256(token), first 16 bytes, hex), the id-only listing, 
 admin routes. It skips the public-address check so 127.0.0.1 registers and connects work, and it
 keeps the bans and the rate limits in memory (lobby.js keeps the bans in the object's SQLite).
 
-Usage: python tools/fake_hostlist.py [port] [--break-punch] [--secret S]
+Usage: python tools/fake_hostlist.py [port] [--break-punch] [--secret S] [--min-build V] [--maintenance]
        [--turn-user U --turn-pass P --turn-url URL]   (default port 47801)
 
 --break-punch rewrites the endpoint in every direct connect it forwards to the host (port + 1000),
@@ -14,6 +14,9 @@ so the host punches a dead port and ignores the guest's punches (endpoint mismat
 windows fail and both sides fall back to the relay. A relayed connect (relay: true, the guest's
 TURN address) is forwarded untouched: the host punches that address for real.
 --secret sets the admin secret (default $FAKE_HOSTLIST_SECRET, else none: admin is off).
+--min-build V and --maintenance set the operator's switches (lobby.js MIN_BUILD, MAINTENANCE): a request
+whose X-FCI-Build is below V, or carries none, gets 426 update; maintenance answers 503 on every player
+route but unregister. Also $FAKE_HOSTLIST_MIN_BUILD and $FAKE_HOSTLIST_MAINTENANCE.
 --turn-user / --turn-pass / --turn-url configure /v1/turn (the mint gate, the mint rate limits and
 the relay connect behave as in lobby.js); without a user and a password, /v1/turn is 503 "no relay".
 """
@@ -104,6 +107,31 @@ def _minute(now):
     return int(now // 60)
 
 
+# Build versions, as lobby.js compareBuilds: the numbers, then a release above its pre-releases, then
+# pre-releases by label and number; a string that does not parse is older than any.
+BUILD = re.compile(r"^v?(\d{1,5})\.(\d{1,5})\.(\d{1,5})(?:-([a-z]{1,10})\.?(\d{1,5}))?(?:\+[0-9A-Za-z.-]{1,32})?$")
+
+
+def compare_builds(a, b):
+    x, y = BUILD.match(str(a or "")), BUILD.match(str(b or ""))
+    if not x or not y:
+        return (1 if x else 0) - (1 if y else 0)
+    for i in (1, 2, 3):
+        if int(x[i]) != int(y[i]):
+            return -1 if int(x[i]) < int(y[i]) else 1
+    if (x[4] is None) != (y[4] is None):
+        return -1 if x[4] else 1
+    if x[4] is None:
+        return 0
+    if x[4] != y[4]:
+        return -1 if x[4] < y[4] else 1
+    return (int(x[5]) > int(y[5])) - (int(x[5]) < int(y[5]))
+
+
+GATED = {("GET", "/v1/hosts"), ("POST", "/v1/register"), ("GET", "/v1/connects"), ("POST", "/v1/connect"),
+         ("POST", "/v1/turn"), ("POST", "/v1/probe-report")}
+
+
 class RateLimit:
     def __init__(self, span=60):
         self.span = span
@@ -143,6 +171,8 @@ class Lobby:
         self.abuse = {"byIp": {}, "ring": []}
         self.break_punch = break_punch  # rewrite the endpoint in direct connects (port + 1000)
         self.secret = secret
+        self.min_build = ""  # the operator's switches (lobby.js gate)
+        self.maintenance = False
         self.turn_user = turn_user
         self.turn_pass = turn_pass
         self.turn_url = turn_url
@@ -512,6 +542,18 @@ class Lobby:
                 return 200, {"byIp": by_ip[:100], "ring": self.abuse["ring"]}
         return 404, {"error": "not found"}
 
+    def gate(self, method, path, build):
+        """lobby.js gate: the refusal for a gated route, or None"""
+        if (method, path) not in GATED:
+            return None
+        if self.maintenance:
+            return 503, {"error": "maintenance"}
+        if not self.min_build or not BUILD.match(self.min_build):
+            return None
+        if compare_builds(build, self.min_build) >= 0:
+            return None
+        return 426, {"error": "update", "minBuild": self.min_build}
+
 
 def make_handler(lobby):
     class Handler(BaseHTTPRequestHandler):
@@ -544,8 +586,16 @@ def make_handler(lobby):
                 diff |= ord(a) ^ ord(b)
             return diff == 0
 
+        def _gated(self, method, path):
+            refusal = lobby.gate(method, path, self.headers.get("x-fci-build"))
+            if refusal:
+                self._send(*refusal)
+            return refusal is not None
+
         def do_POST(self):
             url = urlparse(self.path)
+            if self._gated("POST", url.path):
+                return
             if "application/json" not in (self.headers.get("content-type") or ""):
                 self._send(415, {"error": "JSON only"})  # as the Worker (lobby.js) answers
                 return
@@ -590,6 +640,8 @@ def make_handler(lobby):
         def do_GET(self):
             url = urlparse(self.path)
             params = parse_qs(url.query)
+            if self._gated("GET", url.path):
+                return
             if url.path.startswith("/admin/"):
                 if not self._authed():
                     self._send(401, {"error": "unauthorized"})
@@ -646,6 +698,8 @@ def main():
         "--turn-pass", default=None, help="credential password /v1/turn returns (default $FAKE_HOSTLIST_TURN_PASS)"
     )
     ap.add_argument("--turn-url", default=DEFAULT_TURN_URL, help="the turn: URL /v1/turn returns (default %(default)s)")
+    ap.add_argument("--min-build", default=None, help="refuse older builds (default $FAKE_HOSTLIST_MIN_BUILD)")
+    ap.add_argument("--maintenance", action="store_true", help="pause online play ($FAKE_HOSTLIST_MAINTENANCE=1)")
     args = ap.parse_args()
     port = args.port if args.port is not None else int(os.environ.get("FAKE_HOSTLIST_PORT", "47801"))
     secret = args.secret if args.secret is not None else os.environ.get("FAKE_HOSTLIST_SECRET")
@@ -656,6 +710,8 @@ def main():
         turn_pass=args.turn_pass if args.turn_pass is not None else os.environ.get("FAKE_HOSTLIST_TURN_PASS"),
         turn_url=args.turn_url,
     )
+    lobby.min_build = args.min_build if args.min_build is not None else os.environ.get("FAKE_HOSTLIST_MIN_BUILD", "")
+    lobby.maintenance = args.maintenance or os.environ.get("FAKE_HOSTLIST_MAINTENANCE") == "1"
     server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(lobby))
     server.daemon_threads = True
     print(f"fake host list on http://127.0.0.1:{port}" + (f" (admin secret set, relay={RELAY})" if secret else ""))

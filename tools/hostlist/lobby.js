@@ -73,10 +73,10 @@
 //
 // Deploy: wrangler.toml (one Worker, one DO class, `Lobby`). Every setting (RELAY, TURN_KEY_ID,
 // TURN_KEY_API_TOKEN, RELAY_BUDGET_GB, TURN_USAGE_ACCOUNT_ID, TURN_USAGE_API_TOKEN, ADMIN_SECRET,
-// RELAY_KILL, RELAY_ALERT_WEBHOOK) is a secret (`wrangler secret put`): secrets survive `wrangler deploy`, which replaces
+// RELAY_KILL, RELAY_ALERT_WEBHOOK, MIN_BUILD, MAINTENANCE) is a secret (`wrangler secret put`): secrets survive `wrangler deploy`, which replaces
 // plain variables with wrangler.toml's (none), and no deployment's values live in the repo.
 // Free tier.
-// The how-to is research/docs/online-architecture.md, section 7.
+// The how-to is research/docs/online-architecture.md, sections 7 and 7a (versions and updates).
 
 const PROTO = 2; // the net protocol (src/fci_net.h): title + version + this must all match
 const LIST_MAX = 64;
@@ -255,6 +255,27 @@ function turnCredential(ice) {
   return null;
 }
 
+// Build versions (research/docs/online-architecture.md 7a): "0.3.0-beta.2" is the numbers, then a
+// release above its pre-releases, then pre-releases by label and number. The launcher's paths.rs
+// ranks the same way. A build that does not parse (0.3.0-beta.1 sends none) is older than any.
+const BUILD = /^v?(\d{1,5})\.(\d{1,5})\.(\d{1,5})(?:-([a-z]{1,10})\.?(\d{1,5}))?(?:\+[0-9A-Za-z.-]{1,32})?$/;
+
+export function compareBuilds(a, b) {
+  const x = BUILD.exec(String(a ?? "")), y = BUILD.exec(String(b ?? ""));
+  if (!x || !y) return (x ? 1 : 0) - (y ? 1 : 0);
+  for (let i = 1; i <= 3; i++) if (+x[i] !== +y[i]) return +x[i] < +y[i] ? -1 : 1;
+  if (!x[4] !== !y[4]) return x[4] ? -1 : 1; // the release above its pre-releases
+  if (!x[4]) return 0;
+  if (x[4] !== y[4]) return x[4] < y[4] ? -1 : 1; // alpha < beta < rc
+  return Math.sign(+x[5] - +y[5]);
+}
+
+// Player routes the operator's switches apply to. Unregister is never refused: an old build still leaves.
+const GATED = new Set([
+  "GET /v1/hosts", "POST /v1/register", "GET /v1/connects", "POST /v1/connect", "POST /v1/turn",
+  "POST /v1/probe-report",
+]);
+
 export class Lobby {
   constructor(state, env) {
     this.state = state;
@@ -330,6 +351,24 @@ export class Lobby {
   // RELAY_KILL` sets it, `wrangler secret delete RELAY_KILL` clears it; no code redeploy.
   relayKilled() {
     return String((this.env && this.env.RELAY_KILL) || "").length > 0;
+  }
+
+  // The operator's version and maintenance switches (secrets like RELAY_KILL): MAINTENANCE (any
+  // non-empty value) pauses online play; MIN_BUILD turns away builds below it and those that send none.
+  // The refusal for a gated route, or null.
+  gate(route, build) {
+    if (!GATED.has(route)) return null;
+    const e = this.env || {};
+    if (String(e.MAINTENANCE || "").length > 0) return json({ error: "maintenance" }, 503);
+    const min = String(e.MIN_BUILD || "");
+    if (!min) return null;
+    if (!BUILD.test(min)) { // a typo must not lock everyone out: say so once and refuse nobody
+      if (this.badMinBuild !== min) console.log(`MIN_BUILD "${min}" is not a version; no build is refused`);
+      this.badMinBuild = min;
+      return null;
+    }
+    if (compareBuilds(build, min) >= 0) return null;
+    return json({ error: "update", minBuild: min }, 426);
   }
 
   cachedUsage() {
@@ -597,8 +636,8 @@ export class Lobby {
     }
     const route = request.method + " " + url.pathname;
     const start = Date.now();
-    let response;
-    try {
+    let response = this.gate(route, request.headers.get("x-fci-build"));
+    if (!response) try {
       switch (route) {
         case "GET /v1/hosts": response = this.list(url, ip); break;
         case "POST /v1/register": response = await this.register(request, ip); break;
