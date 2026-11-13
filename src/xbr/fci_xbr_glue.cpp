@@ -378,6 +378,14 @@ LRESULT CALLBACK FrameProc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
     case kMsgToggle:
         ToggleFullscreen(w);
         return 0;
+    case WM_DPICHANGED: {   // moved to a monitor with other scaling: take the size Windows suggests for it
+        const RECT *r = reinterpret_cast<const RECT *>(lp);
+        if (GetWindowLongW(w, GWL_STYLE) & WS_POPUP)
+            return 0;   // fullscreen: ToggleFullscreen sizes it to the monitor
+        SetWindowPos(w, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+        return 0;
+    }
     case WM_CLOSE:   // the session ends: the first instance waits for this one's job to empty
         fci_log_session_end();
         fci_exit_begin();
