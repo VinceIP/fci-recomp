@@ -1406,7 +1406,7 @@ test("relay budget: a month with no relay traffic yet (empty usage list) mints",
   }
 });
 
-test("relay budget: /admin/relay reports the usage, the budget and the reason; the refusal line names it", async () => {
+test("relay budget: /admin/relay reports the usage, the budget, the reason and the alert state", async () => {
   const lobby = mk({ ...QUOTA_ENV, ADMIN_SECRET: "s3cret" }); // budget 100 GB
   const auth = { headers: { authorization: "Bearer s3cret" } };
   const lines = [];
@@ -1422,20 +1422,230 @@ test("relay budget: /admin/relay reports the usage, the budget and the reason; t
     assert.equal(body.why, "budget reached");
     assert.equal(body.usedBytes, 101e9);
     assert.equal(body.budgetBytes, 100e9);
+    assert.equal(body.alertState, "budget");
+    assert.ok(body.alertChangedAt, "the last change time is reported");
+    assert.equal(new Date(body.alertChangedAt).getTime() > 0, true);
+    // the alert line is logged once for the state change (seen on the admin call), not per mint
     const { hid, nonce } = await hostAndConn(lobby, {});
     [status] = await r(lobby, req("/v1/turn", { method: "POST", body: { id: hid, nonce, token: "d".repeat(64) } }));
     assert.equal(status, 503);
-    assert.ok(lines.some((l) => l.includes("relay mint refused: budget reached") && l.includes("used 101.000 GB of 100.000 GB")), lines.join("\n"));
+    const alertLines = lines.filter((l) => l.startsWith("relay budget reached"));
+    assert.equal(alertLines.length, 1, lines.join("\n"));
+    assert.equal(alertLines[0], "relay budget reached: 101.00 GB of 100.00 GB used in " + lobby.monthKey(Date.now()));
+    [status, body] = await r(lobby, req("/admin/relay", auth));
+    assert.equal(body.alertState, "budget");
     t.restore();
-    // a failed read with nothing cached is a different reason
+    // a failed read with nothing cached is a different reason and a different alert line
     const lobby2 = mk({ ...QUOTA_ENV, ADMIN_SECRET: "s3cret" });
     t = stubTurnUsage({ usage: () => new Response("no", { status: 500 }) });
     [status, body] = await r(lobby2, req("/admin/relay", auth));
     assert.equal(body.allow, false);
     assert.equal(body.why, "usage read failed, nothing cached");
     assert.equal(body.usedBytes, undefined);
+    assert.equal(body.alertState, "usage-unreadable");
+    assert.ok(lines.includes("relay usage unreadable: HTTP 500"), lines.join("\n"));
   } finally {
     console.log = log;
+    t.restore();
+  }
+});
+
+// --- the relay alert (backlog 40): one line and one webhook POST per state change ---
+
+const WEBHOOK_URL = "https://discord.example/webhooks/1/abc";
+
+// Routes the three outbound calls the Worker makes: the usage read (GraphQL), the mint
+// (generate-ice-servers) and the alert webhook.
+function stubTurnUsageWebhook({ usage = () => usageOk(0), mint = () => cfOk([STUN_ENTRY, TURN_ENTRY]), webhook = () => new Response("ok", { status: 204 }) } = {}) {
+  const calls = { usage: [], mint: [], webhook: [] };
+  const restore = stubFetch(async (url, init) => {
+    const u = String(url);
+    if (u.startsWith(USAGE_URL)) {
+      calls.usage.push([u, init]);
+      return usage(u, init);
+    }
+    if (u.includes("generate-ice-servers")) {
+      calls.mint.push([u, init]);
+      return mint(u, init);
+    }
+    if (u.includes("/webhooks/")) {
+      calls.webhook.push([u, init]);
+      return webhook(u, init);
+    }
+    throw new Error("unexpected fetch: " + u);
+  });
+  return { restore, calls };
+}
+
+test("relay alert: the budget transition logs and posts once across many refused mints", async () => {
+  const lobby = mk({ ...QUOTA_ENV, RELAY_ALERT_WEBHOOK: WEBHOOK_URL }); // budget 100 GB
+  const lines = [];
+  const log = console.log;
+  console.log = (m) => lines.push(String(m));
+  const { restore, calls } = stubTurnUsageWebhook({ usage: () => usageOk(101e9) });
+  try {
+    const { hid, nonce } = await hostAndConn(lobby, {});
+    let status;
+    for (let i = 0; i < 3; i++) {
+      [status] = await r(lobby, req("/v1/turn", { method: "POST", body: { id: hid, nonce, token: "d".repeat(64) } }));
+      assert.equal(status, 503, `mint ${i + 1} refused`);
+    }
+    const alertLines = lines.filter((l) => l.startsWith("relay budget reached"));
+    assert.equal(alertLines.length, 1, "one line for the run of refusals: " + lines.join("\n"));
+    assert.equal(alertLines[0], "relay budget reached: 101.00 GB of 100.00 GB used in " + lobby.monthKey(Date.now()));
+    assert.equal(calls.webhook.length, 1, "one webhook POST for the run of refusals");
+    assert.equal(calls.webhook[0][0], WEBHOOK_URL);
+    assert.deepEqual(JSON.parse(calls.webhook[0][1].body), { content: alertLines[0] });
+    // the message carries no token, no IP and no id
+    const sent = JSON.stringify(JSON.parse(calls.webhook[0][1].body));
+    assert.ok(!sent.includes("d".repeat(64)) && !sent.includes("93.184") && !sent.includes("keyid") && !sent.includes("usagetoken"), sent);
+  } finally {
+    console.log = log;
+    restore();
+  }
+});
+
+test("relay alert: recovery to an under-budget month logs and posts once", async () => {
+  const lobby = mk({ ...QUOTA_ENV, RELAY_ALERT_WEBHOOK: WEBHOOK_URL });
+  const lines = [];
+  const log = console.log;
+  console.log = (m) => lines.push(String(m));
+  let t = stubTurnUsageWebhook({ usage: () => usageOk(101e9) });
+  try {
+    const { hid, nonce } = await hostAndConn(lobby, {});
+    const [status] = await r(lobby, req("/v1/turn", { method: "POST", body: { id: hid, nonce, token: "d".repeat(64) } }));
+    assert.equal(status, 503);
+    assert.equal(lines.filter((l) => l.startsWith("relay budget reached")).length, 1);
+  } finally {
+    t.restore();
+  }
+  // a new month with a fresh, under-budget read: the state changes back
+  setCache(lobby, { bytes: 1e9, at: Date.now() - 10 * 60 * 1000, month: "1999-01" });
+  t = stubTurnUsageWebhook({ usage: () => usageOk(1e9) });
+  try {
+    const { hid, nonce } = await hostAndConn(lobby, {});
+    let [status, body] = await r(lobby, req("/v1/turn", { method: "POST", body: { id: hid, nonce, token: "d".repeat(64) } }));
+    assert.equal(status, 200, "the new month's mint is allowed");
+    assert.ok(body.username);
+    const rec = lines.filter((l) => l.startsWith("relay recovered"));
+    assert.equal(rec.length, 1, lines.join("\n"));
+    assert.equal(rec[0], "relay recovered: mints allowed again");
+    assert.equal(t.calls.webhook.length, 1);
+    assert.deepEqual(JSON.parse(t.calls.webhook[0][1].body), { content: "relay recovered: mints allowed again" });
+    assert.equal(lobby.alertState, "ok");
+    // a second under-budget mint does not log or post again
+    const nonce2 = "f".repeat(32);
+    await r(lobby, req("/v1/connect", { method: "POST", ip: "93.184.100.9", body: { id: hid, endpoint: "93.184.100.9:41000", nonce: nonce2, mac: "02:46:43:aa:bb:cc", token: "d".repeat(64) } }));
+    [status] = await r(lobby, req("/v1/turn", { method: "POST", body: { id: hid, nonce: nonce2, token: "d".repeat(64) } }));
+    assert.equal(status, 200);
+    assert.equal(lines.filter((l) => l.startsWith("relay recovered")).length, 1);
+    assert.equal(t.calls.webhook.length, 1);
+  } finally {
+    console.log = log;
+    t.restore();
+  }
+});
+
+test("relay alert: a webhook that fails (throws, 500) does not change the mint's answer", async () => {
+  // the webhook fetch throws: the mint is still refused 503 no relay
+  let lobby = mk({ ...QUOTA_ENV, RELAY_ALERT_WEBHOOK: WEBHOOK_URL });
+  const lines = [];
+  const log = console.log;
+  console.log = (m) => lines.push(String(m));
+  let t = stubTurnUsageWebhook({ usage: () => usageOk(101e9), webhook: () => { throw new Error("webhook down"); } });
+  try {
+    const { hid, nonce } = await hostAndConn(lobby, {});
+    const [status, body] = await r(lobby, req("/v1/turn", { method: "POST", body: { id: hid, nonce, token: "d".repeat(64) } }));
+    assert.equal(status, 503);
+    assert.deepEqual(body, { error: "no relay" });
+    assert.equal(lines.filter((l) => l.startsWith("relay budget reached")).length, 1);
+  } finally {
+    t.restore();
+  }
+  // the webhook answers 500: the mint is refused the same way
+  lobby = mk({ ...QUOTA_ENV, RELAY_ALERT_WEBHOOK: WEBHOOK_URL });
+  t = stubTurnUsageWebhook({ usage: () => usageOk(101e9), webhook: () => new Response("err", { status: 500 }) });
+  try {
+    const { hid, nonce } = await hostAndConn(lobby, {});
+    const [status, body] = await r(lobby, req("/v1/turn", { method: "POST", body: { id: hid, nonce, token: "d".repeat(64) } }));
+    assert.equal(status, 503);
+    assert.deepEqual(body, { error: "no relay" });
+  } finally {
+    console.log = log;
+    t.restore();
+  }
+});
+
+test("relay alert: no webhook set sends nothing (and a bad URL sends nothing)", async () => {
+  // no RELAY_ALERT_WEBHOOK: a budget transition logs but fetch is never called for a webhook
+  const lobby = mk(QUOTA_ENV);
+  const { restore, calls } = stubTurnUsageWebhook({ usage: () => usageOk(101e9) });
+  try {
+    const { hid, nonce } = await hostAndConn(lobby, {});
+    const [status] = await r(lobby, req("/v1/turn", { method: "POST", body: { id: hid, nonce, token: "d".repeat(64) } }));
+    assert.equal(status, 503);
+    assert.equal(calls.webhook.length, 0);
+    assert.equal(lobby.alertState, "budget");
+  } finally {
+    restore();
+  }
+  // a non-https URL is not sent (the secret is meant to be an https URL)
+  const lobby2 = mk({ ...QUOTA_ENV, RELAY_ALERT_WEBHOOK: "http://insecure.example/hook" });
+  const t2 = stubTurnUsageWebhook({ usage: () => usageOk(101e9) });
+  try {
+    const { hid, nonce } = await hostAndConn(lobby2, {});
+    const [status] = await r(lobby2, req("/v1/turn", { method: "POST", body: { id: hid, nonce, token: "d".repeat(64) } }));
+    assert.equal(status, 503);
+    assert.equal(t2.calls.webhook.length, 0);
+  } finally {
+    t2.restore();
+  }
+});
+
+test("relay alert: at most 6 webhook POSTs an hour, across state changes", async () => {
+  const lobby = mk({ ...QUOTA_ENV, RELAY_ALERT_WEBHOOK: WEBHOOK_URL });
+  let usageBytes = 101e9; // the stubbed month's egress, flipped per phase
+  const t = stubTurnUsageWebhook({ usage: () => usageOk(usageBytes) });
+  // every mint is a fresh guest from a fresh address (the mint caps are per guest and per address)
+  let n = 0;
+  try {
+    const { hid } = await hostAndConn(lobby, {});
+    const mint = async (expect) => {
+      n++;
+      const gt = ("d" + (n % 10)).repeat(32);
+      const ip = "93.184.100." + (20 + n);
+      const nonceN = ("e" + (n % 10)).repeat(16);
+      const [cs] = await r(lobby, req("/v1/connect", {
+        method: "POST", ip,
+        body: { id: hid, endpoint: ip + ":41000", nonce: nonceN, mac: "02:46:43:aa:bb:cc", token: gt },
+      }));
+      assert.equal(cs, 200);
+      const [status] = await r(lobby, req("/v1/turn", { method: "POST", ip, body: { id: hid, nonce: nonceN, token: gt } }));
+      assert.equal(status, expect);
+    };
+    // six state changes (budget -> ok three times): six POSTs
+    for (let i = 0; i < 3; i++) {
+      usageBytes = 101e9;
+      setCache(lobby, { bytes: 101e9, at: Date.now() - 10 * 60 * 1000 }); // forces the fresh over-budget read
+      await mint(503);
+      usageBytes = 1e9;
+      setCache(lobby, { bytes: 1e9, at: Date.now() - 10 * 60 * 1000, month: "1999-01" }); // the read replaces it
+      await mint(200, `recovery ${i + 1}`);
+    }
+    assert.equal(t.calls.webhook.length, 6);
+    // a seventh change in the same hour is logged but not posted
+    usageBytes = 101e9;
+    setCache(lobby, { bytes: 101e9, at: Date.now() - 10 * 60 * 1000 });
+    await mint(503);
+    assert.equal(lobby.alertState, "budget");
+    assert.equal(t.calls.webhook.length, 6, "the 7th change of the hour is not posted");
+    // once the hour has passed the cap lifts
+    lobby.alertPosts = lobby.alertPosts.map((x) => x - 3600000 - 1000);
+    usageBytes = 1e9;
+    setCache(lobby, { bytes: 1e9, at: Date.now() - 10 * 60 * 1000, month: "1999-01" });
+    await mint(200);
+    assert.equal(t.calls.webhook.length, 7, "after the hour, the next change is posted again");
+  } finally {
     t.restore();
   }
 });

@@ -55,7 +55,13 @@
 //   blocks mints regardless of quota configuration. The operator sets it: `wrangler secret put RELAY_KILL` sets it, `wrangler secret
 //   delete RELAY_KILL` clears it; each creates a new Worker version, no code redeploy. The
 //   refusal is the same `no relay` as when the TURN key is unset and is never explained to the
-//   caller.
+//   caller. The operator is told by state change, not per refusal: budget reached (the
+//   month's usage and budget in GB), usage unreadable (the read's HTTP status or the
+//   exception's name), relay killed and recovered are each one log line and, when
+//   RELAY_ALERT_WEBHOOK is set (a wrangler secret, an https URL such as a Discord webhook),
+//   one fire-and-forget POST of {"content": "..."} to it (at most 6 an hour; a failure never
+//   delays or fails a mint; no webhook set: nothing sent). GET /admin/relay reports the
+//   current alert state and when it last changed.
 // - Bans (a banned id cannot host, and cannot join anyone) persist in the object's SQLite, so they
 //   survive an eviction; the refusal counters and a ring of recent refusals are memory-only.
 //
@@ -67,7 +73,7 @@
 //
 // Deploy: wrangler.toml (one Worker, one DO class, `Lobby`). Every setting (RELAY, TURN_KEY_ID,
 // TURN_KEY_API_TOKEN, RELAY_BUDGET_GB, TURN_USAGE_ACCOUNT_ID, TURN_USAGE_API_TOKEN, ADMIN_SECRET,
-// RELAY_KILL) is a secret (`wrangler secret put`): secrets survive `wrangler deploy`, which replaces
+// RELAY_KILL, RELAY_ALERT_WEBHOOK) is a secret (`wrangler secret put`): secrets survive `wrangler deploy`, which replaces
 // plain variables with wrangler.toml's (none), and no deployment's values live in the repo.
 // Free tier.
 // The how-to is research/docs/online-architecture.md, section 7.
@@ -285,6 +291,10 @@ export class Lobby {
     this.usage = null; // {month, bytes, at}: the month's egress, in memory (SQLite is the source)
     this.usageInFlight = null; // at most one in-flight usage read per object
     this.quotaOffLogged = false;
+    this.alertState = "ok"; // the relay alert state: ok, budget, usage-unreadable, disabled
+    this.alertChangedAt = null; // when the alert state last changed (GET /admin/relay)
+    this.alertPosts = []; // webhook POST times (at most 6 an hour)
+    this.usageReadError = null; // the last failed usage read's reason: an HTTP status, an exception name
   }
 
   // Memory of the refusals this object has seen (the admin CLI's `abuse` command); the ban itself
@@ -381,10 +391,14 @@ export class Lobby {
       });
       if (!resp.ok) {
         console.log("relay usage: Cloudflare answered " + resp.status);
+        this.usageReadError = "HTTP " + resp.status;
         return null;
       }
       const body = await resp.json().catch(() => null);
-      if (body && body.errors) console.log("relay usage: GraphQL errors in Cloudflare's answer");
+      if (body && body.errors) {
+        console.log("relay usage: GraphQL errors in Cloudflare's answer");
+        this.usageReadError = "malformed usage answer";
+      }
       const data = body && body.data;
       const groups =
         data &&
@@ -397,13 +411,16 @@ export class Lobby {
         : groups && groups[0] && groups[0].sum && Number(groups[0].sum.egressBytes);
       if (!isFinite(bytes)) {
         console.log("relay usage: no egressBytes in Cloudflare's answer");
+        this.usageReadError = "malformed usage answer";
         return null;
       }
+      this.usageReadError = null;
       const u = { month: this.monthKey(now), bytes, at: Date.now() };
       this.storeUsage(u);
       return u;
     } catch (err) {
       console.log("relay usage: the request failed (" + ((err && err.name) || "error") + ")");
+      this.usageReadError = (err && err.name) || "error";
       return null;
     }
   }
@@ -422,26 +439,74 @@ export class Lobby {
     const q = this.quotaConfig();
     const month = this.monthKey(now);
     const out = { month, ...(q.on ? { budgetBytes: q.budgetBytes } : {}) };
-    if (this.relayKilled()) return { ...out, allow: false, why: "kill switch (RELAY_KILL) set" };
-    if (!q.on) {
+    let result;
+    if (this.relayKilled()) result = { ...out, allow: false, why: "kill switch (RELAY_KILL) set" };
+    else if (!q.on) {
       if (!this.quotaOffLogged) {
         this.quotaOffLogged = true;
         console.log("relay quota off: " + q.why);
       }
-      return { allow: true, why: "quota off: " + q.why, month };
+      result = { allow: true, why: "quota off: " + q.why, month };
+    } else {
+      let u = this.cachedUsage();
+      if (!u || u.month !== month) u = null;
+      if (!u || now - u.at > USAGE_READ_EVERY_MS) {
+        const fresh = await this.readUsage(now);
+        if (fresh && fresh.month === month) u = fresh;
+      }
+      if (!u) result = { ...out, allow: false, why: "usage read failed, nothing cached" };
+      else {
+        out.usedBytes = u.bytes;
+        out.readAt = new Date(u.at).toISOString();
+        if (now - u.at > USAGE_STALE_MS) result = { ...out, allow: false, why: "usage read failed, cache over 1 h old" };
+        else if (u.bytes >= q.budgetBytes) result = { ...out, allow: false, why: "budget reached" };
+        else result = { ...out, allow: true, why: "under budget" };
+      }
     }
-    let u = this.cachedUsage();
-    if (!u || u.month !== month) u = null;
-    if (!u || now - u.at > USAGE_READ_EVERY_MS) {
-      const fresh = await this.readUsage(now);
-      if (fresh && fresh.month === month) u = fresh;
+    this.noteRelayAlert(result, now);
+    return result;
+  }
+
+  // The operator's relay alert: one log line and one webhook POST per alert-state change (not
+  // per refused mint): budget reached, usage unreadable, relay killed, recovered. The message
+  // names the state and its numbers, never a token, an IP or an id.
+  noteRelayAlert(q, now) {
+    const state = !q.allow
+      ? this.relayKilled() ? "disabled" : q.why === "budget reached" ? "budget" : "usage-unreadable"
+      : "ok";
+    if (state === this.alertState) return;
+    this.alertState = state;
+    this.alertChangedAt = new Date(now).toISOString();
+    let msg;
+    if (state === "budget") {
+      msg = "relay budget reached: " + (q.usedBytes / 1e9).toFixed(2) + " GB of " +
+        (q.budgetBytes / 1e9).toFixed(2) + " GB used in " + q.month;
+    } else if (state === "usage-unreadable") {
+      msg = "relay usage unreadable: " + (this.usageReadError || "unknown");
+    } else if (state === "disabled") {
+      msg = "relay disabled: RELAY_KILL set";
+    } else {
+      msg = "relay recovered: mints allowed again";
     }
-    if (!u) return { ...out, allow: false, why: "usage read failed, nothing cached" };
-    out.usedBytes = u.bytes;
-    out.readAt = new Date(u.at).toISOString();
-    if (now - u.at > USAGE_STALE_MS) return { ...out, allow: false, why: "usage read failed, cache over 1 h old" };
-    if (u.bytes >= q.budgetBytes) return { ...out, allow: false, why: "budget reached" };
-    return { ...out, allow: true, why: "under budget" };
+    console.log(msg);
+    this.postRelayAlert(msg, now);
+  }
+
+  // The alert webhook (env.RELAY_ALERT_WEBHOOK, a wrangler secret, an https URL such as a Discord
+  // webhook): fire-and-forget, at most one POST per state change and 6 an hour in total; a
+  // failure never delays or fails a mint. No webhook set: nothing is sent.
+  postRelayAlert(msg, now) {
+    const url = String((this.env && this.env.RELAY_ALERT_WEBHOOK) || "");
+    if (!url.startsWith("https://")) return; // the secret is an https URL; nothing else is sent
+    this.alertPosts = this.alertPosts.filter((t) => now - t < 3600000);
+    if (this.alertPosts.length >= 6) return;
+    this.alertPosts.push(now);
+    const job = fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ content: msg }),
+    }).catch(() => {});
+    if (this.state && this.state.waitUntil) this.state.waitUntil(job);
   }
 
   // The connect queue is drained by the host's poll, so the mint and relay-connect gates keep
@@ -896,18 +961,12 @@ export class Lobby {
       this.note("norelay", ip, gid);
       return json({ error: "no relay" }, 503);
     }
-    const quota = await this.quotaCheck(now);
+    const quota = await this.quotaCheck(now); // logs the alert line on a state change (not per mint)
     if (!quota.allow) {
       const reason = quota.why === "budget reached" ? "budget"
         : this.relayKilled() ? "disabled" : "usageUnavailable";
       this.metrics.relay[reason]++;
       this.note("norelay", ip, gid);
-      // the reason and the numbers: an operator must tell a spent budget from a failed read
-      console.log(
-        "relay mint refused: " + quota.why + " (" + quota.month +
-          (quota.usedBytes === undefined ? "" : ", used " + (quota.usedBytes / 1e9).toFixed(3) + " GB") +
-          (quota.budgetBytes === undefined ? "" : " of " + (quota.budgetBytes / 1e9).toFixed(3) + " GB") + ")"
-      );
       return json({ error: "no relay" }, 503);
     }
     let data = null;
@@ -1007,8 +1066,10 @@ export class Lobby {
       });
     }
     if (url.pathname === "/admin/relay" && request.method === "GET") {
-      // the month's relay usage against the budget, and whether a mint would be allowed now
-      return json(await this.quotaCheck(Date.now()));
+      // the month's relay usage against the budget, whether a mint would be allowed now, and
+      // the current alert state with when it last changed
+      const q = await this.quotaCheck(Date.now());
+      return json({ ...q, alertState: this.alertState, alertChangedAt: this.alertChangedAt });
     }
     if (url.pathname === "/admin/bans" && request.method === "POST") {
       const msg = await this.adminJson(request);
