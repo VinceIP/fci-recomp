@@ -10,6 +10,7 @@ the driver, returning both subprocess results.
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -39,6 +40,10 @@ def build_run(sources, exe, cc=None, includes=None, flags=None, timeout=30):
         cmd += ["-I", d]
     cmd += [str(s) for s in sources]
     cmd += ["-o", str(exe)]
+    if sys.platform == "win32":
+        cmd.append("-lws2_32")  # htons and friends are imports from ws2_32 there
     build = subprocess.run(cmd, capture_output=True, text=True)
+    if build.returncode != 0:  # no exe: report the compiler's error, not a missing file
+        return build, subprocess.CompletedProcess(cmd, 1, "", "not run: the build failed")
     run = subprocess.run([str(exe)], capture_output=True, text=True, timeout=timeout)
     return build, run
