@@ -129,8 +129,15 @@ REPLACE = {
         "until it reads 0; the hook registers that address with the APU "
         "acknowledgement (fci_manual.c)",
     ),
-    "sub_000675B0": ("prehook", "the UI input manager's router (ecx the manager, its vtable slot 1, from the game loop sub_001FCD40): recorded, so typing stops while a popup takes the pad input (fci_vkb.c)"),
-    "sub_0010B500": ("prehook", "the on-screen keyboard's open (eax keyboard): typing on the PC keyboard starts (fci_vkb.c)"),
+    "sub_000675B0": (
+        "prehook",
+        "the UI input manager's router (ecx the manager, its vtable slot 1, from the game loop sub_001FCD40): "
+        "recorded, so typing stops while a popup takes the pad input (fci_vkb.c)",
+    ),
+    "sub_0010B500": (
+        "prehook",
+        "the on-screen keyboard's open (eax keyboard): typing on the PC keyboard starts (fci_vkb.c)",
+    ),
     "sub_0010B5E0": ("prehook", "the on-screen keyboard's close: typing stops (fci_vkb.c)"),
     "sub_001F6C00": ("prehook", "Input_PollPads (re/symbols): counts polls for RECOMP_FCI_STATUS"),
     "sub_000F0500": (
@@ -537,6 +544,8 @@ def compile_groups(group, inputs, work, obj, tools, base, record):
     elif group == "host":
         for f in sorted((inputs / "host").glob("*.c")):
             flags = ["-O2", *DEBUG, "-Wall", "-Wno-unused", "-Werror=implicit-function-declaration"]
+            if f.name == "fci_net_worker.c" and os.environ.get("FCI_BUILD_VERSION"):
+                flags.append(f'-DFCI_BUILD_VERSION="{os.environ["FCI_BUILD_VERSION"]}"')  # tools/build.py
             if f.name == "fci_net_worker.c" and os.environ.get("FCI_BETA_REPORTS") == "1":
                 flags.append("-DFCI_BETA_REPORTS")
             if f.name == "fci_nic.c" and os.environ.get("FCI_NET_TEST") == "1":

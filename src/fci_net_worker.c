@@ -22,7 +22,12 @@
 #include "fci_json.h"
 #include "fci_connect.h"
 #include "fci_turn.h"
+#include "fci_browse_status.h"
 #include "recomp_types.h"
+
+#ifndef FCI_BUILD_VERSION
+#define FCI_BUILD_VERSION "" /* tools/build.py passes VERSION from fci-recomp.py; a test compile has none */
+#endif
 
 /* the NIC's worker API (fci_nic.c): called under s_lock */
 extern int fci_nic_list_add_peer(const char *endpoint, const char *local, const uint8_t mac[6],
@@ -190,7 +195,7 @@ static int s_endpoint_warned;     /* logged once if the endpoint is not known 5 
 static volatile LONG s_fetch_state;    /* 0 = never fetched, 1 = last fetch ok, 2 = last fetch failed */
 static volatile LONG s_fetch_nhosts;   /* number of hosts in the last successful fetch */
 static volatile LONG s_relay_refused;  /* 1 when the last relay mint was refused (503); clears on success */
-static volatile LONG s_version_refused; /* 1 when the list refused us for the version (not yet wired) */
+static volatile LONG s_list_refused;    /* FCI_LIST_REFUSED_*: why the list turned this build away */
 
 static const char *net_title(void) { return strstr(FCI_TITLE_NAME, "Evolution") ? "evolution" : "instincts"; }
 
@@ -216,6 +221,39 @@ static void log_line(const char *fmt, ...)
 /* --- WinHTTP helpers --- */
 
 /* convert a UTF-8 string to a wide string in dst (up to dstlen wide chars) */
+/* The list's answer to a player route (research/docs/online-architecture.md 7a): 426 means this build is
+ * below the operator's minimum, 503 "maintenance" that online play is paused. Remembered for the browser
+ * and logged once per change; 1 when it was such a refusal. Any 200 clears it. */
+static int note_refusal(int status, const char *body)
+{
+    char err[24] = {0}, min[48] = {0};
+    LONG why = FCI_LIST_REFUSED_NONE, was;
+    if (status != 200 && status != 426 && status != 503)
+        return 0; /* other failures say nothing about the gate */
+    fci_json_str_val(body, "error", err, sizeof err);
+    if (status == 426)
+        why = FCI_LIST_REFUSED_UPDATE;
+    else if (status == 503 && !strcmp(err, "maintenance"))
+        why = FCI_LIST_REFUSED_MAINTENANCE;
+    else if (status == 503)
+        return 0; /* the relay's own 503 (no relay) is not the gate */
+    was = InterlockedExchange(&s_list_refused, why);
+    if (why != was) {
+        if (why == FCI_LIST_REFUSED_UPDATE) {
+            if (!fci_json_str_val(body, "minBuild", min, sizeof min) ||
+                strspn(min, "0123456789abcdefghijklmnopqrstuvwxyz.+-") != strlen(min))
+                strcpy(min, "a newer build");
+            log_line("host list: this build (%s) is too old for online play; it needs %s or newer. Update in FCI "
+                     "Launcher.", FCI_BUILD_VERSION[0] ? FCI_BUILD_VERSION : "unversioned", min);
+        } else if (why == FCI_LIST_REFUSED_MAINTENANCE) {
+            log_line("host list: online play is paused for maintenance");
+        } else {
+            log_line("host list: online play is open to this build again");
+        }
+    }
+    return why != FCI_LIST_REFUSED_NONE;
+}
+
 static void to_wide(const char *src, wchar_t *dst, int dstlen)
 {
     int n = MultiByteToWideChar(CP_UTF8, 0, src, -1, dst, dstlen);
@@ -273,7 +311,8 @@ static int path_len(const char *path)
 static int http_request_on(HINTERNET session, const char *host, int port, int secure, const char *method,
                            const char *path, const char *body, char *buf, int buflen, int *status)
 {
-    wchar_t wmethod[16], wpath[512], whost[256], wheaders[64];
+    wchar_t wmethod[16], wpath[512], whost[256], wheaders[160];
+    char headers[160];
     HINTERNET hconnect = NULL;
     HINTERNET hrequest = NULL;
     DWORD bytes = 0, total = 0;
@@ -281,7 +320,10 @@ static int http_request_on(HINTERNET session, const char *host, int port, int se
     to_wide(method, wmethod, 16);
     to_wide(path, wpath, 512);
     to_wide(host, whost, 256);
-    wcscpy(wheaders, L"Content-Type: application/json\r\n"); /* the Worker answers 415 to anything else */
+    /* JSON: the Worker answers 415 to anything else. The build: the list's minimum-build gate (7a) */
+    snprintf(headers, sizeof headers, "Content-Type: application/json\r\n%s%s%s",
+             FCI_BUILD_VERSION[0] ? "X-FCI-Build: " : "", FCI_BUILD_VERSION, FCI_BUILD_VERSION[0] ? "\r\n" : "");
+    to_wide(headers, wheaders, 160);
 
     hconnect = WinHttpConnect(session, whost, (UINT)port, 0);
     if (!hconnect)
@@ -605,7 +647,8 @@ static void on_host_obj(const char *obj, int len)
     }
     const ULONGLONG report_started = GetTickCount64();
     if (http_request(base, "POST", "/v1/connect", buf, resp, sizeof resp, &status) != 0 || status != 200) {
-        log_line("connect to %s failed (status %d)", id, status);
+        if (!note_refusal(status, resp))
+            log_line("connect to %s failed (status %d)", id, status);
         return;
     }
     char local[64] = {0}, receipt[33] = {0};
@@ -815,10 +858,12 @@ static void guest_fetch(void)
     s_last_fetch_attempt = GetTickCount64();
     snprintf(path, sizeof path, "/v1/hosts?title=%s&version=%s&max=12", net_title(), net_version());
     if (http_request(base, "GET", path, NULL, buf, sizeof buf, &status) != 0 || status != 200) {
-        log_line("host list fetch failed (status %d), retrying next probe", status);
+        if (!note_refusal(status, buf)) /* a refusal logs once, not every probe */
+            log_line("host list fetch failed (status %d), retrying next probe", status);
         InterlockedExchange(&s_fetch_state, 2); /* last fetch failed */
         return;
     }
+    note_refusal(status, buf);
     log_line("list fetched (%s)", net_title());
     s_seen_n = 0;
     if (fci_json_array(buf, "hosts", on_host_obj) > 0)
@@ -888,9 +933,11 @@ static void host_register(void)
                  FCI_NET_PROTO, net_title(), net_version(), macstr, endpoint, s_identity);
     if (http_request(base, "POST", "/v1/register", body, buf, sizeof buf, &status) != 0 || status != 200) {
         s_reg_fail_ms = GetTickCount64();
-        log_line("register failed (status %d)", status);
+        if (!note_refusal(status, buf))
+            log_line("register failed (status %d)", status);
         return;
     }
+    note_refusal(status, buf);
     s_reg_fail_ms = 0;
     fci_json_str_val(buf, "id", s_host_id, sizeof s_host_id);
     /* connects queued before this listing are stale; a list without seq (older Worker) gives 0 */
@@ -959,10 +1006,18 @@ static void host_poll(void)
         return;
     }
     if (status == 200) {
+        note_refusal(status, buf);
         if (fci_json_array(buf, "connects", on_connect_obj) > 0)
             log_line("connect poll: an entry too long to read, skipped");
+        return;
     }
-    /* 204: no connects, the poll timed out; loop */
+    if (status == 204)
+        return; /* no connects, the poll timed out; loop */
+    /* refused (426, maintenance) or any other answer: back off, or the loop would hammer the list.
+     * When the gate lifts the next poll is 404 and the host registers again. */
+    if (!note_refusal(status, buf))
+        log_line("connect poll: status %d, backing off 30 s", status);
+    Sleep(30000);
 }
 
 /* Leave the host list on any clean exit: without it the listing stays joinable until its 90-second
@@ -1057,7 +1112,7 @@ void fci_net_worker_browse_state(int *fetch_state, int *n_hosts, int *relay_refu
     *fetch_state = (int)s_fetch_state;
     *n_hosts = (int)s_fetch_nhosts;
     *relay_refused = (int)s_relay_refused;
-    *version_refused = (int)s_version_refused;
+    *version_refused = (int)s_list_refused;
 }
 
 void fci_net_worker_start(void)
@@ -1076,7 +1131,7 @@ void fci_net_worker_start(void)
     /* a restart (the menu's other pick, then this one again) begins with no hosts seen or joined */
     s_seen_n = s_known_n = s_conn_n = 0;
     s_last_fetch_attempt = 0;
-    s_fetch_state = s_fetch_nhosts = s_relay_refused = s_version_refused = 0;
+    s_fetch_state = s_fetch_nhosts = s_relay_refused = s_list_refused = 0;
     identity_init();
     s_stop = CreateEventA(NULL, TRUE, FALSE, NULL);
     s_thread = CreateThread(NULL, 0, worker_main, NULL, 0, NULL);

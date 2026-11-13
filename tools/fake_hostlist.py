@@ -128,8 +128,14 @@ def compare_builds(a, b):
     return (int(x[5]) > int(y[5])) - (int(x[5]) < int(y[5]))
 
 
-GATED = {("GET", "/v1/hosts"), ("POST", "/v1/register"), ("GET", "/v1/connects"), ("POST", "/v1/connect"),
-         ("POST", "/v1/turn"), ("POST", "/v1/probe-report")}
+GATED = {
+    ("GET", "/v1/hosts"),
+    ("POST", "/v1/register"),
+    ("GET", "/v1/connects"),
+    ("POST", "/v1/connect"),
+    ("POST", "/v1/turn"),
+    ("POST", "/v1/probe-report"),
+}
 
 
 class RateLimit:

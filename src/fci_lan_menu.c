@@ -18,7 +18,7 @@ int fci_nic_start_menu_transport(int mode); /* 0 = LAN, 1 = LIST; the mode now u
 
 /* fci_nic.c / fci_net_worker.c (the browse status, Q29 round 3) */
 void fci_nic_browse_state(int *in_list, int *n_pending, int *n_dropped);
-void fci_net_worker_browse_state(int *fetch_state, int *n_hosts, int *relay_refused, int *version_refused);
+void fci_net_worker_browse_state(int *fetch_state, int *n_hosts, int *relay_refused, int *list_refused);
 
 #include "fci_browse_status.h" /* the cause logic, unit-tested */
 
@@ -59,11 +59,12 @@ static void browse_relabel(void)
         [BROWSE_HOST_UNREACHABLE] = "HOST UNREACHABLE",
         [BROWSE_RELAY_OFFLINE] = "RELAY OFFLINE",
         [BROWSE_UPDATE_REQUIRED] = "UPDATE REQUIRED",
+        [BROWSE_ONLINE_PAUSED] = "ONLINE PAUSED",
     };
     static uint16_t *text;
     static uint16_t previous[17];
     static ULONGLONG next_scan;
-    int in_list, n_pending, n_dropped, fetch_state, n_hosts, relay_refused, version_refused;
+    int in_list, n_pending, n_dropped, fetch_state, n_hosts, relay_refused, list_refused;
     fci_nic_browse_state(&in_list, &n_pending, &n_dropped);
     if (!in_list && !text)
         return;
@@ -86,8 +87,8 @@ static void browse_relabel(void)
     if (!text)
         return;
 
-    fci_net_worker_browse_state(&fetch_state, &n_hosts, &relay_refused, &version_refused);
-    int status = fci_browse_status(in_list, fetch_state, n_hosts, n_pending, n_dropped, relay_refused, version_refused);
+    fci_net_worker_browse_state(&fetch_state, &n_hosts, &relay_refused, &list_refused);
+    int status = fci_browse_status(in_list, fetch_state, n_hosts, n_pending, n_dropped, relay_refused, list_refused);
     const char *label = texts[status];
     uint16_t replacement[17] = {0};
     for (size_t i = 0; label[i] && i < 16; i++)
@@ -260,11 +261,17 @@ static int browser_badge(uint32_t page, unsigned icon_arg, unsigned label_arg, r
     const char *label = "", *icon = "";
     int fetch_state = -1;
     if (s_browser_mode == 1) {
-        int n_hosts, relay_refused, version_refused;
-        fci_net_worker_browse_state(&fetch_state, &n_hosts, &relay_refused, &version_refused);
+        int n_hosts, relay_refused, list_refused;
+        fci_net_worker_browse_state(&fetch_state, &n_hosts, &relay_refused, &list_refused);
         if (!fci_nic_transport_active())
             fetch_state = 2;
-        if (fetch_state == 0) {
+        if (list_refused == FCI_LIST_REFUSED_UPDATE) { /* the list wants a newer build: say so, not "offline" */
+            label = "UPDATE REQUIRED";
+            icon = "Live_Icon_Offline";
+        } else if (list_refused == FCI_LIST_REFUSED_MAINTENANCE) {
+            label = "SERVER PAUSED";
+            icon = "Live_Icon_Offline";
+        } else if (fetch_state == 0) {
             label = "CHECKING SERVER";
         } else if (fetch_state == 1) {
             label = "SERVER ONLINE";

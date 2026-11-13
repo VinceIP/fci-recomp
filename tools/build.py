@@ -169,6 +169,7 @@ def build(image, xbe, lift_dir, deps, out, jobs=None, tc=None, obj_cache=None):
     case = out / "case"
     patches = stage(image, title, Path(xbe).resolve(), lift_dir, deps, case, tc)
     print(f"building {title.name} {image}: staged ({patches} runtime patches), compiling with {jobs} jobs")
+    os.environ["FCI_BUILD_VERSION"] = build_version()  # tools/compile.py: -DFCI_BUILD_VERSION
     compile_all(case, jobs, out / "build.log", obj_cache)
     (out / "bin").mkdir()
     for name in ("fci-whole.exe", "fci-whole.pdb", "fci-kinit.dll"):
@@ -191,6 +192,15 @@ def build(image, xbe, lift_dir, deps, out, jobs=None, tc=None, obj_cache=None):
     print(f"done in {(time.time() - started) / 60:.0f} min: {out / 'bin' / 'fci-whole.exe'}")
 
 
+def build_version():
+    """the release this tree is (VERSION in fci-recomp.py): compiled into the game, which sends it to the
+    host list (research/docs/online-architecture.md 7a)"""
+    m = re.search(r'^VERSION = "([0-9A-Za-z.+-]{1,40})"$', (REPO / "fci-recomp.py").read_text(encoding="utf-8"), re.M)
+    if not m:
+        raise SystemExit("error: no VERSION in fci-recomp.py")
+    return m[1]
+
+
 def inputs_digest(lift_dir, tc):
     """what a build takes: the lift (its record lists every generated file's digest), the compiler, the
     host code, the runtime patches and the build tools (line endings normalised)"""
@@ -205,6 +215,7 @@ def inputs_digest(lift_dir, tc):
         h.update(p.relative_to(REPO).as_posix().encode() + b"\0" + p.read_bytes().replace(b"\r\n", b"\n"))
     # diagnostic builds (tools/compile.py) differ from a plain one: never reuse one for the other
     h.update(json.dumps({k: os.environ.get(k, "") for k in DIAGNOSTIC_ENV}, sort_keys=True).encode())
+    h.update(b"version\0" + build_version().encode())  # a new version is a new build, even with the same code
     return h.hexdigest()
 
 

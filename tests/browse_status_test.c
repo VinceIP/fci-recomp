@@ -35,6 +35,11 @@ int main(void)
     check("version-over-fetch-fail", fci_browse_status(1, 2, 0, 0, 0, 0, 1), BROWSE_UPDATE_REQUIRED);
     check("version-never-fetched", fci_browse_status(1, 0, 0, 0, 0, 0, 1), BROWSE_UPDATE_REQUIRED);
 
+    /* maintenance: the operator paused online play; above everything but list mode */
+    check("paused", fci_browse_status(1, 1, 3, 0, 0, 0, FCI_LIST_REFUSED_MAINTENANCE), BROWSE_ONLINE_PAUSED);
+    check("paused-over-fetch-fail", fci_browse_status(1, 2, 0, 0, 0, 0, FCI_LIST_REFUSED_MAINTENANCE), BROWSE_ONLINE_PAUSED);
+    check("paused-not-in-list", fci_browse_status(0, 1, 0, 0, 0, 0, FCI_LIST_REFUSED_MAINTENANCE), BROWSE_NONE);
+
     /* fetch failed: LIST OFFLINE */
     check("offline", fci_browse_status(1, 2, 0, 0, 0, 0, 0), BROWSE_LIST_OFFLINE);
     check("offline-pending", fci_browse_status(1, 2, 3, 2, 0, 0, 0), BROWSE_LIST_OFFLINE);

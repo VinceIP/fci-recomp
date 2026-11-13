@@ -1049,8 +1049,20 @@ def test_ack_keeps_connects_until_acknowledged():
 
 
 def test_compare_builds_matches_lobby_js_order():
-    order = ["", "garbage", "1.0", "0.2.4", "0.3.0-alpha.3", "0.3.0-beta.1", "0.3.0-beta.2", "0.3.0-beta.10",
-             "0.3.0-rc.1", "0.3.0", "0.3.1-beta.1", "0.10.0"]
+    order = [
+        "",
+        "garbage",
+        "1.0",
+        "0.2.4",
+        "0.3.0-alpha.3",
+        "0.3.0-beta.1",
+        "0.3.0-beta.2",
+        "0.3.0-beta.10",
+        "0.3.0-rc.1",
+        "0.3.0",
+        "0.3.1-beta.1",
+        "0.10.0",
+    ]
     for i, a in enumerate(order):
         for j, b in enumerate(order):
             want = 0 if i < 3 and j < 3 else (i > j) - (i < j)

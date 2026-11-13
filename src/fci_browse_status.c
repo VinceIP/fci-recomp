@@ -8,7 +8,7 @@
  *
  * Precedence (highest first):
  *   1. not in list mode -> BROWSE_NONE
- *   2. version_refused -> BROWSE_UPDATE_REQUIRED
+ *   2. list_refused -> BROWSE_ONLINE_PAUSED (maintenance) or BROWSE_UPDATE_REQUIRED
  *   3. fetch failed -> BROWSE_LIST_OFFLINE
  *   4. never fetched -> BROWSE_SEARCHING
  *   5. relay_refused -> BROWSE_RELAY_OFFLINE
@@ -21,11 +21,13 @@
 
 int fci_browse_status(int in_list, int fetch_state, int n_hosts,
                       int n_pending, int n_dropped, int relay_refused,
-                      int version_refused)
+                      int list_refused)
 {
     if (!in_list)
         return BROWSE_NONE;
-    if (version_refused)
+    if (list_refused == FCI_LIST_REFUSED_MAINTENANCE)
+        return BROWSE_ONLINE_PAUSED;
+    if (list_refused)
         return BROWSE_UPDATE_REQUIRED;
     if (fetch_state == 2)
         return BROWSE_LIST_OFFLINE;

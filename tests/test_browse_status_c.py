@@ -25,6 +25,9 @@ VECTORS = [
     "version-over-relay",
     "version-over-fetch-fail",
     "version-never-fetched",
+    "paused",
+    "paused-over-fetch-fail",
+    "paused-not-in-list",
     "offline",
     "offline-pending",
     "offline-dropped",
@@ -64,4 +67,4 @@ def test_browse_status_c(tmp_path: Path) -> None:
         assert line is not None, f"no result line for the {name} vector:\n" + run.stdout
         assert line.startswith("ok"), line
 
-    assert "27 checks, 0 failed" in run.stdout
+    assert "30 checks, 0 failed" in run.stdout
