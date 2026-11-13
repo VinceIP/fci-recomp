@@ -371,6 +371,9 @@ def run_direct(sc, folder):
 
 # ---- the relaunch scenario: no arguments, fci.ini beside the executables, window checks ----
 user32 = ctypes.windll.user32
+# The game is per-monitor DPI aware; measured from an unaware process its client size is scaled down
+# and a grab copies only that corner. PER_MONITOR_AWARE_V2 is -4; a no-op where unsupported.
+user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
 WNDENUM = ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
 
 
