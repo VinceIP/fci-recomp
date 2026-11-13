@@ -111,6 +111,8 @@ int read_action_hash(uint32_t *out_hash)
  *
  * Returns 1 to skip the body (action handled), 0 to run the body.
  * --------------------------------------------------------------------------- */
+__attribute__((weak)) void sub_0014EFF0_fci_body(void);
+
 int fci_gate_0014EFF0(void)
 {
     uint32_t hash;
@@ -127,11 +129,12 @@ int fci_gate_0014EFF0(void)
     menu_log_line("main", "action", extra);
 
     extern void fci_multiplayer_menu_action(uint32_t hash);
+    extern int fci_multiplayer_dispatch(uint32_t hash, recomp_func_t body);
     fci_multiplayer_menu_action(hash);
 
     fci_menu_quit_action(hash); /* the body ignores B_Quit */
 
-    return 0; /* let the body handle it */
+    return fci_multiplayer_dispatch(hash, sub_0014EFF0_fci_body); /* 0: the body handles it */
 }
 
 /* ---------------------------------------------------------------------------

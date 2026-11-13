@@ -1081,6 +1081,10 @@ void fci_net_worker_start(void)
         strcpy(s_report_build, build);
 #endif
     s_report_head = s_report_count = 0;
+    /* a restart (the menu's other pick, then this one again) begins with no hosts seen or joined */
+    s_seen_n = s_known_n = s_conn_n = 0;
+    s_last_fetch_attempt = 0;
+    s_fetch_state = s_fetch_nhosts = s_relay_refused = s_version_refused = 0;
     identity_init();
     s_stop = CreateEventA(NULL, TRUE, FALSE, NULL);
     s_thread = CreateThread(NULL, 0, worker_main, NULL, 0, NULL);
@@ -1147,3 +1151,6 @@ void fci_prehook_0051CDD4(void)
 /* 1 once this process hosted or joined a System Link match (single-player registers no key). Leaving a
  * match relaunches the game, which clears it. */
 int fci_net_in_session(void) { return s_session_key != 0; }
+
+/* 1 once this process created a host key or registered a match key: its transport stays. */
+int fci_net_hosted_or_joined(void) { return s_host_started || s_session_key; }

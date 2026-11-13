@@ -24,4 +24,7 @@ void fci_prehook_0051CDD4(void);
 /* 1 once this process hosted or joined a System Link match (a key was registered) */
 int fci_net_in_session(void);
 
+/* 1 once this process created a host key or registered a match key */
+int fci_net_hosted_or_joined(void);
+
 #endif

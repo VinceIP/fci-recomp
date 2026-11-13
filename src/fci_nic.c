@@ -362,24 +362,70 @@ int fci_nic_start_list_lazy(const char *url)
 /* The menu path's transport entry (the gate, fci_lan_menu.c): mode 0 = LAN (SYSTEM LINK),
  * mode 1 = LIST (INTERNET). Idempotent: a second pick logs and leaves the first transport
  * (\"first choice wins until restart\"). 1 when a transport is up after this call. */
+static void transport_stop(void);
+
+/* The menu pick (0 = LAN, 1 = INTERNET): returns the mode now up, or -1 with no transport. The other
+ * pick replaces a transport only while this process has not hosted or joined (its listing and peers). */
 int fci_nic_start_menu_transport(int mode)
 {
     const char *item = mode == 0 ? "LAN" : "INTERNET";
     if (s_sock != INVALID_SOCKET) {
-        if (mode == 1 && s_list) {
-            InterlockedExchange(&s_probe, FCI_LIST_PROBE_ENTRY);
-            return 1;
+        const int current = s_list ? 1 : s_lan ? 0 : -1;
+        if (current == mode) {
+            if (mode == 1)
+                InterlockedExchange(&s_probe, FCI_LIST_PROBE_ENTRY);
+            return mode;
         }
-        fprintf(stderr, "[FCI] network: transport already up; ignoring %s\n", item);
+        if (current < 0 || fci_net_hosted_or_joined()) {
+            fprintf(stderr, "[FCI] network: transport already up; ignoring %s\n", item);
+            fflush(stderr);
+            return current;
+        }
+        fprintf(stderr, "[FCI] network: switching from %s to %s\n", current ? "INTERNET" : "LAN", item);
         fflush(stderr);
-        return 1;
+        transport_stop();
     }
     if (mode == 0)
-        return fci_nic_start_lan() ? 1 : 0;
+        return fci_nic_start_lan() ? 0 : -1;
     if (!fci_nic_start_list_lazy(s_menu_list_url))
-        return 0;
+        return -1;
     InterlockedExchange(&s_probe, FCI_LIST_PROBE_ENTRY);
     return 1;
+}
+
+/* Back to menu mode's link with no transport: the worker leaves the list first (it takes s_lock),
+ * then the sockets close and the old transport's peers and queued frames go. */
+static void transport_stop(void)
+{
+    int i;
+    fci_net_worker_stop();
+    AcquireSRWLockExclusive(&s_lock);
+    traffic_summary(0, 1);
+    if (s_sock != INVALID_SOCKET) {
+        closesocket(s_sock);
+        s_sock = INVALID_SOCKET;
+    }
+    for (i = 0; i < RELAY_MAX; i++)
+        relay_socket_close(i);
+    if (s_list)
+        fci_turn_stop();
+    s_lan = 0;
+    s_lan_nbc = s_lan_nbcports = 0;
+    s_lan_bc_logged = 0;
+    s_lan_knock_next = s_dir_knock_next = 0;
+    s_list = 0;
+    s_nlpeers = s_lpending = 0;
+    InterlockedExchange(&s_lpeer_dropped, 0);
+    s_stun_known = s_stun_srv_valid = 0;
+    s_stun_next = 0;
+    s_relay_hub_valid = 0;
+    InterlockedExchange(&s_turn_need, 0);
+    InterlockedExchange(&s_turn_ready, 0);
+    InterlockedExchange(&s_probe, 0);
+    memset(s_peers, 0, sizeof s_peers);
+    s_npeers = 0;
+    s_rxq_head = s_rxq_count = 0;
+    ReleaseSRWLockExclusive(&s_lock);
 }
 
 /* Down before a relaunch (fci_manual.c): the next instance re-reads RECOMP_FCI_NET_PEERS and would find

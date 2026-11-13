@@ -8,12 +8,13 @@
 
 /* fci_menu.c helpers (made non-static for sharing) */
 int read_action_hash(uint32_t *out_hash);
+int guest_ok(uint32_t va, uint32_t len);
 void menu_log_line(const char *handler, const char *ev, const char *extra);
 
 /* fci_nic.c (menu mode + the transport entry) */
 int fci_nic_menu_mode(void);
 int fci_nic_transport_active(void);
-int fci_nic_start_menu_transport(int mode); /* 0 = LAN, 1 = LIST */
+int fci_nic_start_menu_transport(int mode); /* 0 = LAN, 1 = LIST; the mode now up, or -1 */
 
 /* fci_nic.c / fci_net_worker.c (the browse status, Q29 round 3) */
 void fci_nic_browse_state(int *in_list, int *n_pending, int *n_dropped);
@@ -105,20 +106,35 @@ static int s_browser_mode = -1;
 
 void fci_multiplayer_menu_action(uint32_t hash)
 {
+    int mode;
     if (!fci_nic_menu_mode())
         return;
-    if (!fci_nic_transport_active() && (hash == 0xf65128aau || hash == 0x9b680e53u))
-        s_browser_mode = hash == 0x9b680e53u;
     if (hash == 0xf65128aau) {
-        fci_nic_start_menu_transport(0);
+        mode = fci_nic_start_menu_transport(0);
+        s_browser_mode = mode < 0 ? 0 : mode;
         menu_log_line("multiplayer", "pick", ", \"item\": \"LAN\"");
     } else if (hash == 0x9b680e53u) {
-        fci_nic_start_menu_transport(1);
+        mode = fci_nic_start_menu_transport(1);
+        s_browser_mode = mode < 0 ? 1 : mode;
         menu_log_line("multiplayer", "pick", ", \"item\": \"INTERNET\"");
-        /* Both dispatchers read the hash again when selecting the System Link branch. */
-        MEM32(MEM32(g_esp + 4) + 4) = 0xf65128aau;
     }
 }
+
+/* INTERNET runs the game's System Link branch. The event is the menu item itself (its action picks
+ * the description too), so it carries System Link's action only for this call. 1 when body ran. */
+int fci_multiplayer_dispatch(uint32_t hash, recomp_func_t body)
+{
+    const uint32_t ev = MEM32(g_esp + 4);
+    if (hash != 0x9b680e53u || !fci_nic_menu_mode() || !body || !guest_ok(ev, 8))
+        return 0;
+    MEM32(ev + 4) = 0xf65128aau;
+    body();
+    if (guest_ok(ev, 8) && MEM32(ev + 4) == 0xf65128aau)
+        MEM32(ev + 4) = hash;
+    return 1;
+}
+
+__attribute__((weak)) void sub_000FB0A2_fci_body(void);
 
 int fci_gate_000FB0A2(void)
 {
@@ -128,9 +144,10 @@ int fci_gate_000FB0A2(void)
         return 0;
     if (fci_menu_quit_action(hash))
         return 0; /* the body ignores B_Quit */
-    if (fci_nic_menu_mode())
-        fci_multiplayer_menu_action(hash);
-    return 0;
+    if (!fci_nic_menu_mode())
+        return 0;
+    fci_multiplayer_menu_action(hash);
+    return fci_multiplayer_dispatch(hash, sub_000FB0A2_fci_body);
 }
 
 /* Refresh the empty browser row on the game thread. */
