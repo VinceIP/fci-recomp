@@ -11,13 +11,13 @@ legitimate ones. The test fails if the check is reverted or a rule changes.
 """
 
 from pathlib import Path
-import shutil
-import subprocess
 
 import pytest
 
-REPO = Path(__file__).resolve().parents[1]
-CC = shutil.which("cc") or shutil.which("gcc")
+import cc_helper
+
+REPO = cc_helper.REPO
+CC = cc_helper.find_cc()
 
 VECTORS = [
     "dhcp-342",
@@ -46,26 +46,11 @@ VECTORS = [
 ]
 
 
-@pytest.mark.skipif(not CC, reason="no host C compiler (cc/gcc) on this machine")
+@pytest.mark.skipif(not CC, reason="no C compiler (cc, gcc or the bundled clang) on this machine")
 def test_frame_sanity(tmp_path: Path) -> None:
     exe = tmp_path / "frame_sanity_test"
-    cc = [
-        CC,
-        "-std=gnu11",
-        "-O2",
-        "-Wall",
-        "-Werror",
-        "-I",
-        str(REPO / "src"),
-        str(REPO / "src" / "fci_frame.c"),
-        str(REPO / "tests" / "frame_sanity_test.c"),
-        "-o",
-        str(exe),
-    ]
-    build = subprocess.run(cc, capture_output=True, text=True)
+    build, run = cc_helper.build_run([REPO / "src" / "fci_frame.c", REPO / "tests" / "frame_sanity_test.c"], exe, cc=CC)
     assert build.returncode == 0, "the frame sanity check failed to compile:\n" + build.stderr
-
-    run = subprocess.run([str(exe)], capture_output=True, text=True, timeout=30)
     assert run.returncode == 0, "the frame sanity check failed its vectors:\n" + run.stdout + run.stderr
 
     # every vector ran and was judged (a vector missing from the output is a silently skipped check)

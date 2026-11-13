@@ -9,15 +9,13 @@ changes or a branch is removed.
 """
 
 from pathlib import Path
-import shutil
-import subprocess
 
 import pytest
 
-REPO = Path(__file__).resolve().parents[1]
-# the host compiler, or the bundled clang of a Windows checkout (so the test runs there too)
-_BUNDLED = sorted(REPO.glob("toolchain/*/bin/clang.exe"))
-CC = shutil.which("cc") or shutil.which("gcc") or (str(_BUNDLED[0]) if _BUNDLED else None)
+import cc_helper
+
+REPO = cc_helper.REPO
+CC = cc_helper.find_cc()
 
 VECTORS = [
     "none-not-in-list",
@@ -53,23 +51,10 @@ VECTORS = [
 @pytest.mark.skipif(not CC, reason="no C compiler (cc, gcc or the bundled clang) on this machine")
 def test_browse_status_c(tmp_path: Path) -> None:
     exe = tmp_path / "browse_status_test.exe"
-    cc = [
-        CC,
-        "-std=gnu11",
-        "-O2",
-        "-Wall",
-        "-Werror",
-        "-I",
-        str(REPO / "src"),
-        str(REPO / "src" / "fci_browse_status.c"),
-        str(REPO / "tests" / "browse_status_test.c"),
-        "-o",
-        str(exe),
-    ]
-    build = subprocess.run(cc, capture_output=True, text=True)
+    build, run = cc_helper.build_run(
+        [REPO / "src" / "fci_browse_status.c", REPO / "tests" / "browse_status_test.c"], exe, cc=CC
+    )
     assert build.returncode == 0, "the browse status check failed to compile:\n" + build.stderr
-
-    run = subprocess.run([str(exe)], capture_output=True, text=True, timeout=30)
     assert run.returncode == 0, "the browse status check failed its vectors:\n" + run.stdout + run.stderr
 
     # every vector ran and was judged (a vector missing from the output is a silently skipped check)

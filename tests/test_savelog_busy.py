@@ -8,15 +8,12 @@ is absent; fails when the decision behaves differently from the exit wait's
 promise (quiet: no UDATA file open for writing and no line within the window).
 """
 
-from pathlib import Path
-import shutil
-import subprocess
-
 import pytest
 
+import cc_helper
 import patches
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = cc_helper.REPO
 DIFF = REPO / "patches" / "runtime" / "0026-save-log.patch"
 DIFF_BUSY = REPO / "patches" / "runtime" / "0027-exit-wait.patch"
 
@@ -50,9 +47,9 @@ int main(void)
 def busy_output(tmp_path_factory):
     if not DIFF.exists() or not DIFF_BUSY.exists():
         pytest.skip(f"no save log diffs at {DIFF} / {DIFF_BUSY}")
-    cc = shutil.which("cc") or shutil.which("gcc")
+    cc = cc_helper.find_cc()
     if not cc:
-        pytest.skip("no host C compiler")
+        pytest.skip("no C compiler (cc, gcc or the bundled clang)")
     src = tmp_path_factory.mktemp("savelog_busy")
     files = {}
     for path, hunks in patches.parse(DIFF.read_bytes()):
@@ -69,8 +66,13 @@ def busy_output(tmp_path_factory):
     (src / "savelog.h").write_bytes(files["src/kernel/savelog.h"])
     (src / "harness.c").write_text(HARNESS)
     exe = src / "harness"
-    subprocess.run([cc, "-o", str(exe), str(src / "harness.c"), str(src / "savelog.c"), "-I", str(src)], check=True)
-    return subprocess.run([str(exe)], capture_output=True, text=True, check=True).stdout
+    # savelog.c is extracted from the patches: compile it (no -Werror, the toolkit file is not ours to lint)
+    build, run = cc_helper.build_run(
+        [src / "harness.c", src / "savelog.c"], exe, cc=cc, includes=[src], flags=["-std=gnu11", "-O2"]
+    )
+    assert build.returncode == 0, "the save log busy check failed to compile:\n" + build.stderr
+    assert run.returncode == 0, "the save log busy check failed:\n" + run.stdout + run.stderr
+    return run.stdout
 
 
 def _n(out, tag):

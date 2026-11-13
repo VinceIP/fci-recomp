@@ -9,14 +9,13 @@ reply, so a lookup for a missing field ("relay") could read the next object's. T
 """
 
 from pathlib import Path
-import shutil
-import subprocess
 
 import pytest
 
-REPO = Path(__file__).resolve().parents[1]
-_BUNDLED = sorted(REPO.glob("toolchain/*/bin/clang.exe"))
-CC = shutil.which("cc") or shutil.which("gcc") or (str(_BUNDLED[0]) if _BUNDLED else None)
+import cc_helper
+
+REPO = cc_helper.REPO
+CC = cc_helper.find_cc()
 
 CHECKS = ["three-hosts", "spaced-two-hosts", "connects-bounded", "empty", "no-array", "too-long-skipped", "cut-off"]
 
@@ -24,12 +23,8 @@ CHECKS = ["three-hosts", "spaced-two-hosts", "connects-bounded", "empty", "no-ar
 @pytest.mark.skipif(not CC, reason="no C compiler (cc, gcc or the bundled clang) on this machine")
 def test_json_c(tmp_path: Path) -> None:
     exe = tmp_path / "json_test.exe"
-    cc = [CC, "-std=gnu11", "-O2", "-Wall", "-Werror", "-I", str(REPO / "src")]
-    cc += [str(REPO / "src" / "fci_json.c"), str(REPO / "tests" / "json_test.c"), "-o", str(exe)]
-    build = subprocess.run(cc, capture_output=True, text=True)
+    build, run = cc_helper.build_run([REPO / "src" / "fci_json.c", REPO / "tests" / "json_test.c"], exe, cc=CC)
     assert build.returncode == 0, "the JSON check failed to compile:\n" + build.stderr
-
-    run = subprocess.run([str(exe)], capture_output=True, text=True, timeout=30)
     assert run.returncode == 0, "the JSON check failed:\n" + run.stdout + run.stderr
     for name in CHECKS:
         line = next((ln for ln in run.stdout.splitlines() if ln.endswith(f" {name}:")), None)

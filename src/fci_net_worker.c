@@ -20,6 +20,7 @@
 #include "fci_net.h"
 #include "fci_net_worker.h"
 #include "fci_json.h"
+#include "fci_connect.h"
 #include "fci_turn.h"
 #include "recomp_types.h"
 
@@ -210,79 +211,6 @@ static void log_line(const char *fmt, ...)
     va_end(ap);
     fputc('\n', stderr);
     fflush(stderr);
-}
-
-/* --- minimal JSON field extraction --- */
-
-/* find "key" in buf, return a pointer to the value (after the colon and any whitespace) */
-static const char *json_str(const char *buf, const char *key)
-{
-    char pat[64];
-    const char *p;
-    snprintf(pat, sizeof pat, "\"%s\"", key);
-    p = strstr(buf, pat);
-    if (!p)
-        return NULL;
-    p += strlen(pat);
-    while (*p == ' ' || *p == '\t')
-        p++;
-    if (*p != ':')
-        return NULL;
-    p++;
-    while (*p == ' ' || *p == '\t')
-        p++;
-    if (*p != '"')
-        return NULL;
-    return p + 1;
-}
-
-/* extract a string value: copies up to buflen-1 chars until the closing quote */
-static int json_str_val(const char *buf, const char *key, char *out, int buflen)
-{
-    const char *p = json_str(buf, key);
-    if (!p)
-        return 0;
-    {
-        int n = 0;
-        while (*p && *p != '"' && n < buflen - 1)
-            out[n++] = *p++;
-        out[n] = 0;
-        return n > 0;
-    }
-}
-
-/* extract a boolean value: 1 for true, 0 for false, -1 when absent */
-static int json_bool(const char *buf, const char *key)
-{
-    char pat[64];
-    const char *p;
-    snprintf(pat, sizeof pat, "\"%s\":", key);
-    p = strstr(buf, pat);
-    if (!p)
-        return -1;
-    p += strlen(pat);
-    while (*p == ' ' || *p == '\t')
-        p++;
-    if (strncmp(p, "true", 4) == 0)
-        return 1;
-    if (strncmp(p, "false", 5) == 0)
-        return 0;
-    return -1;
-}
-
-/* extract a non-negative integer value; 0 when absent */
-static unsigned long long json_u64(const char *buf, const char *key)
-{
-    char pat[64];
-    const char *p;
-    snprintf(pat, sizeof pat, "\"%s\":", key);
-    p = strstr(buf, pat);
-    if (!p)
-        return 0;
-    p += strlen(pat);
-    while (*p == ' ' || *p == '\t')
-        p++;
-    return strtoull(p, NULL, 10);
 }
 
 /* --- WinHTTP helpers --- */
@@ -621,7 +549,7 @@ static void on_host_obj(const char *obj, int len)
     SRWLOCK *lock;
 
     (void)len;
-    if (!json_str_val(obj, "id", id, sizeof id))
+    if (!fci_json_str_val(obj, "id", id, sizeof id))
         return;
     if (strcmp(id, s_own_id) == 0)
         return; /* we are that host (the listing is ids only: no MAC to compare) */
@@ -671,14 +599,14 @@ static void on_host_obj(const char *obj, int len)
         return;
     }
     char local[64] = {0}, receipt[33] = {0};
-    if (s_report_build[0] && json_str_val(resp, "reportReceipt", receipt, sizeof receipt) &&
+    if (s_report_build[0] && fci_json_str_val(resp, "reportReceipt", receipt, sizeof receipt) &&
         (strlen(receipt) != 32 || strspn(receipt, "0123456789abcdef") != 32))
         receipt[0] = 0;
-    int ready = json_str_val(resp, "endpoint", endpoint, sizeof endpoint) &&
-                json_str_val(resp, "mac", macstr, sizeof macstr) &&
+    int ready = fci_json_str_val(resp, "endpoint", endpoint, sizeof endpoint) &&
+                fci_json_str_val(resp, "mac", macstr, sizeof macstr) &&
                 sscanf(macstr, "%2hhx:%2hhx:%2hhx:%2hhx:%2hhx:%2hhx", &mac[0], &mac[1], &mac[2],
                        &mac[3], &mac[4], &mac[5]) == 6;
-    json_str_val(resp, "local", local, sizeof local);
+    fci_json_str_val(resp, "local", local, sizeof local);
     AcquireSRWLockExclusive(lock);
     if (!ready || !fci_nic_list_add_peer(endpoint, local[0] ? local : NULL, mac, nonce, 1, receipt, report_started))
         fci_net_report_probe(receipt, "unknown", "peer_setup", report_started);
@@ -758,8 +686,8 @@ static void turn_mint(void)
         ReleaseSRWLockExclusive(lock);
         return;
     }
-    if (!json_str_val(resp, "username", user, sizeof user)
-        || !json_str_val(resp, "credential", pass, sizeof pass)) {
+    if (!fci_json_str_val(resp, "username", user, sizeof user)
+        || !fci_json_str_val(resp, "credential", pass, sizeof pass)) {
         log_line("turn mint: a malformed reply");
         AcquireSRWLockExclusive(lock);
         fci_nic_list_turn_fail();
@@ -768,7 +696,7 @@ static void turn_mint(void)
     }
     /* urls[0]: "turn:<host>:<port>?transport=udp" -> "<host>:<port>" */
     {
-        /* urls is an array of strings, so json_str (string values only) can't find it */
+        /* urls is an array of strings, so fci_json_str (string values only) can't find it */
         const char *u = strstr(resp, "\"urls\""), *url = NULL, *q;
         int len = 0;
         if (u) {
@@ -954,64 +882,47 @@ static void host_register(void)
         return;
     }
     s_reg_fail_ms = 0;
-    json_str_val(buf, "id", s_host_id, sizeof s_host_id);
+    fci_json_str_val(buf, "id", s_host_id, sizeof s_host_id);
     /* connects queued before this listing are stale; a list without seq (older Worker) gives 0 */
-    s_conn_seq = json_u64(buf, "seq");
+    s_conn_seq = fci_json_u64(buf, "seq");
     s_registered = 1;
     log_line("registered as host %s (endpoint %s)", s_host_id, endpoint);
 }
 
 static void on_connect_obj(const char *obj, int len)
 {
-    char endpoint[128], nonce_hex[64], macstr[32], local[64];
-    uint8_t mac[6], nonce[16];
-    int n, relay;
-    unsigned long long seq = json_u64(obj, "seq");
+    fci_connect_t c;
+    unsigned long long seq = fci_json_u64(obj, "seq");
     (void)len;
     /* the list repeats a connect until a poll acknowledges it: handle each one once */
     if (seq && seq <= s_conn_seq)
         return;
     if (seq) /* counted even if malformed below, or the list would answer every poll with it */
         s_conn_seq = seq;
-    if (!json_str_val(obj, "endpoint", endpoint, sizeof endpoint))
+    if (!fci_connect_parse(obj, &c))
         return;
-    if (!json_str_val(obj, "nonce", nonce_hex, sizeof nonce_hex))
-        return;
-    if (!json_str_val(obj, "mac", macstr, sizeof macstr))
-        return;
-
-    if (sscanf(macstr, "%2hhx:%2hhx:%2hhx:%2hhx:%2hhx:%2hhx", &mac[0], &mac[1], &mac[2], &mac[3], &mac[4],
-               &mac[5])
-        != 6)
-        return;
-    if (strlen(nonce_hex) != 32)
-        return;
-    for (n = 0; n < 16; n++)
-        if (sscanf(nonce_hex + n * 2, "%2hhx", &nonce[n]) != 1)
-            return;
-
-    relay = json_bool(obj, "relay");
-    if (relay < 0)
-        relay = 0;
-
-    /* the guest's LAN address (when the Worker forwarded one: both sides are behind the same NAT) */
-    json_str_val(obj, "local", local, sizeof local);
-
     {
         SRWLOCK *lock = fci_nic_lock();
         AcquireSRWLockExclusive(lock);
-        if (relay) {
+        if (c.relay) {
             /* the guest's relayed connect: its peer is live at the relayed address (TURN) */
-            fci_nic_list_turn_peer(nonce, mac, endpoint);
+            fci_nic_list_turn_peer(c.nonce, c.mac, c.endpoint);
         } else {
-            fci_nic_list_add_peer(endpoint, local[0] ? local : NULL, mac, nonce, 0, NULL, 0); /* a guest joined us */
+            fci_nic_list_add_peer(c.endpoint, c.local[0] ? c.local : NULL, c.mac, c.nonce, 0, NULL,
+                                  0); /* a guest joined us */
         }
         ReleaseSRWLockExclusive(lock);
     }
-    if (relay)
-        log_line("connect received from %s (relay, nonce %.8s)", endpoint, nonce_hex);
-    else
-        log_line("connect received from %s", endpoint);
+    if (c.relay) {
+        /* the log shows the nonce's first 8 hex chars (4 bytes), re-hexed from the parsed bytes */
+        char nh[9];
+        for (int i = 0; i < 4; i++)
+            snprintf(nh + i * 2, 3, "%02x", c.nonce[i]);
+        nh[8] = 0;
+        log_line("connect received from %s (relay, nonce %.8s)", c.endpoint, nh);
+    } else {
+        log_line("connect received from %s", c.endpoint);
+    }
 }
 
 static void host_poll(void)

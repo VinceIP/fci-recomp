@@ -12,12 +12,12 @@ field at the wrong offset, a length off by one), the test fails.
 from __future__ import annotations
 
 from pathlib import Path
-import shutil
 import socket
 import subprocess
 
 import pytest
 
+import cc_helper
 from net_fuzz import (
     ADMIT_RE,
     ETHER_MAX,
@@ -48,8 +48,8 @@ REASON_ORDER = [
 # recorded instance is from build/qwen-in/q24/host-fuzz-stderr.log
 ADMIT_LINE = "[FCI] network: LAN admit 02:46:43:FA:11:22 <- 192.168.1.144:59503"
 
-REPO = Path(__file__).resolve().parents[1]
-CC = shutil.which("cc") or shutil.which("gcc")
+REPO = cc_helper.REPO
+CC = cc_helper.find_cc()
 
 # the reason codes, as src/fci_frame.h numbers them (kept in sync by this test)
 OK = 0  # FCI_FRAME_OK
@@ -69,20 +69,7 @@ PAD = 10
 def judge(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """Compile the C check (shipping source) with its stdin-mode driver; return the binary."""
     exe = tmp_path_factory.mktemp("fuzzjudge") / "frame_sanity_test"
-    cc = [
-        CC,
-        "-std=gnu11",
-        "-O2",
-        "-Wall",
-        "-Werror",
-        "-I",
-        str(REPO / "src"),
-        str(REPO / "src" / "fci_frame.c"),
-        str(REPO / "tests" / "frame_sanity_test.c"),
-        "-o",
-        str(exe),
-    ]
-    build = subprocess.run(cc, capture_output=True, text=True)
+    build, _ = cc_helper.build_run([REPO / "src" / "fci_frame.c", REPO / "tests" / "frame_sanity_test.c"], exe, cc=CC)
     assert build.returncode == 0, "the frame sanity check failed to compile:\n" + build.stderr
     return exe
 
@@ -103,7 +90,7 @@ def run_vectors(judge: Path, vectors: list[tuple[str, bytes, int]]) -> list[str]
     return lines
 
 
-@pytest.mark.skipif(not CC, reason="no host C compiler (cc/gcc) on this machine")
+@pytest.mark.skipif(not CC, reason="no C compiler (cc, gcc or the bundled clang) on this machine")
 def test_knock_shape(judge: Path) -> None:
     """The LAN knock: 17 bytes, magic + 'H' + the fuzzer's MAC + a 6-byte triple."""
     k = knock(b"\x01\x00\x00\x00\x00\x02")
@@ -113,7 +100,7 @@ def test_knock_shape(judge: Path) -> None:
     assert k[11:17] == b"\x01\x00\x00\x00\x00\x02"
 
 
-@pytest.mark.skipif(not CC, reason="no host C compiler (cc/gcc) on this machine")
+@pytest.mark.skipif(not CC, reason="no C compiler (cc, gcc or the bundled clang) on this machine")
 def test_valid_frame_is_accepted(judge: Path) -> None:
     """The fuzzer's 66-byte game frame is exactly the recorded shape: the C check accepts it."""
     f = valid_frame(socket.inet_aton("192.168.1.99"), socket.inet_aton("192.168.1.50"))
@@ -122,7 +109,7 @@ def test_valid_frame_is_accepted(judge: Path) -> None:
     assert lines[0] == "fuzz-valid-66 0 ok", lines
 
 
-@pytest.mark.skipif(not CC, reason="no host C compiler (cc/gcc) on this machine")
+@pytest.mark.skipif(not CC, reason="no C compiler (cc, gcc or the bundled clang) on this machine")
 def test_gate_vectors_classify_as_expected(judge: Path) -> None:
     """Every hostile gate vector classifies as the fuzzer's phase_gate expects (its reason list)."""
     src = socket.inet_aton("192.168.1.99")
@@ -149,7 +136,7 @@ def test_gate_vectors_classify_as_expected(judge: Path) -> None:
         assert got_code == want, f"{name}: want reason {want}, got {line}"
 
 
-@pytest.mark.skipif(not CC, reason="no host C compiler (cc/gcc) on this machine")
+@pytest.mark.skipif(not CC, reason="no C compiler (cc, gcc or the bundled clang) on this machine")
 def test_envelope_vectors_classify_as_expected(judge: Path) -> None:
     """The envelope's frame-size vectors: the C check's SHORT and LONG agree with the card's
     envelope bounds (n < 5+14 and n > 5+ETHER_MAX in src/fci_nic.c)."""
@@ -163,7 +150,7 @@ def test_envelope_vectors_classify_as_expected(judge: Path) -> None:
         assert int(line.split()[1]) == want, f"{name}: want {want}, got {line}"
 
 
-@pytest.mark.skipif(not CC, reason="no host C compiler (cc/gcc) on this machine")
+@pytest.mark.skipif(not CC, reason="no C compiler (cc, gcc or the bundled clang) on this machine")
 def test_valid_sizes_are_accepted(judge: Path) -> None:
     """The recorded traffic sizes (66, 342, 443) all pass: the fuzzer's rules never drop the
     game's own frames (the net_check run is the live proof; this is the static half)."""
