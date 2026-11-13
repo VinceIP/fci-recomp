@@ -15,7 +15,8 @@ as long as the game does and no longer.
   capture               the next presented frame, under capture/
   dump:<name>           guest RAM now, memdump-<name>.bin
 
-  python -B tools/game_driver.py <name> [--editor] [--save <fixture>] [--save-dir <folder>] [--opt RECOMP_X=v ...] <step> ...
+  python -B tools/game_driver.py <name> [--editor] [--save <fixture>] [--save-dir <folder>]
+      [--opt RECOMP_X=v ...] <step> ...
 
 --save-dir uses an existing save folder as it is (no copy): two runs given the same folder are two
 instances on one PC's save folder.
