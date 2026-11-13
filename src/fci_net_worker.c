@@ -392,6 +392,7 @@ static void gen_nonce(uint8_t nonce[16])
 static int identity_file_ours(const char *path)
 {
     static HANDLE lock;
+    SECURITY_ATTRIBUTES sa = {sizeof sa, NULL, TRUE}; /* inherited by a relaunch: the chain is one instance */
     char name[64];
     unsigned h = 2166136261u; /* FNV-1a of the path: a mutex name has no backslashes */
     const char *c;
@@ -400,7 +401,7 @@ static int identity_file_ours(const char *path)
     for (c = path; *c; c++)
         h = (h ^ (unsigned char)*c) * 16777619u;
     snprintf(name, sizeof name, "Local\\fci-recomp-token-%08x", h);
-    lock = CreateMutexA(NULL, FALSE, name);
+    lock = CreateMutexA(&sa, FALSE, name);
     if (lock && GetLastError() == ERROR_ALREADY_EXISTS) {
         CloseHandle(lock);
         lock = NULL;
@@ -411,16 +412,23 @@ static int identity_file_ours(const char *path)
 
 /* Load the identity token from the data folder; a missing, unreadable, or wrong-sized file gets a
  * fresh 32-byte token written back (never a failure), and the id is derived from the token. Once per
- * process: a menu restart of the worker keeps it (a second instance's token exists nowhere else). */
+ * process: a menu restart of the worker keeps it, and a relaunch passes it on (a second instance's token
+ * exists nowhere else). */
 static void identity_init(void)
 {
     uint8_t raw[32], hash[32];
     char path[MAX_PATH];
     FILE *f = NULL;
     int i, ours;
+    const char *passed = getenv("RECOMP_FCI_TOKEN");
 
     if (s_identity[0])
         return;
+    /* a relaunched instance is the same player: its predecessor's token, as the card keeps its MAC */
+    if (passed && strlen(passed) == 64 && strspn(passed, "0123456789abcdef") == 64) {
+        memcpy(s_identity, passed, 65);
+        goto derive;
+    }
     if (fci_save_dir && fci_save_dir[0])
         snprintf(path, sizeof path, "%s\\fci_token", fci_save_dir);
     else
@@ -451,7 +459,9 @@ static void identity_init(void)
     for (i = 0; i < 32; i++)
         snprintf(s_identity + i * 2, 3, "%02x", raw[i]);
     s_identity[64] = 0;
+    SetEnvironmentVariableA("RECOMP_FCI_TOKEN", s_identity); /* for the next instance of a relaunch */
 
+derive:
     /* the id: the first 16 bytes of SHA-256(token), hex (lobby.js's deriveId). The server hashes
      * the token's HEX STRING (64 chars), so we hash s_identity, not the raw bytes. CryptoAPI's
      * SHA-256 (the CNG BCryptHash the SDK declares takes a key: this is the plain-hash API) */
