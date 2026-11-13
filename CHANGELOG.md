@@ -6,17 +6,14 @@ Private beta of online multiplayer. Draft: edited as the beta goes.
 
 ### Added
 
-- Online multiplayer for Instincts and Evolution. Multiplayer > Internet lists matches from the fci-recomp match list, and hosting a match lists yours. Players connect directly when their networks allow it, and through a relay when they don't (phone hotspots, strict NATs, some VPNs).
-- Local network play: System Link between PCs and Steam Decks on the same network, under Multiplayer > Local Network.
-- The match browser shows whether the internet match list is reachable, and why a match can't be joined (for example LIST OFFLINE or HOST UNREACHABLE).
-- Players only see matches from the same game and disc version, running a compatible build.
-- A Network section in fci.ini and the launcher's settings, with the internet match list's address. Leaving it empty turns internet play off.
-- Controller vibration: the game's rumble now reaches your controller. Turn it off with `controls-vibration = 0` ("Controller vibration" in the launcher).
-- In multiplayer, aim assist is off while you play with mouse and keyboard, and comes back as soon as you pick up a gamepad, even mid-match. Single-player is unchanged. To keep it with the mouse, set `controls-mouse-aim-assist = 1` ("Aim assist with the mouse" in the launcher).
-- QUIT GAME on the main menu closes the game.
-- Type on your keyboard in the on-screen keyboard (profile names, cheat codes): Backspace deletes, Enter accepts, Esc goes back.
-- Button prompts show a modern controller's buttons, or the keys and mouse buttons you have bound when you play with mouse and keyboard. They switch as soon as you change device.
-- Every session now keeps its own log, including sessions that ended normally, so problems that aren't crashes can be reported too. The last 3 sessions are kept by default (`log-limit`).
+- Added experimental online multiplayer for both Instincts and Evolution.
+- Added experimental LAN multiplayer for both Instincts and Evolution.
+- Added a "Quit Game" main menu option.
+- Added support for typing with your keyboard for on-screen input prompts (cheat codes, profile names, etc). This feature for the map editor TBD.
+- Added contextual button glyphs for on-screen input labels - changes depending on user keybinds, and whether or not you're using a gamepad or mouse & keyboard.
+- Added controller rumble support.
+- Added an option to remove aim assist. Note that aim assist is now automatically disabled by default for mouse & keyboard users.
+- Debug logs are now kept by default, even if the game exits successfully. Up to 3 logs are saved at a time before pruning the oldest one. This behavior can be changed in settings.
 
 ### Fixed
 
@@ -32,6 +29,7 @@ Private beta of online multiplayer. Draft: edited as the beta goes.
 - Players are named after their game profile.
 - Instincts online play has had less testing than Evolution.
 - Joining by IP address isn't available yet; matches are found through the match list or on the local network.
+- Typing in the map editor's on-screen keyboard isn't supported yet.
 
 ## [0.2.4] - 2026-11-07
 
