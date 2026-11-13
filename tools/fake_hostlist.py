@@ -109,7 +109,7 @@ def _minute(now):
 
 # Build versions, as lobby.js compareBuilds: the numbers, then a release above its pre-releases, then
 # pre-releases by label and number; a string that does not parse is older than any.
-BUILD = re.compile(r"^v?(\d{1,5})\.(\d{1,5})\.(\d{1,5})(?:-([a-z]{1,10})\.?(\d{1,5}))?(?:\+[0-9A-Za-z.-]{1,32})?$")
+BUILD = re.compile(r"^v?(\d{1,5})\.(\d{1,5})\.(\d{1,5})(?:-(alpha|beta|rc)\.?(\d{1,5}))?(?:\+[0-9A-Za-z.-]{1,32})?$")
 
 
 def compare_builds(a, b):

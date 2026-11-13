@@ -1787,11 +1787,11 @@ test("ack: register reports the connect counter, and a re-register never reuses 
 // ---- versions and updates (research/docs/online-architecture.md 7a) ----
 
 test("builds: numbers, then a release above its pre-releases, then label and number", () => {
-  const order = ["", "garbage", "1.0", "0.2.4", "0.3.0-alpha.3", "0.3.0-beta.1", "0.3.0-beta.2", "0.3.0-beta.10",
+  const order = ["", "garbage", "1.0", "0.3.0-dev.1", "0.2.4", "0.3.0-alpha.3", "0.3.0-beta.1", "0.3.0-beta.2", "0.3.0-beta.10",
     "0.3.0-rc.1", "0.3.0", "0.3.1-beta.1", "0.10.0"];
   for (let i = 0; i < order.length; i++)
     for (let j = 0; j < order.length; j++) {
-      const want = i < 3 && j < 3 ? 0 : Math.sign(i - j); // the three unparsable strings are equal
+      const want = i < 4 && j < 4 ? 0 : Math.sign(i - j); // the four unparsable strings are equal
       assert.equal(compareBuilds(order[i], order[j]), want, `${order[i]} vs ${order[j]}`);
     }
   assert.equal(compareBuilds("v0.3.0-beta.2", "0.3.0-beta2"), 0, "a leading v and a missing dot are the same build");

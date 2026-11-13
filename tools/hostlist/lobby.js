@@ -256,10 +256,10 @@ function turnCredential(ice) {
   return null;
 }
 
-// Build versions (research/docs/online-architecture.md 7a): "0.3.0-beta.2" is the numbers, then a
-// release above its pre-releases, then pre-releases by label and number. The launcher's paths.rs
+// Build versions: "0.3.0-beta.2" is the numbers, then a release above its pre-releases, then
+// pre-releases by label (alpha < beta < rc, the only ones shipped) and number. The launcher's paths.rs
 // ranks the same way. A build that does not parse (0.3.0-beta.1 sends none) is older than any.
-const BUILD = /^v?(\d{1,5})\.(\d{1,5})\.(\d{1,5})(?:-([a-z]{1,10})\.?(\d{1,5}))?(?:\+[0-9A-Za-z.-]{1,32})?$/;
+const BUILD = /^v?(\d{1,5})\.(\d{1,5})\.(\d{1,5})(?:-(alpha|beta|rc)\.?(\d{1,5}))?(?:\+[0-9A-Za-z.-]{1,32})?$/;
 
 export function compareBuilds(a, b) {
   const x = BUILD.exec(String(a ?? "")), y = BUILD.exec(String(b ?? ""));

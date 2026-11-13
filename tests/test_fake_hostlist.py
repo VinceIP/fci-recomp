@@ -1053,6 +1053,7 @@ def test_compare_builds_matches_lobby_js_order():
         "",
         "garbage",
         "1.0",
+        "0.3.0-dev.1",
         "0.2.4",
         "0.3.0-alpha.3",
         "0.3.0-beta.1",
@@ -1065,7 +1066,7 @@ def test_compare_builds_matches_lobby_js_order():
     ]
     for i, a in enumerate(order):
         for j, b in enumerate(order):
-            want = 0 if i < 3 and j < 3 else (i > j) - (i < j)
+            want = 0 if i < 4 and j < 4 else (i > j) - (i < j)
             assert compare_builds(a, b) == want, (a, b)
     assert compare_builds("v0.3.0-beta.2", "0.3.0-beta2") == 0
     assert compare_builds("0.3.0+abc123", "0.3.0") == 0

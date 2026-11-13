@@ -309,11 +309,11 @@ mod tests {
     // the same order as tools/hostlist/lobby.test.mjs "builds: ..." (the list's MIN_BUILD)
     #[test]
     fn versions_order_as_the_host_list_does() {
-        let order = ["", "garbage", "1.0", "0.2.4", "0.3.0-alpha.3", "0.3.0-beta.1", "0.3.0-beta.2", "0.3.0-beta.10",
+        let order = ["", "garbage", "1.0", "0.3.0-dev.1", "0.2.4", "0.3.0-alpha.3", "0.3.0-beta.1", "0.3.0-beta.2", "0.3.0-beta.10",
             "0.3.0-rc.1", "0.3.0", "0.3.1-beta.1", "0.10.0"];
         for (i, a) in order.iter().enumerate() {
             for (j, b) in order.iter().enumerate() {
-                let want = if i < 3 && j < 3 { std::cmp::Ordering::Equal } else { i.cmp(&j) };
+                let want = if i < 4 && j < 4 { std::cmp::Ordering::Equal } else { i.cmp(&j) };
                 assert_eq!(version_key(a).cmp(&version_key(b)), want, "{a} vs {b}");
             }
         }
