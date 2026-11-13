@@ -95,18 +95,45 @@ pub fn save_state(state: &State) -> Result<(), String> {
     std::fs::write(state_file(), text).map_err(|e| format!("saving {}: {e}", state_file().display()))
 }
 
-/// "0.2.1" as numbers, for comparing, then 1 for a release and 0 for a pre-release ("0.3.0-beta.1"), so
-/// a beta's launcher sees the release of the same numbers as newer
+/// A version as a sortable key, the order the host list's MIN_BUILD uses (tools/hostlist/lobby.js
+/// compareBuilds): the three numbers, then a release above its pre-releases, then pre-releases by label
+/// (alpha < beta < rc) and number. "0.3.0" is [0,3,0,1]; "0.3.0-beta.2" is [0,3,0,0,2,2]. Build metadata
+/// ("+abc") is ignored; anything else that does not parse is the empty key, older than every version.
 pub fn version_key(v: &str) -> Vec<u64> {
-    let v = v.trim_start_matches('v');
-    let numbers = v.split('-').next().unwrap_or("");
-    let mut key: Vec<u64> = numbers
-        .split(|c: char| !c.is_ascii_digit())
-        .take_while(|s| !s.is_empty())
-        .map(|s| s.parse().unwrap_or(0))
-        .collect();
-    key.push(if v.contains('-') { 0 } else { 1 });
+    let v = v.trim().trim_start_matches('v');
+    let v = v.split('+').next().unwrap_or("");
+    let (numbers, pre) = match v.split_once('-') {
+        Some((n, p)) => (n, Some(p)),
+        None => (v, None),
+    };
+    let parts: Vec<&str> = numbers.split('.').collect();
+    if parts.len() != 3 || parts.iter().any(|p| p.is_empty() || p.len() > 5 || !p.bytes().all(|b| b.is_ascii_digit())) {
+        return Vec::new();
+    }
+    let mut key: Vec<u64> = parts.iter().map(|p| p.parse().unwrap_or(0)).collect();
+    match pre {
+        None => key.push(1),
+        Some(pre) => {
+            let label: String = pre.chars().take_while(|c| c.is_ascii_lowercase()).collect();
+            let number = pre[label.len()..].trim_start_matches('.');
+            let rank = match label.as_str() {
+                "alpha" => 1,
+                "beta" => 2,
+                "rc" => 3,
+                _ => return Vec::new(),
+            };
+            if number.is_empty() || number.len() > 5 || !number.bytes().all(|b| b.is_ascii_digit()) {
+                return Vec::new();
+            }
+            key.extend([0, rank, number.parse().unwrap_or(0)]);
+        }
+    }
     key
+}
+
+/// a pre-release ("0.3.0-beta.2"): its launcher also looks for newer pre-releases
+pub fn is_prerelease(v: &str) -> bool {
+    version_key(v).get(3) == Some(&0)
 }
 
 pub fn newer(a: &str, b: &str) -> bool {
@@ -123,12 +150,16 @@ pub struct Source {
 /// 2 from 0.2.4: the release carries Python (python/) and the compiler, and asks for no license
 pub const PROTOCOL: u64 = 2;
 
+/// the events protocol a release in dir speaks (tools/events.py), whether or not this launcher speaks it
+pub fn read_protocol(dir: &Path) -> Option<u64> {
+    let events = std::fs::read_to_string(dir.join("tools").join("events.py")).ok()?;
+    events.lines().find_map(|l| l.strip_prefix("PROTOCOL = "))?.trim().parse::<u64>().ok()
+}
+
 /// the version of the fci-recomp.py in dir, when it is one the launcher can drive
 pub fn read_source(dir: &Path) -> Option<Source> {
     let script = std::fs::read_to_string(dir.join("fci-recomp.py")).ok()?;
-    let events = std::fs::read_to_string(dir.join("tools").join("events.py")).ok()?;
-    let protocol = events.lines().find_map(|l| l.strip_prefix("PROTOCOL = "))?.trim().parse::<u64>().ok()?;
-    if protocol != PROTOCOL {
+    if read_protocol(dir)? != PROTOCOL {
         return None;
     }
     let version = script.lines().find_map(|l| l.strip_prefix("VERSION = "))?.trim().trim_matches('"').to_string();
@@ -273,5 +304,21 @@ mod tests {
         assert!(newer("0.3.0-beta.1", "0.2.4"));
         assert!(newer("0.2.10", "0.2.9"));
         assert!(!newer("v0.2.4", "0.2.4"));
+    }
+
+    // the same order as tools/hostlist/lobby.test.mjs "builds: ..." (the list's MIN_BUILD)
+    #[test]
+    fn versions_order_as_the_host_list_does() {
+        let order = ["", "garbage", "1.0", "0.2.4", "0.3.0-alpha.3", "0.3.0-beta.1", "0.3.0-beta.2", "0.3.0-beta.10",
+            "0.3.0-rc.1", "0.3.0", "0.3.1-beta.1", "0.10.0"];
+        for (i, a) in order.iter().enumerate() {
+            for (j, b) in order.iter().enumerate() {
+                let want = if i < 3 && j < 3 { std::cmp::Ordering::Equal } else { i.cmp(&j) };
+                assert_eq!(version_key(a).cmp(&version_key(b)), want, "{a} vs {b}");
+            }
+        }
+        assert_eq!(version_key("v0.3.0-beta.2"), version_key("0.3.0-beta2"));
+        assert_eq!(version_key("0.3.0+abc123"), version_key("0.3.0"));
+        assert!(is_prerelease("0.3.0-beta.2") && !is_prerelease("0.3.0") && !is_prerelease("junk"));
     }
 }

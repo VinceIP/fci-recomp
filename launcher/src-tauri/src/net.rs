@@ -44,15 +44,39 @@ pub struct Release {
     pub source: Option<Asset>,
 }
 
-pub fn latest_release() -> Result<Release, String> {
-    let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
-    let v: serde_json::Value = agent()
-        .get(&url)
+fn github(path: &str) -> Result<serde_json::Value, String> {
+    agent()
+        .get(&format!("https://api.github.com/repos/{REPO}/{path}"))
         .set("Accept", "application/vnd.github+json")
         .call()
         .map_err(|e| format!("checking for updates failed ({e}). {NETWORK_HINT}"))?
         .into_json()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())
+}
+
+/// The release this launcher's players should be on. A release launcher reads GitHub's "latest", which
+/// leaves pre-releases out, so players on a release never get a beta. A pre-release launcher reads the
+/// release list and takes the newest of all: the next beta, or the release that replaces the betas
+/// (research/docs/online-architecture.md 7a).
+pub fn latest_release() -> Result<Release, String> {
+    if !paths::is_prerelease(env!("CARGO_PKG_VERSION")) {
+        return Ok(release_from(&github("releases/latest")?));
+    }
+    newest_of(&github("releases?per_page=30")?)
+        .ok_or_else(|| "checking for updates failed: GitHub listed no releases".to_string())
+}
+
+/// the newest published release in a GitHub release list (drafts and unparsable tags left out)
+fn newest_of(list: &serde_json::Value) -> Option<Release> {
+    list.as_array()?
+        .iter()
+        .filter(|v| !v["draft"].as_bool().unwrap_or(false))
+        .map(release_from)
+        .filter(|r| !paths::version_key(&r.version).is_empty())
+        .max_by(|a, b| paths::version_key(&a.version).cmp(&paths::version_key(&b.version)))
+}
+
+fn release_from(v: &serde_json::Value) -> Release {
     let version = v["tag_name"].as_str().unwrap_or_default().trim_start_matches('v').to_string();
     let asset = |pred: &dyn Fn(&str) -> bool| {
         v["assets"].as_array().into_iter().flatten().find(|a| pred(a["name"].as_str().unwrap_or(""))).map(|a| Asset {
@@ -62,14 +86,14 @@ pub fn latest_release() -> Result<Release, String> {
             digest: a["digest"].as_str().map(str::to_string),
         })
     };
-    Ok(Release {
+    Release {
         source: asset(&|n| n.starts_with("fci-recomp-") && n.ends_with(".zip")),
         name: v["name"].as_str().unwrap_or(&version).into(),
         notes: v["body"].as_str().unwrap_or("").replace("\r\n", "\n"),
         page: v["html_url"].as_str().unwrap_or("").into(),
         published: v["published_at"].as_str().unwrap_or("").chars().take(10).collect(),
         version,
-    })
+    }
 }
 
 /// url into file, checked against digest, GitHub's "sha256:<hex>" (a release asset without one is refused;
@@ -137,7 +161,13 @@ pub fn install_source(zip: &Path) -> Result<Source, String> {
         let version = std::fs::read_to_string(partial.join("fci-recomp.py"))
             .ok()
             .and_then(|t| t.lines().find_map(|l| l.strip_prefix("VERSION = ").map(|v| v.trim().trim_matches('"').to_string())));
+        // backlog 22: a newer protocol means a release newer than this launcher, not an older one
+        let newer_protocol = paths::read_protocol(&partial).is_some_and(|p| p > paths::PROTOCOL);
         match version {
+            Some(v) if newer_protocol => format!(
+                "fci-recomp {v} needs a newer FCI Launcher than this one. Download fci-recomp-{v}.zip from its \
+                 release page, extract it into a new folder and start the FCI Launcher inside it."
+            ),
             Some(v) => format!(
                 "fci-recomp {v} came out before this launcher and can't be built from it. Build it with the \
                  BuildGame.cmd that comes with it, or wait for the next release."
@@ -188,4 +218,28 @@ pub fn bundled_source() -> Option<PathBuf> {
             current.is_empty() || paths::newer(stem.trim_start_matches("fci-recomp-"), &current)
         })
         .max()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn listed(tag: &str, draft: bool) -> serde_json::Value {
+        serde_json::json!({ "tag_name": tag, "draft": draft, "name": tag, "assets": [] })
+    }
+
+    #[test]
+    fn a_beta_launcher_takes_the_newest_release_betas_included() {
+        let list = serde_json::Value::Array(vec![
+            listed("v0.2.4", false),
+            listed("v0.3.0-beta.2", false),
+            listed("v0.3.0-beta.10", false),
+            listed("v0.3.0-beta.11", true), // a draft is not published
+            listed("not-a-version", false),
+        ]);
+        assert_eq!(newest_of(&list).unwrap().version, "0.3.0-beta.10");
+        let with_release = serde_json::Value::Array(vec![listed("v0.3.0-beta.10", false), listed("v0.3.0", false)]);
+        assert_eq!(newest_of(&with_release).unwrap().version, "0.3.0");
+        assert!(newest_of(&serde_json::Value::Array(vec![])).is_none());
+    }
 }
