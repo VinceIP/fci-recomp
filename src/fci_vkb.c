@@ -30,14 +30,24 @@
 #define FCI_VKB_BACK 0x0010B7D0u /* B: esi keyboard */
 #endif
 
+#ifndef FCI_VKB_THISCALL
+#define FCI_VKB_THISCALL 0u /* 1: every method takes the keyboard in ecx (the map editors) */
+#endif
+
 #ifndef FCI_VKB_MODAL
 #define FCI_VKB_MODAL 0x20u /* in the UI input manager: a popup's input root, which then takes all pad input */
 #endif
 
 /* the keyboard object: the callback set while it is open, the letter wheel (its slot is +0x18 / +0x1C) */
-#define VKB_CALLBACK 0x58u
-#define VKB_WHEEL 0xACu
-#define VKB_SIZE 0x114u
+#ifndef FCI_VKB_CALLBACK
+#define FCI_VKB_CALLBACK 0x58u
+#endif
+#ifndef FCI_VKB_WHEEL
+#define FCI_VKB_WHEEL 0xACu
+#endif
+#define VKB_CALLBACK FCI_VKB_CALLBACK
+#define VKB_WHEEL FCI_VKB_WHEEL
+#define VKB_SIZE 0x104u /* the smaller object: the game's is 0x114, the Instincts editor's 0x104 */
 
 enum { EV_DELETE = 0x10000, EV_ACCEPT, EV_BACK };
 
@@ -141,7 +151,9 @@ static void call(uint32_t va, uint32_t k, int reg_esi, uint32_t arg, uint32_t ed
     MEM32(frame) = 0; /* the return address: the lifted callee only pops it */
     MEM32(frame + 4) = arg;
     g_esp = frame;
-    if (reg_esi)
+    if (FCI_VKB_THISCALL)
+        g_ecx = k;
+    else if (reg_esi)
         g_esi = k;
     else
         g_eax = k;

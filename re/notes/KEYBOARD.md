@@ -45,7 +45,25 @@ cheat keyboard with Enter on empty text, "abc" typed under the popup ignored, "x
 to the main menu; typing on the main menu with no keyboard open does nothing. Evolution: the same profile
 and popup runs.
 
-Not covered: the map editor (ige.xbe) has its own addresses and no per-frame hook yet.
+## The map editor (ige.xbe)
+
+Found 2026-11-13 in the editors' lifted code and checked with driver runs on copies. Save Map opens the
+keyboard twice: the map's name, then its description. It is the game's class, with two differences:
+every method takes the keyboard in ecx (thiscall), and its dispatch is at vtable+0x28. Callback +0x58,
+letter wheel +0xAC (slot +0x18) and the insert's string layout are the game's.
+
+| Item | Instincts editor | Evolution editor |
+|---|---|---|
+| keyboard object pointer | `[0x64AFC0]` (0x104 bytes) | `[0x67863C]` (0x114 bytes) |
+| open / close | `sub_000B56E0` / `sub_000B4B20` | `sub_000F10A0` / `sub_000F04D0` |
+| insert a string (X's space), string on the stack, ret 4 | `sub_000B5340` | `sub_000F0D00` |
+| delete (Y) / accept (A) / back (B) | `sub_000B5430` / `sub_000B58D0` / `sub_000B4B30` | `sub_000F0DF0` / `sub_000F1310` / `sub_000F04E0` |
+| pad poll (handles at this+0x248, XInputGetState) | `sub_00061320` (XInputGetState 005A95A2) | `sub_0009BE30` (XInputGetState 005CFB02) |
+
+The editors' pad poll is hooked as the game's Input_PollPads (the typing runs there each frame, and the
+driver's poll count now counts in the editor too). The input router is not hooked, so typing does not
+stop under a popup in the editor. Checked: both editors, Save Map: three Backspaces and "Hill X1" made
+"Player Hill X1", Enter went on to the description, Esc came back to the name with the text kept.
 
 The one-character string is built zeroed, so its first word (the string class's vtable in the game's
 layout) is 0: both titles' insert functions read the buffer, length and capacity directly and never
