@@ -15,7 +15,10 @@ as long as the game does and no longer.
   capture               the next presented frame, under capture/
   dump:<name>           guest RAM now, memdump-<name>.bin
 
-  python -B tools/game_driver.py <name> [--editor] [--save <fixture>] [--opt RECOMP_X=v ...] <step> ...
+  python -B tools/game_driver.py <name> [--editor] [--save <fixture>] [--save-dir <folder>] [--opt RECOMP_X=v ...] <step> ...
+
+--save-dir uses an existing save folder as it is (no copy): two runs given the same folder are two
+instances on one PC's save folder.
 
 An argument @<file> reads more arguments from a file, one a line (# starts a comment; "--opt X" and
 "--save X" on one line): tools/record2script.py writes such files from a recording.
@@ -143,7 +146,7 @@ def keep_off_screen(child):
 
 
 class Game:
-    def __init__(self, folder, editor=False, save=None, options=(), skip_intros=True):
+    def __init__(self, folder, editor=False, save=None, options=(), skip_intros=True, save_dir=None):
         self.folder = Path(folder)
         self.folder.mkdir(parents=True)
         self.pad = self.folder / "pad.txt"
@@ -170,7 +173,7 @@ class Game:
                 str(exe),
                 str(xbe),
                 str(GAME_DIR),
-                str(self.folder / "save"),
+                str(save_dir or self.folder / "save"),
                 "RECOMP_USB=1",
                 "RECOMP_FCI_XBR=1",
                 "RECOMP_FCI_XBR_BACKGROUND=1",
@@ -332,6 +335,8 @@ def main(argv):
             kw["editor"] = True
         elif a == "--save":
             kw["save"] = rest.pop(0)
+        elif a == "--save-dir":
+            kw["save_dir"] = rest.pop(0)
         elif a == "--opt":
             opts.append(rest.pop(0))
         elif a == "--intros":

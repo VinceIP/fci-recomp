@@ -458,20 +458,47 @@ static void gen_nonce(uint8_t nonce[16])
 
 /* --- the identity token (Q11) --- */
 
+/* The token file belongs to the first running instance on its save folder (a named mutex, held for the
+ * process). Two instances with one token are one player to the list: the same listing, and each hides
+ * the other's game as its own. Under Proton the mutex is per Wine prefix, as the folder is. */
+static int identity_file_ours(const char *path)
+{
+    static HANDLE lock;
+    char name[64];
+    unsigned h = 2166136261u; /* FNV-1a of the path: a mutex name has no backslashes */
+    const char *c;
+    if (lock)
+        return 1;
+    for (c = path; *c; c++)
+        h = (h ^ (unsigned char)*c) * 16777619u;
+    snprintf(name, sizeof name, "Local\\fci-recomp-token-%08x", h);
+    lock = CreateMutexA(NULL, FALSE, name);
+    if (lock && GetLastError() == ERROR_ALREADY_EXISTS) {
+        CloseHandle(lock);
+        lock = NULL;
+        return 0;
+    }
+    return 1; /* no mutex (never seen): the file, as before */
+}
+
 /* Load the identity token from the data folder; a missing, unreadable, or wrong-sized file gets a
- * fresh 32-byte token written back (never a failure), and the id is derived from the token. */
+ * fresh 32-byte token written back (never a failure), and the id is derived from the token. Once per
+ * process: a menu restart of the worker keeps it (a second instance's token exists nowhere else). */
 static void identity_init(void)
 {
     uint8_t raw[32], hash[32];
     char path[MAX_PATH];
     FILE *f = NULL;
-    int i;
+    int i, ours;
 
+    if (s_identity[0])
+        return;
     if (fci_save_dir && fci_save_dir[0])
         snprintf(path, sizeof path, "%s\\fci_token", fci_save_dir);
     else
         path[0] = 0;
-    if (path[0] && (f = fopen(path, "rb")) != NULL && fread(raw, 1, sizeof raw, f) == sizeof raw) {
+    ours = path[0] && identity_file_ours(path);
+    if (ours && (f = fopen(path, "rb")) != NULL && fread(raw, 1, sizeof raw, f) == sizeof raw) {
         fclose(f);
     } else {
         int wrote = 0;
@@ -479,15 +506,18 @@ static void identity_init(void)
             fclose(f);
         if (BCryptGenRandom(NULL, raw, sizeof raw, BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0)
             return; /* never: the system RNG is always available */
-        if (path[0] && (f = fopen(path, "wb")) != NULL) {
+        if (path[0] && !ours)
+            log_line("new identity token: another instance holds %s; this one's is kept for this session only",
+                     path);
+        else if (path[0] && (f = fopen(path, "wb")) != NULL) {
             wrote = fwrite(raw, 1, sizeof raw, f) == sizeof raw;
             fclose(f);
         }
         if (wrote)
             log_line("new identity token written to %s", path);
-        else if (path[0])
+        else if (path[0] && ours)
             log_line("new identity token: the write to %s failed; it is kept for this session only", path);
-        else
+        else if (!path[0])
             log_line("new identity token: no data folder; it is kept for this session only");
     }
     for (i = 0; i < 32; i++)
