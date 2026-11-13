@@ -12,7 +12,7 @@ Private beta of online multiplayer. Draft: edited as the beta goes.
 - Added support for typing with your keyboard for on-screen input prompts (cheat codes, profile names, etc). This feature for the map editor TBD.
 - Added contextual button glyphs for on-screen input labels - changes depending on user keybinds, and whether or not you're using a gamepad or mouse & keyboard.
 - Added controller rumble support.
-- Added an option to remove aim assist. Note that aim assist is now automatically disabled by default for mouse & keyboard users.
+- Aim assist is now off for mouse & keyboard in multiplayer and stays on for gamepads. An option turns it back on for mouse & keyboard.
 - Debug logs are now kept by default, even if the game exits successfully. Up to 3 logs are saved at a time before pruning the oldest one. This behavior can be changed in settings.
 
 ### Fixed
