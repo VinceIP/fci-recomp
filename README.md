@@ -12,34 +12,29 @@ DISCORD: https://discord.gg/UhRnapmH2j
 
 ### AI Use Disclosure
 
-This project was made using extensive AI assistance and LLM-related tools. A human with a programming background is in the loop throughout development, and I review as much code and documentation as I can. Every effort has been made by me and my human brain to ensure the contents of this repository are of the highest quality, maintainability, and free of AI slop-isms. This project is the result of many long days of building, testing, researching, documenting, and debugging.
-
-Regardless of your stance on AI in software development, it's my hope that this project brings value to fans of this game and to those who care about game preservation. This project will be an ongoing development effort. It is not a "one-shot", and not intended to be a quick and dirty, low-quality effort. Please feel free to raise an issue if you spot any aspects of this project that could be refactored, improved, or de-slopped.
+This project was made using extensive AI assistance and LLM-related tools. A human with a programming background is in the loop throughout development, and I review as much code and documentation as I can.
 
 ## Status
 
-**Version 0.2.4** - Story mode map editors for Instincts and Evolution are working, but have not yet been thoroughly tested end-to-end. Please continue to report crashes and issues in the Discord or Github. Enhanced visual features powered by a DirectX 12 renderer are implemented. Mouse and keyboard controls have been implemented and are customizable. Enhanced features and options are matched for both separate titles.
+**Version 0.3.0.beta** - Active beta test pre-release version for online multiplayer support. Old, non-functioning Xbox Live
+menus have been replaced with an online server browser accessible from within the game. Hosting and joining games with other real players works. Sharing and playing on custom maps between peers works as it did in the original game. Hosting a dedicated server with rotating maps also works as it did in the original game. Various QOL improvements have been added, such as context-sensitive controller/input icons and controller rumble.
+
+**Version 0.2.4** - Current main, stable release. Story mode and map editors for Instincts and Evolution are working. Frame rates can be unlocked up to your display's refresh rate. Enhanced visual features powered by a DirectX 12 renderer are implemented. Mouse and keyboard controls drive the game's camera itself as opposed to manipulate the controller analog stick. Keybinds are customizable. Enhanced features and options are matched for both separate titles. Some visual glitches remain. Please continue to report crashes and issues in the Discord or Github!
 
 ## Features
 
-- 2 recomps in 1; both Far Cry Instincts and its follow up sequel Far Cry Instincts: Evolution.
+- 2 recomps in 1; both Far Cry Instincts and its follow-up sequel Far Cry Instincts: Evolution.
 - Single player story mode for both games as they were on the original Xbox.
-- Map editors for both games as they were on the original Xbox. Building them is optional and can be skipped if you aren't interested in making maps.
-- Mouse and keyboard support. Keybinds and mouse settings can be adjusted by modifying fci.ini.
+- Map editors for both games as they were on the original Xbox. Building them is optional and can be skipped if you aren't interested in making maps. Enhancements to the map editors are planned!
+- Mouse and keyboard support. Keybinds and mouse settings can be adjusted by modifying fci.ini. The mouse manipulates the game camera directly, rather than simply driving a digital analog stick.
 - Modern visual enhancements via a modified version of [Xbox XBE Recomp](https://github.com/TGP482/Xbox-XBERecomp)
-tailored for Far Cry Instincts. Anisotropic filtering, anti-aliasing, screen-space ambient occlusion, scalable
+tailored for Far Cry Instincts and Evolution. Anisotropic filtering, anti-aliasing, screen-space ambient occlusion, scalable
 internal rendering resolution, soft shadows, scalable sun shadow resolution, borderless fullscreen, increased 
 draw distances, 16:9 widescreen, and more. Display & graphics options can be adjusted by modifying fci.ini.
 
 ## Roadmap
 
-Some features are not yet complete or working as intended, but are planned.
-- Splitscreen multiplayer
-- Online multiplayer
-- Share custom maps easily by dropping them into a folder
-- A modding framework and map editor enhancements
-- Additional rendering and shader enhancements.
-- Finish frame rates above 30: vehicles and AI at the game's full rate.
+See our `#roadmap` on the [Discord channel!](https://discord.gg/MupYxBrrQT)
 
 ## Requirements
 
@@ -87,24 +82,26 @@ Both Instincts and Evolution run on the Steam deck via Proton, but this is exper
 4. In the game's Properties > Compatibility, force Proton 10, Proton stable, or newer.
 5. Launch it from Steam.
 
+A full Linux port is being planned at some point in the future, and the need for Proton will go away.
+
 The launcher (`FCI Launcher.exe`) doesn't run on the Deck yet, but it will be ported to work on Linux soon. You'll need to manually adjust your fci.ini to customize settings on the Steam Deck for now.
 Remember to remove semi-colons from the setting you want to adjust in the file.
 
 ## Configuration
 
-Directories, display, graphics, keybinds, and other settings are configured by editing `fci.ini`,
+Adjust game settings under the `Settings` tab in `FCI Launcher`.
+
+Alternatively - directories, display, graphics, keybinds, and other settings are configured by editing `fci.ini`,
 found next to the game executable. For more information on what each setting does, read the comments
-included in the ini. To change a setting, remove the preceding semicolon `;` from a line and change values
+included in the ini. To change a setting, you must remove the preceding semicolon `;` from a line and change values
 to your desired settings. Save and relaunch the game.
 
 ## Known issues
 
 - Crashes may rarely occur during single player mode or elsewhere. Please report any crash and include your crash log to help improve the project.
-- Xbox Live and system link don't work yet. Trying to access these features may cause a crash.
-- May have some memory management issues, particularly when switching between the map editor mode and back again.
-- Frame rates above 30 are experimental (see `display-frame-rate` in fci.ini).
-- The window is blurry when Windows display scaling is above 100%.
-- Not yet tested: the whole single player mode end to end, multiplayer or splitscreen.
+- Occasional freezes on Steam Deck/Linux under Proton, requiring a force quit.
+- Frame rates above 30 are experimental (see `display-frame-rate` in fci.ini). AI and physics may break or cause a game softlock, unless the engine update cap setting is enabled.
+- Some areas in single player appear too dark, don't light up correctly, have flickering shadows, or issues with vertices disappearing depending on where the player is standing.
 
 Logs of crashed sessions are kept in `%APPDATA%\fci-recomp\logs`. Consider raising an issue and attaching a crash
 log if your game crashes, or report any other technical issues.
