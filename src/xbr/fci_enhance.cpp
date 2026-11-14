@@ -235,6 +235,12 @@ float3 World(float3 Pvm) {
     return float3(dot(dv, p4.xyz), dot(dv, p5.xyz), dot(dv, p6.xyz));
 }
 bool Sky(float d) { return d <= 0.0 || d >= 0.9999; }
+// the fog amount for an optical depth: the editor's thickness scales the density, so far enough is always
+// fully fogged; p12.z 1: the game's meaning, thickness caps the opacity
+float Amount(float tau) {
+    tau = clamp(tau, 0.0, 50.0);
+    return p12.z > 0.5 ? p7.x * (1.0 - exp(-tau)) : 1.0 - exp(-tau * p7.x);
+}
 // each bin: the visible sky a little above the horizon at its azimuth; none visible: keep the old value
 float4 ringp(O i) : SV_Target {
     float phi = (i.uv.x - 0.5) * 6.2831853;
@@ -343,19 +349,19 @@ float4 fog(O i) : SV_Target {
         return float4(col, c.a);   // alpha untouched: later draws blend with it
     }
     float3 fc = FogCol(rd);
-    if (Sky(d)) {   // the sky: the horizon fog, then the layer out to the sky ray's length
-        float f = p7.x * (1.0 - smoothstep(0.0, p7.y, rd.z));
-        float fl = p7.x * (1.0 - exp(-Layer(cam, cam + rd * p10.z, jit)));
+    float eu = exp(-(cam.z - p1.w) / p1.z);
+    if (Sky(d)) {   // the sky: what a level ray gets at the sky ray's length, faded upward; then the layer
+        float f = Amount(p1.x * p10.z * (p1.y + (1.0 - p1.y) * eu)) * (1.0 - smoothstep(0.0, p7.y, rd.z));
+        float fl = Amount(Layer(cam, cam + rd * p10.z, jit));
         return float4(lerp(c.rgb, fc, 1.0 - (1.0 - f) * (1.0 - fl)), c.a);
     }
     float3 Pvm = dir * (d * 16777215.0 / p3.w);   // metres
     float3 Pw = World(Pvm);
     // the height fog's optical depth, integrated along the ray in closed form
     float k = (Pw.z - cam.z) / p1.z;
-    float eu = exp(-(cam.z - p1.w) / p1.z);
     float g = abs(k) < 1e-4 ? eu : eu * (1.0 - exp(-k)) / k;
-    float tau = clamp(p1.x * length(Pvm) * (p1.y + (1.0 - p1.y) * g) + Layer(cam, Pw, jit), 0.0, 50.0);
-    return float4(lerp(c.rgb, fc, p7.x * (1.0 - exp(-tau))), c.a);
+    float tau = p1.x * length(Pvm) * (p1.y + (1.0 - p1.y) * g) + Layer(cam, Pw, jit);
+    return float4(lerp(c.rgb, fc, Amount(tau)), c.a);
 }
 )";
 
@@ -413,6 +419,7 @@ class FciExtension final : public gpu::Extension {
         fog_tint_ = std::clamp(fci_gfx::Number("RECOMP_FCI_XBR_FOG_TINT", 1.0f), 0.0f, 1.0f);
         fog_steps_ = std::clamp(std::floor(fci_gfx::Number("RECOMP_FCI_XBR_FOG_STEPS", 16)), 0.0f, 64.0f);
         fog_march_ = std::max(1.0f, fci_gfx::Number("RECOMP_FCI_XBR_FOG_MARCH", 150));
+        fog_cap_ = fci_gfx::Number("RECOMP_FCI_XBR_FOG_CAP", 0) > 0.5f ? 1.0f : 0.0f;
         return remake;   // the shadow map is made again at its new size
     }
 
@@ -759,7 +766,7 @@ class FciExtension final : public gpu::Extension {
                        float(fog_mode_), hw,          fog_zsign_,  0,           0,           0,
                        layer_s,          h0 + fog_layer_, soft,    secs,        fog_noise_,  scale,
                        fog_far_,         0,           sun_col_[0], sun_col_[1], sun_col_[2], fog_tint_,
-                       fog_steps_,       fog_march_,  0,           0};
+                       fog_steps_,       fog_march_,  fog_cap_,    0};
         c.Transition(ds.res.Get(), ds.state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         ID3D12Resource* fb = c.Feedback(rt);
         fog_done_ = true;
@@ -832,6 +839,7 @@ class FciExtension final : public gpu::Extension {
     bool sun_seen_ = false;                   // a sun was found in some frame
     float fog_sun_ = 0.6f, fog_tint_ = 1.0f;  // the glow's strength; how much the fog takes the sky's colour
     float fog_steps_ = 16, fog_march_ = 150;  // the layer's march: steps and metres (0 steps: closed form)
+    float fog_cap_ = 0;                       // 1: thickness caps the opacity, as the game
     ComPtr<ID3D12Resource> ring_;             // the horizon colour per azimuth, 64 x 1, kept across frames
     D3D12_RESOURCE_STATES ring_state_ = D3D12_RESOURCE_STATE_RENDER_TARGET;
     static constexpr UINT kRtvSlots = 4;      // the occlusion and its blur, the anti-aliased picture, the fog ring
