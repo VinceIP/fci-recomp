@@ -337,13 +337,13 @@ class FciExtension final : public gpu::Extension {
         aa_mode_ = int(fci_gfx::Number("RECOMP_FCI_XBR_AA", 0));
         fog_mode_ = int(fci_gfx::Number("RECOMP_FCI_XBR_FOG", 0));
         fog_mode_ = fog_mode_ < 0 ? 0 : (fog_mode_ > 2 ? 2 : fog_mode_);
-        fog_floor_ = fci_gfx::Number("RECOMP_FCI_XBR_FOG_FLOOR", 0.15f);
-        fog_height_ = fci_gfx::Number("RECOMP_FCI_XBR_FOG_HEIGHT", 12.0f);
+        fog_floor_ = fci_gfx::Number("RECOMP_FCI_XBR_FOG_FLOOR", 0.05f);
+        fog_height_ = fci_gfx::Number("RECOMP_FCI_XBR_FOG_HEIGHT", 6.0f);
         fog_base_ = fci_gfx::Number("RECOMP_FCI_XBR_FOG_BASE", -1.0f);   // -1: the water height
         fog_sky_ = fci_gfx::Number("RECOMP_FCI_XBR_FOG_SKY", 0.2f);
         fog_wpm_ = fci_gfx::Number("RECOMP_FCI_XBR_FOG_WPM", 39475.0f);
-        fog_layer_ = fci_gfx::Number("RECOMP_FCI_XBR_FOG_LAYER", 6.0f);   // its top above h0; 0 off
-        fog_layer_vis_ = fci_gfx::Number("RECOMP_FCI_XBR_FOG_LAYER_VIS", 80.0f);
+        fog_layer_ = fci_gfx::Number("RECOMP_FCI_XBR_FOG_LAYER", 5.0f);   // its top above h0; 0 off
+        fog_layer_vis_ = fci_gfx::Number("RECOMP_FCI_XBR_FOG_LAYER_VIS", 40.0f);
         fog_layer_soft_ = fci_gfx::Number("RECOMP_FCI_XBR_FOG_LAYER_SOFT", 3.0f);
         fog_noise_ = fci_gfx::Number("RECOMP_FCI_XBR_FOG_NOISE", 0.6f);
         fog_noise_scale_ = fci_gfx::Number("RECOMP_FCI_XBR_FOG_NOISE_SCALE", 25.0f);
@@ -404,7 +404,8 @@ class FciExtension final : public gpu::Extension {
         c.GuestSize(gw, gh);
         bool world = ds && !pretransformed && s.rs[kRsZEnable] == 2;   // W-buffered: FCI's world
         bool main = rt->gw == gw && rt->gh == gh && world && ds->w == rt->w && ds->h == rt->h;
-        fog_gate_ = fog_mode_ && main && s.rs[kRsFogEnable] != 0 ? 1.0f : 0.0f;   // kill the game fog
+        // kill the game fog on the draws our pass covers; scene draws after the pass keep the game's fog
+        fog_gate_ = fog_mode_ && main && !fog_done_ && s.rs[kRsFogEnable] != 0 ? 1.0f : 0.0f;
         if (main) {
             bool zwrite = s.simple[kMZWriteEnable >> 2] != 0;
             bool alpha = s.simple[kMBlendEnable >> 2] && s.simple[kMSrcBlend >> 2] == kBlendSrcAlpha;
@@ -692,12 +693,12 @@ class FciExtension final : public gpu::Extension {
     uint32_t gen_ = 0;
     int ao_mode_ = 0, ao_at_ = 0, aa_mode_ = 0, shadow_filter_ = 0;
     int fog_mode_ = 0;           // 0 off, 1 the fog, 2 the debug
-    float fog_floor_ = 0.15f;    // a: the density floor
-    float fog_height_ = 12.0f;   // H: the height scale, metres
+    float fog_floor_ = 0.05f;    // a: the density floor
+    float fog_height_ = 6.0f;    // H: the height scale, metres
     float fog_base_ = -1.0f;     // h0: the reference height, metres; -1 the water height
     float fog_sky_ = 0.2f;       // the sky fog's smoothstep knee
     float fog_wpm_ = 39475.0f;   // s: w-units per metre, when the projection is not found
-    float fog_layer_ = 6.0f, fog_layer_vis_ = 80.0f, fog_layer_soft_ = 3.0f;   // the ground layer, metres
+    float fog_layer_ = 5.0f, fog_layer_vis_ = 40.0f, fog_layer_soft_ = 3.0f;   // the ground layer, metres
     float fog_noise_ = 0.6f, fog_noise_scale_ = 25.0f, fog_far_ = 500.0f;     // its noise; the sky ray's length
     float fog_wpm_frame_ = 39475.0f, fog_tan_x_ = 0.89f, fog_tan_y_ = 0.67f, fog_zsign_ = 1;   // this frame's
     float shadow_scale_ = 0;     // 0: the render scale
