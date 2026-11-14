@@ -261,9 +261,9 @@ float4 ringinit(O i) : SV_Target { return float4(p3.xyz, 0); }   // alpha: how m
 float3 FogCol(float3 rd) {
     int i0 = (int)floor((atan2(rd.y, rd.x) / 6.2831853 + 0.5) * 64.0);
     float4 dc = 0, mc = 0;
-    [unroll] for (int k = -3; k <= 3; k++) {
+    [unroll] for (int k = -8; k <= 8; k++) {
         float4 r = ring.Load(int3((i0 + k + 128) % 64, 0, 0));
-        dc += float4(r.rgb * r.a, r.a) * (4.0 - abs(k));
+        dc += float4(r.rgb * r.a, r.a) * (9.0 - abs(k)) * 0.25;
     }
     [unroll] for (int j = 0; j < 16; j++) {
         float4 r = ring.Load(int3(j * 4, 0, 0));
@@ -271,8 +271,9 @@ float3 FogCol(float3 rd) {
     }
     float3 tint = 1.0;
     if (dc.a > 2.0 && mc.a > 1.0)
-        tint = clamp((dc.rgb / dc.a) / max(mc.rgb / mc.a, 0.02), 0.6, 1.6);
-    float3 col = p3.xyz * lerp(1.0, tint, p11.w);
+        tint = clamp((dc.rgb / dc.a) / max(mc.rgb / mc.a, 0.02), 0.7, 1.4);
+    // steeply down or up the azimuth means little and its bins fan out on screen: no tint there
+    float3 col = p3.xyz * lerp(1.0, tint, p11.w * (1.0 - smoothstep(0.25, 0.7, abs(rd.z))));
     float mu = saturate(dot(rd, p2.xyz));
     return col + p11.xyz * p2.w * (0.6 * pow(mu, 8.0) + 0.4 * pow(mu, 64.0));
 }
