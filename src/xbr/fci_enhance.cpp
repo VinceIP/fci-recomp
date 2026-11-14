@@ -215,7 +215,7 @@ float4 aa(O i) : SV_Target {
 // reference height m; p2 = (sun_dir, sun_strength); p3 = (fog_col, s w-units/metre); p4..p6 the view rows
 // 0..2 (world to view, metres); p7 = (thickness, sky_E, mode, water_h)
 const char* kFogHlsl = R"(
-cbuffer P : register(b1) { float4 p0; float4 p1; float4 p2; float4 p3; float4 p4; float4 p5; float4 p6; float4 p7; float4 p8; };
+cbuffer P : register(b1) { float4 p0; float4 p1; float4 p2; float4 p3; float4 p4; float4 p5; float4 p6; float4 p7; float4 p8; float4 p9; float4 p10; };
 Texture2D dep  : register(t0);   // the W-buffer depth (0..1 in .r)
 Texture2D colr : register(t1);   // the scene colour
 SamplerState sr : register(s0);
@@ -233,6 +233,32 @@ float3 World(float3 Pvm) {
     float3 dv = Pvm - t;
     return float3(dot(dv, Rr0), dot(dv, Rr1), dot(dv, Rr2));
 }
+float H2(float2 q) { return frac(sin(dot(q, float2(127.1, 311.7))) * 43758.5453); }
+float VN(float2 x) {
+    float2 i = floor(x), f = frac(x);
+    f = f * f * (3.0 - 2.0 * f);
+    return lerp(lerp(H2(i), H2(i + float2(1, 0)), f.x), lerp(H2(i + float2(0, 1)), H2(i + 1.0), f.x), f.y);
+}
+// the layer's density profile integrated over height: 1 below top - soft, a linear fade to 0 at top
+float G(float h) {
+    float b = p9.y - p9.z, a = clamp(h - b, 0.0, p9.z);
+    return min(h, b) + a - a * a / (2.0 * p9.z);
+}
+// the ground layer's optical depth from a to b (world, metres), with drifting noise at the in-layer midpoint
+float Layer(float3 a, float3 b) {
+    if (p9.x <= 0.0) return 0.0;
+    float dh = b.z - a.z;
+    float avg = abs(dh) < 1e-3 ? saturate((p9.y - a.z) / p9.z) : (G(b.z) - G(a.z)) / dh;
+    float tau = p9.x * length(b - a) * avg;
+    if (p10.x > 0.0 && tau > 0.0) {
+        float t0 = 0.0, t1 = 1.0;
+        if (abs(dh) > 1e-3) { float tt = saturate((p9.y - a.z) / dh); if (dh > 0.0) t1 = tt; else t0 = tt; }
+        float2 q = lerp(a.xy, b.xy, 0.5 * (t0 + t1)) / p10.y + p9.w * float2(0.031, 0.017);
+        float n = 0.65 * VN(q) + 0.35 * VN(q * 2.13 + float2(5.2, 1.3));
+        tau *= max(0.0, 1.0 + p10.x * (2.0 * n - 1.0));
+    }
+    return tau;
+}
 float4 fog(O i) : SV_Target {
     float2 uv = i.uv;
     float d = dep.SampleLevel(sr, uv, 0).r;
@@ -248,11 +274,13 @@ float4 fog(O i) : SV_Target {
         float band = frac(Pw.z * 0.5);
         float3 col = float3(band, 1.0 - band, 0.4);
         col = lerp(col, float3(1, 1, 1), saturate(1.0 - abs(Pw.z - p7.w) * 8.0));
+        col = lerp(col, float3(0, 1, 1), p9.x > 0.0 ? saturate(1.0 - abs(Pw.z - p9.y) * 8.0) : 0.0);
         return float4(col, c.a);   // alpha untouched: later draws blend with it
     }
-    if (d <= 0.0 || d >= 0.9999) {   // the sky: the horizon fog
+    if (d <= 0.0 || d >= 0.9999) {   // the sky: the horizon fog, then the layer out to the far plane
         float f = p7.x * (1.0 - smoothstep(0.0, p7.y, e));   // the far terrain's fog at the horizon
-        return float4(lerp(c.rgb, p3.xyz, f), c.a);
+        float fl = p7.x * (1.0 - exp(-Layer(cam, cam + normalize(World(dir) - cam) * p10.z)));
+        return float4(lerp(c.rgb, p3.xyz, 1.0 - (1.0 - f) * (1.0 - fl)), c.a);
     }
     float m = d * 16777215.0 / p3.w;   // the view distance in metres
     float3 Pvm = dir * m;
@@ -262,7 +290,7 @@ float4 fog(O i) : SV_Target {
     float k = (Pw.z - cam.z) / p1.z;
     float eu = exp(-(cam.z - p1.w) / p1.z);
     float g = abs(k) < 1e-4 ? eu : eu * (1.0 - exp(-k)) / k;
-    float tau = clamp(p1.x * length(Pvm) * (p1.y + (1.0 - p1.y) * g), 0.0, 50.0);
+    float tau = clamp(p1.x * length(Pvm) * (p1.y + (1.0 - p1.y) * g) + Layer(cam, Pw), 0.0, 50.0);
     float T = exp(-tau);
     float sun = pow(saturate(dot(rd, p2.xyz)), 8.0) * p2.w;   // the forward-scattering lobe
     return float4(lerp(c.rgb, p3.xyz + sun, p7.x * (1.0 - T)), c.a);
@@ -314,6 +342,11 @@ class FciExtension final : public gpu::Extension {
         fog_base_ = fci_gfx::Number("RECOMP_FCI_XBR_FOG_BASE", -1.0f);   // -1: the water height
         fog_sky_ = fci_gfx::Number("RECOMP_FCI_XBR_FOG_SKY", 0.2f);
         fog_wpm_ = fci_gfx::Number("RECOMP_FCI_XBR_FOG_WPM", 39475.0f);
+        fog_layer_ = fci_gfx::Number("RECOMP_FCI_XBR_FOG_LAYER", 6.0f);   // its top above h0; 0 off
+        fog_layer_vis_ = fci_gfx::Number("RECOMP_FCI_XBR_FOG_LAYER_VIS", 80.0f);
+        fog_layer_soft_ = fci_gfx::Number("RECOMP_FCI_XBR_FOG_LAYER_SOFT", 3.0f);
+        fog_noise_ = fci_gfx::Number("RECOMP_FCI_XBR_FOG_NOISE", 0.6f);
+        fog_noise_scale_ = fci_gfx::Number("RECOMP_FCI_XBR_FOG_NOISE_SCALE", 25.0f);
         return remake;   // the shadow map is made again at its new size
     }
 
@@ -623,12 +656,19 @@ class FciExtension final : public gpu::Extension {
         // the base density: 3 optical depths over the game's fog end, in metres
         float end_m = fog_end_w_ / fog_wpm_frame_;
         float s0 = end_m > 0 ? 3.0f / end_m : 0.0f;
-        float p[36] = {1.0f / rt.w,      1.0f / rt.h, fog_tan_x_,  fog_tan_y_,      s0,          fog_floor_,
+        // the ground layer (Far Cry 1's FogVolume as a layer over h0): 3 optical depths over its visibility
+        float layer_s = fog_layer_ > 0 && fog_layer_vis_ > 0 ? 3.0f / fog_layer_vis_ : 0.0f;
+        float soft = std::clamp(fog_layer_soft_, 0.1f, std::max(0.1f, fog_layer_));
+        float scale = std::max(1.0f, fog_noise_scale_);
+        float secs = float(GetTickCount64() % 3600000) * 0.001f;   // the noise drift; wraps hourly
+        float p[44] = {1.0f / rt.w,      1.0f / rt.h, fog_tan_x_,  fog_tan_y_,      s0,          fog_floor_,
                        fog_height_,      h0,          sun_dir_[0], sun_dir_[1], sun_dir_[2], sun_strength_,
                        fog_col_[0],      fog_col_[1], fog_col_[2], fog_wpm_frame_,    view_[0],    view_[1],
                        view_[2],         view_[3],    view_[4],    view_[5],    view_[6],    view_[7],
                        view_[8],         view_[9],    view_[10],   view_[11],   fog_thick_,  fog_sky_,
-                       float(fog_mode_), hw,          fog_zsign_,  0,           0,           0};
+                       float(fog_mode_), hw,          fog_zsign_,  0,           0,           0,
+                       layer_s,          h0 + fog_layer_, soft,    secs,        fog_noise_,  scale,
+                       fog_far_,         0};
         c.Transition(ds.res.Get(), ds.state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         ID3D12Resource* fb = c.Feedback(rt);
         fog_done_ = true;
@@ -637,7 +677,7 @@ class FciExtension final : public gpu::Extension {
         c.Transition(rt.res.Get(), rt.state, D3D12_RESOURCE_STATE_RENDER_TARGET);
         ID3D12Resource* fs[3] = {ds.res.Get(), fb, nullptr};
         DXGI_FORMAT ff[3] = {kDepthRead, rt.fmt, kBgra};
-        c.Pass(kFogHlsl, "fog", rt.fmt, c.View(rt), rt.w, rt.h, fs, ff, p, 36, -1);
+        c.Pass(kFogHlsl, "fog", rt.fmt, c.View(rt), rt.w, rt.h, fs, ff, p, 44, -1);
         c.Unbind();
         if (!fog_logged_) {
             fog_logged_ = true;
@@ -657,6 +697,8 @@ class FciExtension final : public gpu::Extension {
     float fog_base_ = -1.0f;     // h0: the reference height, metres; -1 the water height
     float fog_sky_ = 0.2f;       // the sky fog's smoothstep knee
     float fog_wpm_ = 39475.0f;   // s: w-units per metre, when the projection is not found
+    float fog_layer_ = 6.0f, fog_layer_vis_ = 80.0f, fog_layer_soft_ = 3.0f;   // the ground layer, metres
+    float fog_noise_ = 0.6f, fog_noise_scale_ = 25.0f, fog_far_ = 500.0f;     // its noise; the sky ray's length
     float fog_wpm_frame_ = 39475.0f, fog_tan_x_ = 0.89f, fog_tan_y_ = 0.67f, fog_zsign_ = 1;   // this frame's
     float shadow_scale_ = 0;     // 0: the render scale
     static constexpr uint32_t kShadowMin = 512;
