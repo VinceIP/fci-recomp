@@ -210,7 +210,7 @@ float4 aa(O i) : SV_Target {
 
 // Post-pass fog (RECOMP_FCI_XBR_FOG): a depth-based, height-dependent fog that replaces the console's
 // per-vertex linear fog. One full-screen pass, composited in place with c.Feedback. p7.z: 1 the fog,
-// 2 the debug (world height in bands of 2 m, the water a white line, the depth in metres in the alpha).
+// 2 the debug (world height in bands of 2 m, the water a white line).
 // p0 = (texel_x, texel_y, tan_x, tan_y); p1 = (s0, a, H, h0) base density 1/m, floor, height scale m,
 // reference height m; p2 = (sun_dir, sun_strength); p3 = (fog_col, s w-units/metre); p4..p6 the view rows
 // 0..2 (world to view, metres); p7 = (thickness, sky_E, mode, water_h)
@@ -242,13 +242,13 @@ float4 fog(O i) : SV_Target {
     float3 cam = World(float3(0, 0, 0));      // the camera, at the origin in view space
     float e = normalize(World(dir) - cam).z;  // the world elevation of the ray: 0 at the horizon
     if (p7.z > 1.5) {   // the debug
-        if (d <= 0.0 || d >= 0.9999) return float4(0, 0, 0, 1);
+        if (d <= 0.0 || d >= 0.9999) return float4(0, 0, 0, c.a);
         float m = d * 16777215.0 / p3.w;
         float3 Pw = World(dir * m);
         float band = frac(Pw.z * 0.5);
         float3 col = float3(band, 1.0 - band, 0.4);
         col = lerp(col, float3(1, 1, 1), saturate(1.0 - abs(Pw.z - p7.w) * 8.0));
-        return float4(col, saturate(length(dir * m) / 200.0));
+        return float4(col, c.a);   // alpha untouched: later draws blend with it
     }
     if (d <= 0.0 || d >= 0.9999) {   // the sky: the horizon fog
         float f = p7.x * (1.0 - smoothstep(0.0, p7.y, e));   // the far terrain's fog at the horizon
