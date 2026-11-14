@@ -70,7 +70,12 @@ constexpr DXGI_FORMAT kAoFormat = DXGI_FORMAT_R16G16_FLOAT;                // oc
 constexpr uint32_t kMBlendEnable = 0x304, kMSrcBlend = 0x344, kMZWriteEnable = 0x35C;
 constexpr uint32_t kBlendSrcAlpha = 0x302;
 constexpr uint32_t kRsZEnable = 143;
-constexpr uint32_t kOpaqueDraws = 4;   // world draws before the scene counts as a 3D frame
+constexpr uint32_t kRsFogEnable = 92;   // D3DRS_FOGENABLE
+constexpr uint32_t kRsFogColor = 138;   // D3DRS_FOGCOLOR
+constexpr uint32_t kOpaqueDraws = 4;    // world draws before the scene counts as a 3D frame
+// the D3D transform slots, by D3DTRANSFORMSTATETYPE (the State's transforms are indexed by these)
+constexpr uint32_t kTsView = 2;         // D3DTS_VIEW
+constexpr uint32_t kTsProjection = 3;   // D3DTS_PROJECTION
 
 const char* kAoHlsl = R"(
 cbuffer P : register(b1) { float4 p0; float4 p1; };
@@ -203,6 +208,67 @@ float4 aa(O i) : SV_Target {
 }
 )";
 
+// Post-pass fog (RECOMP_FCI_XBR_FOG): a depth-based, height-dependent fog that replaces the console's
+// per-vertex linear fog. One full-screen pass, composited in place with c.Feedback. p7.z: 1 the fog,
+// 2 the debug (world height in bands of 2 m, the water a white line, the depth in metres in the alpha).
+// p0 = (texel_x, texel_y, tan_x, tan_y); p1 = (s0, a, H, h0) base density 1/m, floor, height scale m,
+// reference height m; p2 = (sun_dir, sun_strength); p3 = (fog_col, s w-units/metre); p4..p6 the view rows
+// 0..2 (world to view, metres); p7 = (thickness, sky_E, mode, water_h)
+const char* kFogHlsl = R"(
+cbuffer P : register(b1) { float4 p0; float4 p1; float4 p2; float4 p3; float4 p4; float4 p5; float4 p6; float4 p7; };
+Texture2D dep  : register(t0);   // the W-buffer depth (0..1 in .r)
+Texture2D colr : register(t1);   // the scene colour
+SamplerState sr : register(s0);
+struct O { float4 p : SV_Position; float2 uv : TEXCOORD0; };
+O vs(uint id : SV_VertexID) {
+    O o;
+    o.uv = float2((id << 1) & 2, id & 2);
+    o.p = float4(o.uv * float2(2, -2) + float2(-1, 1), 0, 1);
+    return o;
+}
+// the world position (metres) of a view-space point: R^T * (Pvm - t), the view rows are R
+float3 World(float3 Pvm) {
+    float3 Rr0 = p4.xyz, Rr1 = p5.xyz, Rr2 = p6.xyz;
+    float3 t = float3(p4.w, p5.w, p6.w);
+    float3 dv = Pvm - t;
+    return float3(dot(dv, Rr0), dot(dv, Rr1), dot(dv, Rr2));
+}
+float4 fog(O i) : SV_Target {
+    float2 uv = i.uv;
+    float d = dep.SampleLevel(sr, uv, 0).r;
+    float4 c = colr.SampleLevel(sr, uv, 0);
+    float2 ndc = uv * float2(2, -2) + float2(-1, 1);
+    float3 dir = float3(ndc * p0.zw, 1.0);   // the view-space ray, unnormalized
+    float3 cam = World(float3(0, 0, 0));      // the camera, at the origin in view space
+    float e = normalize(World(dir) - cam).z;  // the world elevation of the ray: 0 at the horizon
+    if (p7.z > 1.5) {   // the debug
+        if (d <= 0.0 || d >= 0.9999) return float4(0, 0, 0, 1);
+        float m = d * 16777215.0 / p3.w;
+        float3 Pw = World(dir * m);
+        float band = frac(Pw.z * 0.5);
+        float3 col = float3(band, 1.0 - band, 0.4);
+        col = lerp(col, float3(1, 1, 1), saturate(1.0 - abs(Pw.z - p7.w) * 8.0));
+        return float4(col, saturate(length(dir * m) / 200.0));
+    }
+    if (d <= 0.0 || d >= 0.9999) {   // the sky: the horizon fog
+        float f = p7.x * (1.0 - smoothstep(0.0, p7.y, e));   // the far terrain's fog at the horizon
+        return float4(lerp(c.rgb, p3.xyz, f), c.a);
+    }
+    float m = d * 16777215.0 / p3.w;   // the view distance in metres
+    float3 Pvm = dir * m;
+    float3 Pw = World(Pvm);
+    float3 rd = normalize(Pw - cam);        // the world-space view ray
+    // the height-dependent optical depth, integrated along the ray
+    float k = (Pw.z - cam.z) / p1.z;
+    float eu = exp(-(cam.z - p1.w) / p1.z);
+    float g = abs(k) < 1e-4 ? eu : eu * (1.0 - exp(-k)) / k;
+    float tau = clamp(p1.x * length(Pvm) * (p1.y + (1.0 - p1.y) * g), 0.0, 50.0);
+    float T = exp(-tau);
+    float sun = pow(saturate(dot(rd, p2.xyz)), 8.0) * p2.w;   // the forward-scattering lobe
+    return float4(lerp(c.rgb, p3.xyz + sun, p7.x * (1.0 - T)), c.a);
+}
+)";
+
 // Shadows: RECOMP_FCI_XBR_SHADOW_FILTER=1 takes a 4 x 4 grid of the console's four-texel compares for softer
 // edges; ext.x carries the setting, so it changes without new shaders.
 struct FciShaderHooks final : gpu::ShaderHooks {
@@ -241,6 +307,13 @@ class FciExtension final : public gpu::Extension {
         ao_radius_ = fci_gfx::Number("RECOMP_FCI_XBR_AO_RADIUS", 1.5f);
         ao_at_ = int(fci_gfx::Number("RECOMP_FCI_XBR_AO_AT", 0));
         aa_mode_ = int(fci_gfx::Number("RECOMP_FCI_XBR_AA", 0));
+        fog_mode_ = int(fci_gfx::Number("RECOMP_FCI_XBR_FOG", 0));
+        fog_mode_ = fog_mode_ < 0 ? 0 : (fog_mode_ > 2 ? 2 : fog_mode_);
+        fog_floor_ = fci_gfx::Number("RECOMP_FCI_XBR_FOG_FLOOR", 0.15f);
+        fog_height_ = fci_gfx::Number("RECOMP_FCI_XBR_FOG_HEIGHT", 12.0f);
+        fog_base_ = fci_gfx::Number("RECOMP_FCI_XBR_FOG_BASE", -1.0f);   // -1: the water height
+        fog_sky_ = fci_gfx::Number("RECOMP_FCI_XBR_FOG_SKY", 0.2f);
+        fog_wpm_ = fci_gfx::Number("RECOMP_FCI_XBR_FOG_WPM", 39475.0f);
         return remake;   // the shadow map is made again at its new size
     }
 
@@ -250,6 +323,9 @@ class FciExtension final : public gpu::Extension {
             r.Reset();
         post_.Reset();
         scene_rt_ = scene_ds_ = nullptr;
+        done_ = fog_done_ = false;
+        fog_captured_ = refl_captured_ = false;
+        fog_gate_ = 0;
     }
 
     // the sun shadow map: a square depth target drawn with a colour target of its size (1024 x 1024 in
@@ -264,28 +340,39 @@ class FciExtension final : public gpu::Extension {
 
     const gpu::ShaderHooks* Shaders() const override { return &hooks_; }
 
-    void Decoded(const gpu::TextureDesc& d, const gpu::FormatInfo& fi, uint32_t, uint32_t level, std::vector<uint8_t>& px,
-                 uint32_t pitch, uint8_t&) override
+    void Decoded(const gpu::TextureDesc& d, const gpu::FormatInfo& fi, uint32_t, uint32_t level,
+                 std::vector<uint8_t>& px, uint32_t pitch, uint8_t&) override
     { fci_glyphs::Patch(d, fi, level, px, pitch); }
 
     void Constants(float (*)[4], float* ext, const Target*, uint32_t) override
-    { ext[0] = float(shadow_filter_); }
+    {
+        ext[0] = float(shadow_filter_);
+        ext[1] = fog_gate_;   // the per-draw fog kill: the scene weight is 1 (no game fog) on gated draws
+    }
 
+    // The world is the guest-size target the W-buffered draws write to; after its opaque draws the
+    // first non-world draw is the moment the passes run. The AO (ao_at_ 0) and the fog both run there,
+    // on the world scene target, the fog after the AO; ao_at_ 1's AO instead waits for the first
+    // blended surface. Each reads the scene's depth and colour; the frame's result is copied back in
+    // place with c.Feedback. The scene tracking runs for both, so the fog works with the AO off.
     bool Bound(Context& c, const State& s, Target* rt, Target* ds, bool pretransformed) override
     {
         uint64_t frame = c.Presents();
         if (frame != frame_) {
             frame_ = frame;
-            done_ = false;
+            done_ = fog_done_ = false;
             opaque_ = 0;
             scene_rt_ = scene_ds_ = nullptr;
+            fog_captured_ = refl_captured_ = false;
         }
-        if (!ao_mode_ || done_ || !rt)
+        if (!rt)
             return false;
         uint32_t gw, gh;
         c.GuestSize(gw, gh);
         bool world = ds && !pretransformed && s.rs[kRsZEnable] == 2;   // W-buffered: FCI's world
-        if (rt->gw == gw && rt->gh == gh && world && ds->w == rt->w && ds->h == rt->h) {
+        bool main = rt->gw == gw && rt->gh == gh && world && ds->w == rt->w && ds->h == rt->h;
+        fog_gate_ = fog_mode_ && main && s.rs[kRsFogEnable] != 0 ? 1.0f : 0.0f;   // kill the game fog
+        if (main) {
             bool zwrite = s.simple[kMZWriteEnable >> 2] != 0;
             bool alpha = s.simple[kMBlendEnable >> 2] && s.simple[kMSrcBlend >> 2] == kBlendSrcAlpha;
             if (zwrite) {   // opaque, alpha tested or blended foliage: all in the depth the pass reads
@@ -293,11 +380,13 @@ class FciExtension final : public gpu::Extension {
                 scene_rt_ = rt;
                 scene_ds_ = ds;
                 // the view's projection, as the title also sets it for its fixed function draws
-                const float* pm = s.transforms[3].data();
+                const float* pm = s.transforms[kTsProjection].data();
                 if (pm[0] > 0.1f && pm[5] > 0.1f) {
                     tan_x_ = 1.0f / pm[0];
                     tan_y_ = 1.0f / pm[5];
                 }
+                if (fog_mode_ && s.rs[kRsFogEnable] != 0 && !fog_captured_)
+                    CaptureFog(s);
                 if (!logged_) {
                     logged_ = true;
                     LOGI("fci ao: scene %ux%u, projection %.3f %.3f %.3f %.3f, zscale %.0f", rt->w, rt->h,
@@ -306,14 +395,27 @@ class FciExtension final : public gpu::Extension {
                 return false;
             }
             // ao_at_ 1: before the first blended surface that leaves depth alone (terrain layers, water,
-            // particles); 0: after them, when the world is done
-            if (!(ao_at_ == 1 && alpha))
-                return false;
-        }
-        if (opaque_ < kOpaqueDraws || !scene_rt_)
+            // particles)
+            if (ao_mode_ && !done_ && ao_at_ == 1 && alpha && opaque_ >= kOpaqueDraws) {
+                done_ = true;
+                return Occlude(c, *scene_rt_, *scene_ds_);
+            }
             return false;
-        done_ = true;
-        return Occlude(c, *scene_rt_, *scene_ds_);
+        }
+        // a non-main W-buffered fogged draw: the water reflection; its camera sets the water height
+        if (fog_mode_ && !refl_captured_ && world && s.rs[kRsFogEnable] != 0)
+            CaptureRefl(s);
+        // the world is done: the first non-main draw after the opaque world; the AO (ao_at_ 0) and the
+        // fog run here, on the world scene target, the fog after the AO
+        if (opaque_ >= kOpaqueDraws && scene_rt_) {
+            if (ao_mode_ && !done_ && ao_at_ != 1) {
+                done_ = true;
+                Occlude(c, *scene_rt_, *scene_ds_);
+            }
+            if (fog_mode_ && !fog_done_ && fog_captured_)
+                return Fog(c, *scene_rt_, *scene_ds_);
+        }
+        return false;
     }
 
     ID3D12Resource* Present(Context& c, Target& t, DXGI_FORMAT& fmt) override
@@ -325,7 +427,7 @@ class FciExtension final : public gpu::Extension {
         ID3D12Resource* src[3] = {t.res.Get(), nullptr, nullptr};
         DXGI_FORMAT sf[3] = {t.fmt, kBgra, kBgra};
         float p[8] = {1.0f / t.w, 1.0f / t.h, 0, 0, float(aa_mode_)};
-        c.Pass(kAaHlsl, "aa", t.fmt, Rtv(2), t.w, t.h, src, sf, p, -1);
+        c.Pass(kAaHlsl, "aa", t.fmt, Rtv(2), t.w, t.h, src, sf, p, 8, -1);
         c.Unbind();
         Target shown;   // F3 / RECOMP_FCI_XBR_CAPTURE: the picture as shown, at full size
         shown.res = post_;
@@ -418,7 +520,7 @@ class FciExtension final : public gpu::Extension {
                       ao_strength_,
                       80 * kDepthPerMetre,
                       200 * kDepthPerMetre};
-        c.Pass(kAoHlsl, "ao", kAoFormat, Rtv(0), w, h, src, fmt, p, -1);
+        c.Pass(kAoHlsl, "ao", kAoFormat, Rtv(0), w, h, src, fmt, p, 8, -1);
         for (int axis = 0; axis < 2; axis++) {
             int from = axis, to = 1 - axis;
             c.Transition(ao_[from].Get(), ao_state_[from], D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -426,7 +528,7 @@ class FciExtension final : public gpu::Extension {
             ID3D12Resource* bs[3] = {ao_[from].Get(), nullptr, nullptr};
             DXGI_FORMAT bf[3] = {kAoFormat, kBgra, kBgra};
             float bp[8] = {axis == 0 ? 1.0f / w : 0.0f, axis == 1 ? 1.0f / h : 0.0f};
-            c.Pass(kAoHlsl, "blur", kAoFormat, Rtv(to), w, h, bs, bf, bp, -1);
+            c.Pass(kAoHlsl, "blur", kAoFormat, Rtv(to), w, h, bs, bf, bp, 8, -1);
         }
         c.Transition(ao_[0].Get(), ao_state_[0], D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         ID3D12Resource* fb = c.Feedback(rt);
@@ -436,14 +538,99 @@ class FciExtension final : public gpu::Extension {
         ID3D12Resource* as[3] = {fb, ao_[0].Get(), nullptr};
         DXGI_FORMAT af[3] = {rt.fmt, kAoFormat, kBgra};
         float ap[8] = {float(ao_mode_)};
-        c.Pass(kAoHlsl, "apply", rt.fmt, c.View(rt), w, h, as, af, ap, -1);
+        c.Pass(kAoHlsl, "apply", rt.fmt, c.View(rt), w, h, as, af, ap, 8, -1);
         c.Unbind();
+        return true;
+    }
+
+    // the fog register, the colour and the main view, from the first gated (main, fogged) draw. The
+    // register is the c[k] with {x < 0, y = 1, z > 0, w = 1}: the end in w-units is z, the thickness
+    // -x * z
+    void CaptureFog(const State& s)
+    {
+        for (const auto& v : s.vsc)
+            if (v[0] < -1e-9f && std::abs(v[1] - 1.0f) < 1e-5f && v[2] > 1000.0f
+                && std::abs(v[3] - 1.0f) < 1e-5f) {
+                fog_end_w_ = v[2];
+                fog_thick_ = -v[0] * v[2];
+                break;
+            }
+        if (fog_end_w_ <= 0)
+            return;   // no register: the pass does nothing this frame
+        uint32_t argb = s.rs[kRsFogColor];
+        fog_col_[0] = ((argb >> 16) & 255) / 255.0f;
+        fog_col_[1] = ((argb >> 8) & 255) / 255.0f;
+        fog_col_[2] = (argb & 255) / 255.0f;
+        const float* vm = s.transforms[kTsView].data();
+        // D3D's row vectors: rows 0..2 rotate, row 3 translates; the shader takes the rows with T in .w
+        for (int r = 0; r < 3; r++) {
+            for (int cc = 0; cc < 3; cc++)
+                view_[r * 4 + cc] = vm[r * 4 + cc];
+            view_[r * 4 + 3] = vm[12 + r];
+        }
+        Camera(vm, cam_main_);
+        fog_captured_ = true;
+    }
+
+    // the reflection camera, from a fogged W-buffered draw on the other target (the water reflection)
+    void CaptureRefl(const State& s)
+    {
+        Camera(s.transforms[kTsView].data(), cam_refl_);
+        refl_captured_ = true;
+    }
+
+    // a view's camera in the world: -T R^T, T the translation row, R the rotation rows
+    static void Camera(const float* vm, float out[3])
+    {
+        for (int r = 0; r < 3; r++)
+            out[r] = -(vm[12] * vm[r * 4] + vm[13] * vm[r * 4 + 1] + vm[14] * vm[r * 4 + 2]);
+    }
+
+    // the post-pass fog: one full-screen pass over the scene, composited in place with c.Feedback
+    bool Fog(Context& c, Target& rt, Target& ds)
+    {
+        // the reference height: the option, else the water (the two cameras' mean height), else the
+        // main camera's height
+        float hw = refl_captured_ ? (cam_main_[2] + cam_refl_[2]) * 0.5f : cam_main_[2];
+        float h0 = fog_base_ >= 0 ? fog_base_ : hw;
+        // the base density: 3 optical depths over the game's fog end, in metres
+        float end_m = fog_end_w_ / fog_wpm_;
+        float s0 = end_m > 0 ? 3.0f / end_m : 0.0f;
+        float p[32] = {1.0f / rt.w,      1.0f / rt.h, tan_x_,      tan_y_,      s0,          fog_floor_,
+                       fog_height_,      h0,          sun_dir_[0], sun_dir_[1], sun_dir_[2], sun_strength_,
+                       fog_col_[0],      fog_col_[1], fog_col_[2], fog_wpm_,    view_[0],    view_[1],
+                       view_[2],         view_[3],    view_[4],    view_[5],    view_[6],    view_[7],
+                       view_[8],         view_[9],    view_[10],   view_[11],   fog_thick_,  fog_sky_,
+                       float(fog_mode_), hw};
+        c.Transition(ds.res.Get(), ds.state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        ID3D12Resource* fb = c.Feedback(rt);
+        fog_done_ = true;
+        if (!fb)
+            return true;
+        c.Transition(rt.res.Get(), rt.state, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        ID3D12Resource* fs[3] = {ds.res.Get(), fb, nullptr};
+        DXGI_FORMAT ff[3] = {kDepthRead, rt.fmt, kBgra};
+        c.Pass(kFogHlsl, "fog", rt.fmt, c.View(rt), rt.w, rt.h, fs, ff, p, 32, -1);
+        c.Unbind();
+        if (!fog_logged_) {
+            fog_logged_ = true;
+            LOGI("fci fog: end_w %.0f, thickness %.3f, colour %02X%02X%02X, h0 %.1f, camera %.1f, "
+                 "water %.1f",
+                 fog_end_w_, fog_thick_, int(fog_col_[0] * 255), int(fog_col_[1] * 255),
+                 int(fog_col_[2] * 255), h0, cam_main_[2], hw);
+        }
         return true;
     }
 
     uint32_t gen_ = 0;
     int ao_mode_ = 0, ao_at_ = 0, aa_mode_ = 0, shadow_filter_ = 0;
-    float shadow_scale_ = 0;   // 0: the render scale
+    int fog_mode_ = 0;           // 0 off, 1 the fog, 2 the debug
+    float fog_floor_ = 0.15f;    // a: the density floor
+    float fog_height_ = 12.0f;   // H: the height scale, metres
+    float fog_base_ = -1.0f;     // h0: the reference height, metres; -1 the water height
+    float fog_sky_ = 0.2f;       // the sky fog's smoothstep knee
+    float fog_wpm_ = 39475.0f;   // s: w-units per metre
+    float shadow_scale_ = 0;     // 0: the render scale
     static constexpr uint32_t kShadowMin = 512;
     FciShaderHooks hooks_;
     float ao_strength_ = 1, ao_radius_ = 1;
@@ -459,7 +646,20 @@ class FciExtension final : public gpu::Extension {
     D3D12_RESOURCE_STATES ao_state_[2]{};
     ComPtr<ID3D12Resource> post_;   // the anti-aliased picture
     D3D12_RESOURCE_STATES post_state_{};
-    static constexpr UINT kRtvSlots = 3;   // the occlusion and its blur, the anti-aliased picture
+    float fog_gate_ = 0;           // the per-draw ext[1]: kill the game fog on this draw
+    bool fog_captured_ = false;    // the fog register, colour and main view are set
+    bool refl_captured_ = false;   // the reflection camera is set
+    bool fog_done_ = false;        // the fog ran this frame
+    bool fog_logged_ = false;
+    float fog_end_w_ = 0;                     // the fog register's end, w-units
+    float fog_thick_ = 0;                     // the fog register's thickness
+    float fog_col_[3] = {0, 0, 0};            // the game's fog colour
+    float view_[12] = {};                     // the main view rows 0..2 (world to view, metres)
+    float cam_main_[3] = {0, 0, 0};           // the main camera, world metres
+    float cam_refl_[3] = {0, 0, 0};           // the reflection camera, world metres
+    float sun_dir_[3] = {0.3f, 0.5f, 0.8f};   // the sun direction, world (a default, tune it)
+    float sun_strength_ = 0;                  // no sun source yet (q69 design O2): off
+    static constexpr UINT kRtvSlots = 3;      // the occlusion and its blur, the anti-aliased picture
 };
 
 // before the backend is made (d3d8.cpp makes it at CreateDevice): g_extension is constant initialised

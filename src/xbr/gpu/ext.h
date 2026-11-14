@@ -51,9 +51,9 @@ public:
     // src over the bound viewport; taps per axis, colour times mul
     virtual void Blit(ID3D12Resource* src, DXGI_FORMAT fmt, const float uvrect[4], bool gamma, bool alpha, uint32_t taps, float mul,
                       DXGI_FORMAT rtv) = 0;
-    // a full screen pass: hlsl holds vs and entry, src is t0 to t2, p is b1, blend >= 0 blends by that factor
+    // a full screen pass: hlsl holds vs and entry, src is t0 to t2, p (n floats, at most 64) is b1, blend >= 0 blends by that factor
     virtual void Pass(const char* hlsl, const char* entry, DXGI_FORMAT rtv, D3D12_CPU_DESCRIPTOR_HANDLE rh, uint32_t w, uint32_t h,
-                      ID3D12Resource* const src[3], const DXGI_FORMAT fmt[3], const float p[8], float blend) = 0;
+                      ID3D12Resource* const src[3], const DXGI_FORMAT fmt[3], const float* p, size_t n, float blend) = 0;
     virtual void Capture(Target& t, const char* tag, float mul) = 0;  // F3: saves t as NNNN_tag_data
     virtual float Scale() const = 0;                                  // render scale
     virtual void GuestSize(uint32_t& w, uint32_t& h) const = 0;       // the title's back buffer

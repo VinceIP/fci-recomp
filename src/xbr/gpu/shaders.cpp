@@ -858,7 +858,7 @@ std::string PixelHlsl(const PixelKey& k) {
     s += "    float4 tc0 = i.tc0, tc1 = i.tc1, tc2 = i.tc2, tc3 = i.tc3;\n";
     s += k.two_sided ? "    float4 v0 = front ? i.d0 : i.b0, v1 = front ? i.d1 : i.b1;\n" : "    float4 v0 = i.d0, v1 = i.d1;\n";
     s += "    if (misc.w == 0) v1 = float4(0, 0, 0, 1);\n";
-    s += "    float4 fogin = float4(fogcolor.rgb, saturate(i.fogamt));\n";
+    s += "    float4 fogin = float4(fogcolor.rgb, ext.y > 0.5 ? 1.0 : saturate(i.fogamt));\n";
     std::string body;
     if (k.programmable) {
         for (int i = 0; i < 4; i++) {
