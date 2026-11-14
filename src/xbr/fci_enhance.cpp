@@ -255,13 +255,24 @@ float4 ringp(O i) : SV_Target {
     if (n < 0.5) discard;
     return float4(acc / n, 1);
 }
-float4 ringinit(O i) : SV_Target { return float4(p3.xyz, 1); }
-// the fog's colour along a world ray: the sky's horizon colour at its azimuth, and the sun's glow
+float4 ringinit(O i) : SV_Target { return float4(p3.xyz, 0); }   // alpha: how much sky a bin has seen
+// the fog's colour along a world ray: the game's fog colour tinted by how the sky's horizon at this azimuth
+// (bins blurred, weighted by what they saw) differs from the horizon's mean; plus the sun's glow
 float3 FogCol(float3 rd) {
-    float x = (atan2(rd.y, rd.x) / 6.2831853 + 0.5) * 64.0 - 0.5;
-    int i0 = (int)floor(x);
-    float3 a = ring.Load(int3((i0 + 64) % 64, 0, 0)).rgb, b = ring.Load(int3((i0 + 65) % 64, 0, 0)).rgb;
-    float3 col = lerp(p3.xyz, lerp(a, b, x - i0), p11.w);
+    int i0 = (int)floor((atan2(rd.y, rd.x) / 6.2831853 + 0.5) * 64.0);
+    float4 dc = 0, mc = 0;
+    [unroll] for (int k = -3; k <= 3; k++) {
+        float4 r = ring.Load(int3((i0 + k + 128) % 64, 0, 0));
+        dc += float4(r.rgb * r.a, r.a) * (4.0 - abs(k));
+    }
+    [unroll] for (int j = 0; j < 16; j++) {
+        float4 r = ring.Load(int3(j * 4, 0, 0));
+        mc += float4(r.rgb * r.a, r.a);
+    }
+    float3 tint = 1.0;
+    if (dc.a > 2.0 && mc.a > 1.0)
+        tint = clamp((dc.rgb / dc.a) / max(mc.rgb / mc.a, 0.02), 0.6, 1.6);
+    float3 col = p3.xyz * lerp(1.0, tint, p11.w);
     float mu = saturate(dot(rd, p2.xyz));
     return col + p11.xyz * p2.w * (0.6 * pow(mu, 8.0) + 0.4 * pow(mu, 64.0));
 }
