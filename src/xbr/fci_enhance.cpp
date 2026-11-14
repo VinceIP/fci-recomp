@@ -215,7 +215,7 @@ float4 aa(O i) : SV_Target {
 // reference height m; p2 = (sun_dir, sun_strength); p3 = (fog_col, s w-units/metre); p4..p6 the view rows
 // 0..2 (world to view, metres); p7 = (thickness, sky_E, mode, water_h)
 const char* kFogHlsl = R"(
-cbuffer P : register(b1) { float4 p0; float4 p1; float4 p2; float4 p3; float4 p4; float4 p5; float4 p6; float4 p7; };
+cbuffer P : register(b1) { float4 p0; float4 p1; float4 p2; float4 p3; float4 p4; float4 p5; float4 p6; float4 p7; float4 p8; };
 Texture2D dep  : register(t0);   // the W-buffer depth (0..1 in .r)
 Texture2D colr : register(t1);   // the scene colour
 SamplerState sr : register(s0);
@@ -238,7 +238,7 @@ float4 fog(O i) : SV_Target {
     float d = dep.SampleLevel(sr, uv, 0).r;
     float4 c = colr.SampleLevel(sr, uv, 0);
     float2 ndc = uv * float2(2, -2) + float2(-1, 1);
-    float3 dir = float3(ndc * p0.zw, 1.0);   // the view-space ray, unnormalized
+    float3 dir = float3(ndc * p0.zw, p8.x);   // the view-space ray, unnormalized; p8.x: forward is +z or -z
     float3 cam = World(float3(0, 0, 0));      // the camera, at the origin in view space
     float e = normalize(World(dir) - cam).z;  // the world elevation of the ray: 0 at the horizon
     if (p7.z > 1.5) {   // the debug
@@ -569,6 +569,7 @@ class FciExtension final : public gpu::Extension {
             view_[r * 4 + 3] = vm[12 + r];
         }
         Camera(vm, cam_main_);
+        Projection(s, vm);
         fog_captured_ = true;
     }
 
@@ -577,6 +578,32 @@ class FciExtension final : public gpu::Extension {
     {
         Camera(s.transforms[kTsView].data(), cam_refl_);
         refl_captured_ = true;
+    }
+
+    // The projection the vertex programs use: Evolution's view-projection columns in c167-c170 (hardware
+    // order) times the view's inverse. The fixed function projection is a stand-in there (1, 1, 1, 0).
+    // Gives the tangents, the W units per metre and which way view space faces; else the defaults.
+    void Projection(const State& s, const float* vm)
+    {
+        const auto& c = s.vsc;
+        float m[3][4];   // view-space columns x, y, w of the clip transform: P = V^-1 M, rows 0..2 of V^-1
+        for (int col = 0, reg = 0; col < 3; col++, reg = col == 2 ? 3 : col) {
+            const auto& r = c[167 + reg];
+            for (int i = 0; i < 3; i++)   // V^-1's rotation is R^T: P[i][col] = sum_j R[j][i] M[j][col]
+                m[col][i] = vm[i] * r[0] + vm[4 + i] * r[1] + vm[8 + i] * r[2];
+            m[col][3] = r[3];
+        }
+        float px = m[0][0], py = m[1][1], pw = m[2][2];   // x from view x, y from view y, w from view z
+        bool ok = std::abs(px) > 1 && std::abs(py) > 1 && std::abs(pw) > 1 && std::abs(m[0][1]) < 1e-3f * std::abs(px)
+                  && std::abs(m[1][0]) < 1e-3f * std::abs(py) && std::abs(m[2][0]) < 1e-3f * std::abs(pw);
+        if (!ok) {
+            fog_tan_x_ = tan_x_, fog_tan_y_ = tan_y_, fog_zsign_ = 1, fog_wpm_frame_ = fog_wpm_;
+            return;
+        }
+        fog_tan_x_ = std::abs(pw / px);
+        fog_tan_y_ = std::abs(pw / py);
+        fog_zsign_ = pw < 0 ? -1.0f : 1.0f;   // w = pw * view z: forward is -z when pw < 0
+        fog_wpm_frame_ = std::abs(pw);
     }
 
     // a view's camera in the world: -T R^T, T the translation row, R the rotation rows
@@ -594,14 +621,14 @@ class FciExtension final : public gpu::Extension {
         float hw = refl_captured_ ? (cam_main_[2] + cam_refl_[2]) * 0.5f : cam_main_[2];
         float h0 = fog_base_ >= 0 ? fog_base_ : hw;
         // the base density: 3 optical depths over the game's fog end, in metres
-        float end_m = fog_end_w_ / fog_wpm_;
+        float end_m = fog_end_w_ / fog_wpm_frame_;
         float s0 = end_m > 0 ? 3.0f / end_m : 0.0f;
-        float p[32] = {1.0f / rt.w,      1.0f / rt.h, tan_x_,      tan_y_,      s0,          fog_floor_,
+        float p[36] = {1.0f / rt.w,      1.0f / rt.h, fog_tan_x_,  fog_tan_y_,      s0,          fog_floor_,
                        fog_height_,      h0,          sun_dir_[0], sun_dir_[1], sun_dir_[2], sun_strength_,
-                       fog_col_[0],      fog_col_[1], fog_col_[2], fog_wpm_,    view_[0],    view_[1],
+                       fog_col_[0],      fog_col_[1], fog_col_[2], fog_wpm_frame_,    view_[0],    view_[1],
                        view_[2],         view_[3],    view_[4],    view_[5],    view_[6],    view_[7],
                        view_[8],         view_[9],    view_[10],   view_[11],   fog_thick_,  fog_sky_,
-                       float(fog_mode_), hw};
+                       float(fog_mode_), hw,          fog_zsign_,  0,           0,           0};
         c.Transition(ds.res.Get(), ds.state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         ID3D12Resource* fb = c.Feedback(rt);
         fog_done_ = true;
@@ -610,7 +637,7 @@ class FciExtension final : public gpu::Extension {
         c.Transition(rt.res.Get(), rt.state, D3D12_RESOURCE_STATE_RENDER_TARGET);
         ID3D12Resource* fs[3] = {ds.res.Get(), fb, nullptr};
         DXGI_FORMAT ff[3] = {kDepthRead, rt.fmt, kBgra};
-        c.Pass(kFogHlsl, "fog", rt.fmt, c.View(rt), rt.w, rt.h, fs, ff, p, 32, -1);
+        c.Pass(kFogHlsl, "fog", rt.fmt, c.View(rt), rt.w, rt.h, fs, ff, p, 36, -1);
         c.Unbind();
         if (!fog_logged_) {
             fog_logged_ = true;
@@ -629,7 +656,8 @@ class FciExtension final : public gpu::Extension {
     float fog_height_ = 12.0f;   // H: the height scale, metres
     float fog_base_ = -1.0f;     // h0: the reference height, metres; -1 the water height
     float fog_sky_ = 0.2f;       // the sky fog's smoothstep knee
-    float fog_wpm_ = 39475.0f;   // s: w-units per metre
+    float fog_wpm_ = 39475.0f;   // s: w-units per metre, when the projection is not found
+    float fog_wpm_frame_ = 39475.0f, fog_tan_x_ = 0.89f, fog_tan_y_ = 0.67f, fog_zsign_ = 1;   // this frame's
     float shadow_scale_ = 0;     // 0: the render scale
     static constexpr uint32_t kShadowMin = 512;
     FciShaderHooks hooks_;
