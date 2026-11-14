@@ -69,6 +69,8 @@ constexpr DXGI_FORMAT kAoFormat = DXGI_FORMAT_R16G16_FLOAT;                // oc
 // NV2A methods the trigger reads (gpu/state.h names them; SimpleState is d3d12.cpp's)
 constexpr uint32_t kMBlendEnable = 0x304, kMSrcBlend = 0x344, kMZWriteEnable = 0x35C;
 constexpr uint32_t kBlendSrcAlpha = 0x302;
+constexpr uint32_t kBlendZero = 0, kBlendOne = 1;   // D3DBLEND_*, as the guest sets them
+constexpr uint32_t kBlendSrcColor = 0x300, kBlendInvSrcAlpha = 0x303, kBlendDestColor = 0x306;
 constexpr uint32_t kRsZEnable = 143;
 constexpr uint32_t kRsFogEnable = 92;   // D3DRS_FOGENABLE
 constexpr uint32_t kRsFogColor = 138;   // D3DRS_FOGCOLOR
@@ -384,7 +386,7 @@ float4 fog(O i) : SV_Target {
     float3 cam = World(float3(0, 0, 0));      // the camera, at the origin in view space
     float3 rd = normalize(World(dir) - cam);  // the world-space view ray
     float jit = frac(52.9829189 * frac(dot(i.p.xy, float2(0.06711056, 0.00583715))));
-    if (p7.z > 1.5) {   // the debug
+    if (p7.z > 1.5 && p7.z < 2.5) {   // the debug (mode 2; mode 3 is the volume)
         if (Sky(d)) return float4(0, 0, 0, c.a);
         float3 Pw = World(dir * (d * 16777215.0 / p3.w));
         float band = frac(Pw.z * 0.5);
@@ -402,6 +404,7 @@ float4 fog(O i) : SV_Target {
         fc += glow.SampleLevel(sr, uv, 0).rgb * p13.x * amount;   // bright sky and the sun, scattered in the fog
         return float4(lerp(c.rgb, fc, amount), c.a);
     }
+    if (p8.y > 0.5) return c;   // sky only: non-sky pixels unchanged (mode 3's Volfog handles them)
     float3 Pvm = dir * (d * 16777215.0 / p3.w);   // metres
     float3 Pw = World(Pvm);
     // the height fog's optical depth, integrated along the ray in closed form
@@ -412,6 +415,169 @@ float4 fog(O i) : SV_Target {
     c.rgb = lerp(c.rgb, dot(c.rgb, float3(0.299, 0.587, 0.114)).xxx, p13.w * amount);   // far: no colour left
     fc += glow.SampleLevel(sr, uv, 0).rgb * p13.x * amount;
     return float4(lerp(c.rgb, fc, amount), c.a);
+}
+)";
+
+// Volume fog (RECOMP_FCI_XBR_FOG=3): a 128x72x64 froxel volume. "inject" writes one slice's (L, sigma)
+// with temporal accumulation; "integ" integrates the accumulated volume; "volfog" composites it.
+// Cbuffer layout (register b1, float4 p[24]):
+//   inject:  p[0]=(tx,ty,tanx,tany) p[1..3]=view rows p[4]=(s0,thick,wpm,zsign) p[5]=(sdir,sstr)
+//            p[6]=(scol,tint) p[7]=(dk,dxk,volw,volh) p[8]=(vold,time,near,far)
+//            p[9]=(sh_gw,sh_gh,sh_hw,sh_hh) p[10..13]=shadow mtx p[14..17]=last view rows
+//            p[18]=(last_tanx,last_tany,last_zsign,have_hist) p[19]=(h0,H,floor,0)
+//            p[20]=(layer_s,top,soft,0) p[21]=(nscale,noise,0,0) p[22]=(fcol,0)
+//   integ:   p[0]=(k,near,step,0)
+//   volfog:  p[0]=(tx,ty,tanx,tany) p[1..3]=view rows p[4]=(wpm,0,0,0) p[7]=(near,far,vold,0)
+//            p[8]=(glow_w,0,0,desat) p[12]=(zsign,0,0,0)
+const char* kVolHlsl = R"(
+cbuffer P : register(b1) { float4 p[24]; };
+Texture2D<float> t0 : register(t0);    // shadow map (inject) / depth (volfog)
+Texture3D<float4> vol3 : register(t1);  // volume (inject: history; integ: current; volfog: integrated)
+Texture2D<float4> t2 : register(t2);    // ring (inject) / scene colour (volfog)
+Texture2D<float4> t3 : register(t3);    // glow (volfog)
+SamplerState smp : register(s0);
+struct O { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
+O vs(uint id : SV_VertexID) {
+    O o;
+    o.uv = float2((id << 1) & 2, id & 2);
+    o.pos = float4(o.uv * float2(2, -2) + float2(-1, 1), 0, 1);
+    return o;
+}
+// World from view: R rows p[1..3].xyz, translation p[1..3].w
+float3 World(float3 Pvm) {
+    float3 dv = Pvm - float3(p[1].w, p[2].w, p[3].w);
+    return float3(dot(dv, p[1].xyz), dot(dv, p[2].xyz), dot(dv, p[3].xyz));
+}
+// World to last frame's view, the inverse of World(): Pv' = R'^T * Pw + t'
+float3 ToViewLast(float3 Pw) {
+    return float3(Pw.x * p[14].x + Pw.y * p[15].x + Pw.z * p[16].x + p[14].w,
+                  Pw.x * p[14].y + Pw.y * p[15].y + Pw.z * p[16].y + p[15].w,
+                  Pw.x * p[14].z + Pw.y * p[15].z + Pw.z * p[16].z + p[16].w);
+}
+float H3(float3 q) { return frac(sin(dot(q, float3(127.1, 311.7, 74.7))) * 43758.5453); }
+float VN3(float3 x) {
+    float3 i = floor(x), f = frac(x);
+    f = f * f * (3.0 - 2.0 * f);
+    return lerp(lerp(lerp(H3(i), H3(i + float3(1,0,0)), f.x), lerp(H3(i + float3(0,1,0)), H3(i + float3(1,1,0)), f.x), f.y),
+                lerp(lerp(H3(i + float3(0,0,1)), H3(i + float3(1,0,1)), f.x), lerp(H3(i + float3(0,1,1)), H3(i + 1.0), f.x), f.y), f.z);
+}
+float Mist(float3 q) {
+    float3 n = q / float3(p[21].x, p[21].x, p[21].x * 0.4) + p[8].y * float3(0.031, 0.017, 0.004);
+    float v = 0.65 * VN3(n) + 0.35 * VN3(n * 2.13 + 5.2);
+    return lerp(1.0, 2.0 * saturate(0.5 + (v - 0.5) * 2.5), p[21].y);
+}
+// the layer's profile integrated over height (as mode 1's G): 1 below top - soft, a linear fade to 0 at top
+float GL(float z) {
+    float b = p[20].y - p[20].z, a = clamp(z - b, 0.0, p[20].z);
+    return min(z, b) + a - a * a / (2.0 * p[20].z);
+}
+// The slice's mean density between a and b in closed form, so a thick far slice is not one noisy point
+// sample; the layer's noise at q (a jittered point) only modulates it, less where the slice is thick
+float Sigma(float3 a, float3 b, float3 q, float len) {
+    float h = p[19].x, H = p[19].y, fl = p[19].z;
+    // below h0 the density stops growing at 2 scale heights: froxels under the terrain overflowed half floats
+    float za = max(a.z, h - 2.0 * H), zb = max(b.z, h - 2.0 * H), dz = zb - za;
+    float e = abs(dz) < 1e-3 ? exp(-(za - h) / H) : H * (exp(-(za - h) / H) - exp(-(zb - h) / H)) / dz;
+    float s = p[4].x * (fl + (1.0 - fl) * e);
+    if (p[20].x > 0.0) {
+        float lz = b.z - a.z;
+        float lay = abs(lz) < 1e-3 ? saturate((p[20].y - a.z) / p[20].z) : (GL(b.z) - GL(a.z)) / lz;
+        s += p[20].x * lay * lerp(1.0, Mist(q), saturate(p[21].x / (2.0 * len)));
+    }
+    return p[4].y * s;
+}
+// the sun's forward lobe, as the post pass's glow, so modes 1 and 3 agree where nothing is shadowed
+float Lobe(float mu) { mu = saturate(mu); return 0.6 * pow(mu, 8.0) + 0.4 * pow(mu, 64.0); }
+// the fog's colour along a world ray: the game's fog colour tinted by the sky's horizon per azimuth
+float3 FogCol(float3 rd) {
+    float x = (atan2(rd.y, rd.x) / 6.2831853 + 0.5) * 64.0 - 0.5;
+    int i0 = (int)floor(x);
+    float fx = x - i0;
+    float4 dc = 0, mc = 0;
+    [unroll] for (int k = -7; k <= 8; k++) {
+        float4 r = t2.Load(int3((i0 + k + 128) % 64, 0, 0));
+        dc += float4(r.rgb * r.a, r.a) * max(0.0, 8.0 - abs(k - fx)) * 0.25;
+    }
+    [unroll] for (int j = 0; j < 16; j++) {
+        float4 r = t2.Load(int3(j * 4, 0, 0));
+        mc += float4(r.rgb * r.a, r.a);
+    }
+    float3 ratio = clamp((dc.rgb / max(dc.a, 1e-3)) / max(mc.rgb / max(mc.a, 1e-3), 0.02), 0.7, 1.4);
+    float3 tint = lerp(1.0, ratio, saturate(dc.a / 4.0) * saturate(mc.a / 2.0));
+    float3 col = p[22].xyz * lerp(1.0, tint, p[6].w * (1.0 - smoothstep(0.25, 0.7, abs(rd.z))));
+    return col;   // the sun's lobe is added per froxel, shadowed
+}
+// shadow: 2x2 Load-and-compare, the game's convention (uv = tc/size - 0.5/host, depth = tc.z/65535)
+float Shad(float2 tc_xy, float tc_z) {
+    float2 suv = tc_xy / p[9].xy - 0.5 / p[9].zw;
+    if (suv.x < 0 || suv.x > 1 || suv.y < 0 || suv.y > 1) return 1.0;
+    float sz = clamp(tc_z, 0.0, 65535.0) / 65535.0;
+    int2 base = (int2)floor(suv * p[9].zw);
+    float sum = 0;
+    [unroll] for (int y = 0; y < 2; y++)
+        [unroll] for (int x = 0; x < 2; x++)
+            sum += (t0.Load(int3(base + int2(x, y) - 1, 0)).r <= sz) ? 1.0 : 0.0;
+    return sum * 0.25;
+}
+float4 inject(O i) : SV_Target {
+    float2 uv = i.uv;
+    float2 px = floor(uv * p[7].zw);
+    float h = frac(frac(52.9829189 * frac(dot(px, float2(0.06711056, 0.00583715)))) + p[23].x * 0.6180340);
+    float d = p[7].x + h * p[7].y;
+    float2 ndc = uv * float2(2, -2) + float2(-1, 1);
+    float3 dir = float3(ndc * p[0].zw, p[4].w);   // dir.z = zsign: view forward
+    float3 Pw = World(dir * d);
+    float3 cam = World(float3(0,0,0));
+    float3 rd = normalize(Pw - cam);
+    float sig = Sigma(World(dir * p[7].x), World(dir * (p[7].x + p[7].y)), Pw, p[7].y * length(dir));
+    // the bright sky and sun scattered in the fog, as mode 1 adds it (last frame's glow, same screen uv)
+    float3 fc = FogCol(rd) + t3.SampleLevel(smp, uv, 0).rgb * p[21].z;
+    float mu = dot(rd, p[5].xyz);
+    float4 s4 = float4(dot(p[10].xyz, Pw) + p[10].w, dot(p[11].xyz, Pw) + p[11].w,
+                       dot(p[12].xyz, Pw) + p[12].w, dot(p[13].xyz, Pw) + p[13].w);
+    float sun = (s4.w > 0 && s4.x >= 0 && s4.x <= p[9].x && s4.y >= 0 && s4.y <= p[9].y)
+                ? Shad(s4.xy, s4.z) : 1.0;
+    float3 L = sig * (fc + p[6].xyz * p[5].w * sun * Lobe(mu));
+    float4 cur = float4(L, sig);
+    // temporal: reproject through last frame's view (world -> last view space -> NDC -> uv, depth)
+    float3 lPv = ToViewLast(Pw);
+    float2 lndc = lPv.xy / (lPv.z * p[18].z * float2(p[18].x, p[18].y));
+    float2 luv = lndc * float2(0.5, -0.5) + 0.5;
+    float ld = lPv.z * p[18].z;   // view depth in metres
+    float lkf = p[8].x * log(max(ld, p[8].z) / p[8].z) / log(p[8].w / p[8].z);
+    bool ok = p[18].w > 0.5 && ld > 0 && luv.x >= 0 && luv.x <= 1 && luv.y >= 0 && luv.y <= 1 && lkf >= 0 && lkf <= p[8].x;
+    float4 hist = ok ? vol3.Sample(smp, float3(luv, lkf / p[8].x)) : cur;
+    return lerp(hist, cur, 0.1);
+}
+float4 integ(O i) : SV_Target {
+    float2 uv = i.uv;
+    int k = (int)p[0].x;
+    float near_m = p[0].y, step = p[0].z;
+    float3 S = 0;
+    float T = 1.0;
+    [loop] for (int j = 0; j <= k; j++) {
+        float4 v = vol3.SampleLevel(smp, float3(uv, (float)(j + 0.5) / 64.0), 0);
+        if (any(!isfinite(v))) v = 0;   // one bad froxel must not poison the rest of the column
+        float sig = v.a;
+        float dx = near_m * pow(step, (float)j) * (step - 1.0);
+        float t = exp(-sig * dx);
+        S += (sig > 1e-8 ? v.rgb / sig * (1.0 - t) : v.rgb * dx) * T;   // the second: the limit as sigma -> 0
+        T *= t;
+    }
+    return float4(S, T);
+}
+float4 volfog(O i) : SV_Target {
+    float2 uv = i.uv;
+    float d = t0.SampleLevel(smp, uv, 0).r;
+    float4 c = t2.SampleLevel(smp, uv, 0);
+    if (d <= 0.0 || d >= 0.9999) return c;   // sky: unchanged (Fog() handles it)
+    float dm = d * 16777215.0 / p[4].x;
+    float kf = p[7].z * log(max(dm, p[7].x) / p[7].x) / log(p[7].y / p[7].x);
+    float w = (kf - 0.5) / p[7].z;
+    float4 v = vol3.Sample(smp, float3(uv, saturate(w)));
+    // the surface loses colour with distance, then the fog's light is added: the fog keeps its own colour
+    float3 cs = lerp(c.rgb, dot(c.rgb, float3(0.299, 0.587, 0.114)).xxx, p[8].w * (1.0 - v.a));
+    return float4(cs * v.a + v.rgb, c.a);
 }
 )";
 
@@ -454,7 +620,7 @@ class FciExtension final : public gpu::Extension {
         ao_at_ = int(fci_gfx::Number("RECOMP_FCI_XBR_AO_AT", 0));
         aa_mode_ = int(fci_gfx::Number("RECOMP_FCI_XBR_AA", 0));
         fog_mode_ = int(fci_gfx::Number("RECOMP_FCI_XBR_FOG", 0));
-        fog_mode_ = fog_mode_ < 0 ? 0 : (fog_mode_ > 2 ? 2 : fog_mode_);
+        fog_mode_ = fog_mode_ < 0 ? 0 : (fog_mode_ > 3 ? 3 : fog_mode_);
         fog_floor_ = fci_gfx::Number("RECOMP_FCI_XBR_FOG_FLOOR", 0.35f);
         fog_height_ = fci_gfx::Number("RECOMP_FCI_XBR_FOG_HEIGHT", 6.0f);
         fog_base_ = fci_gfx::Number("RECOMP_FCI_XBR_FOG_BASE", -1.0f);   // -1: the water height
@@ -474,6 +640,7 @@ class FciExtension final : public gpu::Extension {
         fog_wisp_ = fci_gfx::Number("RECOMP_FCI_XBR_FOG_WISPS", 0.6f);
         fog_wisp_size_ = std::max(0.5f, fci_gfx::Number("RECOMP_FCI_XBR_FOG_WISP_SIZE", 4.0f));
         fog_desat_ = fci_gfx::Number("RECOMP_FCI_XBR_FOG_DESAT", 0.35f);
+        fog_lookup_ = fci_gfx::Number("RECOMP_FCI_XBR_FOG_LOOKUP", 1) > 0.5f;   // 1: in-shader, 0: post-pass
         return remake;   // the shadow map is made again at its new size
     }
 
@@ -504,10 +671,32 @@ class FciExtension final : public gpu::Extension {
                  std::vector<uint8_t>& px, uint32_t pitch, uint8_t&) override
     { fci_glyphs::Patch(d, fi, level, px, pitch); }
 
-    void Constants(float (*)[4], float* ext, const Target*, uint32_t) override
+    void Constants(float (*)[4], float* ext, float* vol, float* volsize, const Target* rt, uint32_t src,
+                   uint32_t dst) override
     {
         ext[0] = float(shadow_filter_);
         ext[1] = fog_gate_;   // the per-draw fog kill: the scene weight is 1 (no game fog) on gated draws
+        ext[2] = ext[3] = 0;
+        if (fog_gate_ > 0 && fog_mode_ == 3 && fog_lookup_ && vol_ready_ && !vol_splitscreen_) {
+            // each draw is fogged before it blends with the fogged colour behind it, so what it adds
+            // depends on the blend (docs/rendering.md): 1 col*T + S, 2 col*T (dest ONE), 3 col*T + a*S
+            // (premultiplied), 4 and 5 multiply blends fade to their neutral (1, 0.5 for 2x)
+            ext[2] = dst == kBlendOne                                        ? 2.0f
+                     : src == kBlendOne && dst == kBlendInvSrcAlpha          ? 3.0f
+                     : src == kBlendDestColor && dst == kBlendSrcColor       ? 5.0f
+                     : (src == kBlendDestColor && dst == kBlendZero)
+                             || (src == kBlendZero && dst == kBlendSrcColor) ? 4.0f
+                                                                             : 1.0f;
+            ext[3] = fog_desat_;
+            vol[0] = kNearM;
+            vol[1] = 1.0f / logf(kFarM / kNearM);
+            vol[2] = float(kVZ);
+            vol[3] = 1.0f / fog_wpm_frame_;
+            if (rt) {
+                volsize[0] = float(rt->w);
+                volsize[1] = float(rt->h);
+            }
+        }
     }
 
     // The world is the guest-size target the W-buffered draws write to; after its opaque draws the
@@ -524,6 +713,8 @@ class FciExtension final : public gpu::Extension {
             opaque_ = 0;
             scene_rt_ = scene_ds_ = nullptr;
             fog_captured_ = refl_captured_ = false;
+            vol_ready_ = false;
+            vol_splitscreen_ = false;
         }
         if (!rt)
             return false;
@@ -531,8 +722,13 @@ class FciExtension final : public gpu::Extension {
         c.GuestSize(gw, gh);
         bool world = ds && !pretransformed && s.rs[kRsZEnable] == 2;   // W-buffered: FCI's world
         bool main = rt->gw == gw && rt->gh == gh && world && ds->w == rt->w && ds->h == rt->h;
-        // kill the game fog on the draws our pass covers; scene draws after the pass keep the game's fog
-        fog_gate_ = fog_mode_ && main && !fog_done_ && s.rs[kRsFogEnable] != 0 ? 1.0f : 0.0f;
+        // kill the game fog on the draws our pass covers; in mode 3 the volume lookup covers all main draws
+        // once built (splitscreen: post-pass route, gate until the trigger as in mode 1)
+        // mode 3's volume fogs every scene draw, the game's fog flag aside: the water (and the draws under
+        // it) are drawn with the fog off, and popped out of the fog as the game's water came and went
+        bool fog_on = s.rs[kRsFogEnable] != 0;
+        bool vol = fog_mode_ == 3 && !vol_splitscreen_;
+        fog_gate_ = main && (vol ? vol_ready_ : fog_mode_ && fog_on && !fog_done_) ? 1.0f : 0.0f;
         if (main) {
             bool zwrite = s.simple[kMZWriteEnable >> 2] != 0;
             bool alpha = s.simple[kMBlendEnable >> 2] && s.simple[kMSrcBlend >> 2] == kBlendSrcAlpha;
@@ -548,8 +744,37 @@ class FciExtension final : public gpu::Extension {
                 }
                 if (fog_mode_ && s.rs[kRsFogEnable] != 0 && !fog_captured_)
                     CaptureFog(s);
-                if (fog_mode_)
+                if (fog_mode_) {
                     CaptureSun(s);
+                    // the shadow matrix (c161-c164), world to shadow clip
+                    for (int i = 0; i < 4; i++)
+                        for (int j = 0; j < 4; j++)
+                            shadow_mtx_[i * 4 + j] = s.vsc[161 + i][j];
+                }
+                // mode 3 with in-shader lookup: build the volume on the first main fog-enabled draw;
+                // splitscreen (viewport not the whole target) falls back to the post-pass route
+                if (fog_mode_ == 3 && fog_lookup_ && s.rs[kRsFogEnable] != 0 && !vol_ready_) {
+                    // the viewport is in guest pixels: a splitscreen window is smaller than the target
+                    bool splitscreen = s.viewport.x != 0 || s.viewport.y != 0 || s.viewport.w != gw
+                                       || s.viewport.h != gh;
+                    if (splitscreen) {
+                        vol_splitscreen_ = true;
+                        if (!vol_glow_logged_) {
+                            vol_glow_logged_ = true;
+                            LOGI("fci volfog: splitscreen; in-shader lookup off, post-pass route");
+                        }
+                    } else {
+                        WaterHeight();
+                        Volume(c, s);
+                        vol_ready_ = true;
+                        fog_gate_ = 1.0f;   // this draw too: it was gated before the volume existed
+                        if (!vol_glow_logged_) {
+                            vol_glow_logged_ = true;
+                            LOGI("fci volfog: in-shader lookup");
+                        }
+                        return true;   // rebind: the draw proceeds with the volume lookup
+                    }
+                }
                 if (!logged_) {
                     logged_ = true;
                     LOGI("fci ao: scene %ux%u, projection %.3f %.3f %.3f %.3f, zscale %.0f", rt->w, rt->h,
@@ -575,8 +800,19 @@ class FciExtension final : public gpu::Extension {
                 done_ = true;
                 Occlude(c, *scene_rt_, *scene_ds_);
             }
-            if (fog_mode_ && !fog_done_ && fog_captured_)
+            if (fog_mode_ && !fog_done_ && fog_captured_) {
+                if (fog_mode_ == 3) {
+                    // in-shader lookup: the volume was built on the first main draw; sky only here
+                    if (vol_ready_)
+                        return Fog(c, *scene_rt_, *scene_ds_, true);
+                    // post-pass lookup (RECOMP_FCI_XBR_FOG_LOOKUP=0): build and composite here
+                    WaterHeight();
+                    Volume(c, s);
+                    Volfog(c, *scene_rt_, *scene_ds_);
+                    return Fog(c, *scene_rt_, *scene_ds_, true);   // sky only
+                }
                 return Fog(c, *scene_rt_, *scene_ds_);
+            }
         }
         return false;
     }
@@ -603,6 +839,14 @@ class FciExtension final : public gpu::Extension {
         post_state_ = shown.state;
         fmt = t.fmt;
         return post_.Get();
+    }
+
+    ID3D12Resource* Volume() override
+    {
+        if (fog_mode_ == 3 && fog_lookup_ && vol_ready_ && !vol_splitscreen_ && vol_int_
+            && vol_int_state_ == D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE)
+            return vol_int_.Get();
+        return nullptr;
     }
 
   private:
@@ -777,8 +1021,9 @@ class FciExtension final : public gpu::Extension {
             m[col][3] = r[3];
         }
         float px = m[0][0], py = m[1][1], pw = m[2][2];   // x from view x, y from view y, w from view z
-        bool ok = std::abs(px) > 1 && std::abs(py) > 1 && std::abs(pw) > 1 && std::abs(m[0][1]) < 1e-3f * std::abs(px)
-                  && std::abs(m[1][0]) < 1e-3f * std::abs(py) && std::abs(m[2][0]) < 1e-3f * std::abs(pw);
+        bool ok = std::abs(px) > 1 && std::abs(py) > 1 && std::abs(pw) > 1
+                  && std::abs(m[0][1]) < 1e-3f * std::abs(px) && std::abs(m[1][0]) < 1e-3f * std::abs(py)
+                  && std::abs(m[2][0]) < 1e-3f * std::abs(pw);
         if (!ok) {
             fog_tan_x_ = tan_x_, fog_tan_y_ = tan_y_, fog_zsign_ = 1, fog_wpm_frame_ = fog_wpm_;
             return;
@@ -796,17 +1041,19 @@ class FciExtension final : public gpu::Extension {
             out[r] = -(vm[12] * vm[r * 4] + vm[13] * vm[r * 4 + 1] + vm[14] * vm[r * 4 + 2]);
     }
 
-    // the post-pass fog: one full-screen pass over the scene, composited in place with c.Feedback
-    bool Fog(Context& c, Target& rt, Target& ds)
+    // the water height: the two cameras' mean, held when the reflection is skipped
+    void WaterHeight()
     {
-        // the reference height: the option, else the water (the two cameras' mean height), else the
-        // main camera's height
-        // the water height is kept: the game skips the reflection when no water is in view, and the fog
-        // must not jump to the camera then. Never seen: the first camera height, held
         if (refl_captured_)
             water_h_ = (cam_main_[2] + cam_refl_[2]) * 0.5f, water_seen_ = true;
         else if (!water_seen_)
             water_h_ = cam_main_[2], water_seen_ = true;
+    }
+
+    // the post-pass fog: one full-screen pass over the scene, composited in place with c.Feedback
+    bool Fog(Context& c, Target& rt, Target& ds, bool sky_only = false)
+    {
+        WaterHeight();
         float hw = water_h_;
         float h0 = fog_base_ >= 0 ? fog_base_ : hw;
         // the base density: 3 optical depths over the game's fog end, in metres
@@ -818,16 +1065,62 @@ class FciExtension final : public gpu::Extension {
         float scale = std::max(1.0f, fog_noise_scale_);
         float secs = float(GetTickCount64() % 3600000) * 0.001f;   // the noise drift; wraps hourly
         float sun = sun_seen_ ? fog_sun_ : 0.0f;
-        float p[56] = {1.0f / rt.w,      1.0f / rt.h, fog_tan_x_,  fog_tan_y_,      s0,          fog_floor_,
-                       fog_height_,      h0,          sun_dir_[0], sun_dir_[1], sun_dir_[2], sun,
-                       fog_col_[0],      fog_col_[1], fog_col_[2], fog_wpm_frame_,    view_[0],    view_[1],
-                       view_[2],         view_[3],    view_[4],    view_[5],    view_[6],    view_[7],
-                       view_[8],         view_[9],    view_[10],   view_[11],   fog_thick_,  fog_sky_,
-                       float(fog_mode_), hw,          fog_zsign_,  0,           0,           0,
-                       layer_s,          h0 + fog_layer_, soft,    secs,        fog_noise_,  scale,
-                       fog_far_,         0,           sun_col_[0], sun_col_[1], sun_col_[2], fog_tint_,
-                       fog_steps_,       fog_march_,  fog_cap_,    0,
-                       fog_glow_,        fog_wisp_,   fog_wisp_size_, fog_desat_};
+        float p[56] = {1.0f / rt.w,
+                       1.0f / rt.h,
+                       fog_tan_x_,
+                       fog_tan_y_,
+                       s0,
+                       fog_floor_,
+                       fog_height_,
+                       h0,
+                       sun_dir_[0],
+                       sun_dir_[1],
+                       sun_dir_[2],
+                       sun,
+                       fog_col_[0],
+                       fog_col_[1],
+                       fog_col_[2],
+                       fog_wpm_frame_,
+                       view_[0],
+                       view_[1],
+                       view_[2],
+                       view_[3],
+                       view_[4],
+                       view_[5],
+                       view_[6],
+                       view_[7],
+                       view_[8],
+                       view_[9],
+                       view_[10],
+                       view_[11],
+                       fog_thick_,
+                       fog_sky_,
+                       float(fog_mode_),
+                       hw,
+                       fog_zsign_,
+                       sky_only ? 1.0f : 0.0f,
+                       0,
+                       0,
+                       layer_s,
+                       h0 + fog_layer_,
+                       soft,
+                       secs,
+                       fog_noise_,
+                       scale,
+                       fog_far_,
+                       0,
+                       sun_col_[0],
+                       sun_col_[1],
+                       sun_col_[2],
+                       fog_tint_,
+                       fog_steps_,
+                       fog_march_,
+                       fog_cap_,
+                       0,
+                       fog_glow_,
+                       fog_wisp_,
+                       fog_wisp_size_,
+                       fog_desat_};
         c.Transition(ds.res.Get(), ds.state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         ID3D12Resource* fb = c.Feedback(rt);
         fog_done_ = true;
@@ -855,7 +1148,8 @@ class FciExtension final : public gpu::Extension {
             for (int axis = 0; axis < 2; axis++) {
                 int from = axis, to = 1 - axis;
                 p[48 + 3] = float(axis);   // p12.w: across, then down
-                c.Transition(glow_[from].Get(), glow_state_[from], D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                c.Transition(glow_[from].Get(), glow_state_[from],
+                             D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
                 c.Transition(glow_[to].Get(), glow_state_[to], D3D12_RESOURCE_STATE_RENDER_TARGET);
                 ID3D12Resource* bs[4] = {nullptr, glow_[from].Get(), nullptr, nullptr};
                 DXGI_FORMAT bf[4] = {kBgra, kBgra, kBgra, kBgra};
@@ -880,18 +1174,247 @@ class FciExtension final : public gpu::Extension {
         return true;
     }
 
+    bool EnsureVolumes(Context& c)
+    {
+        if (vols_ready_)
+            return true;
+        if (!EnsureHeap(c))
+            return false;
+        D3D12_HEAP_PROPERTIES hp{D3D12_HEAP_TYPE_DEFAULT};
+        D3D12_RESOURCE_DESC rd{};
+        rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE3D;
+        rd.Width = kVX;
+        rd.Height = kVY;
+        rd.DepthOrArraySize = kVZ;
+        rd.MipLevels = 1;
+        rd.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        rd.SampleDesc.Count = 1;
+        rd.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;   // each slice is drawn through its RTV
+        for (int i = 0; i < 3; i++) {
+            ComPtr<ID3D12Resource>& v = i == 0 ? vol_a_ : (i == 1 ? vol_b_ : vol_int_);
+            if (FAILED(c.Device()->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
+                                                           D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                                           IID_PPV_ARGS(&v)))) {
+                LOGE("fci volfog: the volume could not be made; mode 3 stays off");
+                fog_mode_ = 1;
+                return false;
+            }
+            for (int k = 0; k < kVZ; k++) {
+                D3D12_RENDER_TARGET_VIEW_DESC rv{};
+                rv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+                rv.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE3D;
+                rv.Texture3D.MipSlice = 0;
+                rv.Texture3D.FirstWSlice = k;
+                rv.Texture3D.WSize = 1;
+                c.Device()->CreateRenderTargetView(v.Get(), &rv, Rtv(6 + i * kVZ + k));
+            }
+        }
+        vol_a_state_ = D3D12_RESOURCE_STATE_COMMON;
+        vol_b_state_ = D3D12_RESOURCE_STATE_COMMON;
+        vol_int_state_ = D3D12_RESOURCE_STATE_COMMON;
+        vols_ready_ = true;
+        return true;
+    }
+
+    void Volume(Context& c, const State& s)
+    {
+        if (!EnsureVolumes(c))
+            return;
+        bool shadow = shadow_target_ && frame_ - shadow_frame_ <= 1;
+        // which accumulated volume this frame: ping-pong A/B
+        bool use_a = (vol_frame_ >= 0 && vol_frame_ % 2 == 0);
+        ComPtr<ID3D12Resource>& cur = use_a ? vol_a_ : vol_b_;
+        ComPtr<ID3D12Resource>& hist = use_a ? vol_b_ : vol_a_;
+        D3D12_RESOURCE_STATES& cur_st = use_a ? vol_a_state_ : vol_b_state_;
+        D3D12_RESOURCE_STATES& hist_st = use_a ? vol_b_state_ : vol_a_state_;
+        float p[96] = {};
+        // p[0]: tx, ty, tanx, tany
+        p[0] = 1.0f / kVX;
+        p[1] = 1.0f / kVY;
+        p[2] = fog_tan_x_;
+        p[3] = fog_tan_y_;
+        // p[1..3]: view rows
+        for (int i = 0; i < 12; i++)
+            p[4 + i] = view_[i];
+        // p[4]: s0, thick, wpm, zsign
+        float end_m = fog_end_w_ / fog_wpm_frame_;
+        float s0 = end_m > 0 ? 3.0f / end_m : 0.0f;
+        p[16] = s0;
+        p[17] = fog_thick_;
+        p[18] = fog_wpm_frame_;
+        p[19] = fog_zsign_;
+        // p[5]: sdir, sun_str
+        p[20] = sun_dir_[0];
+        p[21] = sun_dir_[1];
+        p[22] = sun_dir_[2];
+        p[23] = sun_seen_ ? fog_sun_ : 0.0f;
+        // p[6]: scol, tint
+        p[24] = sun_col_[0];
+        p[25] = sun_col_[1];
+        p[26] = sun_col_[2];
+        p[27] = fog_tint_;
+        // p[7]: dk, dxk, volw, volh (set per-slice below)
+        p[30] = kVX;
+        p[31] = kVY;
+        // p[8]: vold, time, near, far
+        float secs = float(GetTickCount64() % 3600000) * 0.001f;
+        p[32] = float(kVZ);
+        p[33] = secs;
+        p[34] = kNearM;
+        p[35] = kFarM;
+        // p[9]: shadow guest/host size
+        if (shadow) {
+            p[36] = float(shadow_target_->gw);
+            p[37] = float(shadow_target_->gh);
+            p[38] = float(shadow_target_->w);
+            p[39] = float(shadow_target_->h);
+            for (int i = 0; i < 16; i++)
+                p[40 + i] = shadow_mtx_[i];
+        }
+        // p[14..17]: last view rows (for reprojection)
+        for (int i = 0; i < 12; i++)
+            p[56 + i] = last_view_[i];
+        // p[18]: last_tanx, last_tany, last_zsign, have_history
+        p[72] = last_tan_x_;
+        p[73] = last_tan_y_;
+        p[74] = last_zsign_;
+        // history only from the frame just before: a frame without the volume (mode 1 or 2, a menu) breaks it
+        if (vol_built_frame_ + 1 != frame_)
+            have_history_ = false;
+        p[75] = have_history_ ? 1.0f : 0.0f;
+        // p[19]: h0, H, floor, 0
+        float hw = water_h_;
+        float h0 = fog_base_ >= 0 ? fog_base_ : hw;
+        p[76] = h0;
+        p[77] = fog_height_;
+        p[78] = fog_floor_;
+        // p[20]: layer_s, top, soft, 0
+        float layer_s = fog_layer_ > 0 && fog_layer_vis_ > 0 ? 3.0f / fog_layer_vis_ : 0.0f;
+        float soft = std::clamp(fog_layer_soft_, 0.1f, std::max(0.1f, fog_layer_));
+        p[80] = layer_s;
+        p[81] = h0 + fog_layer_;
+        p[82] = soft;
+        // p[21]: nscale, noise, 0, 0
+        p[84] = std::max(1.0f, fog_noise_scale_);
+        p[85] = fog_noise_;
+        p[86] = glow_[0] ? fog_glow_ : 0.0f;
+        p[92] = float(vol_frame_ & 1023);   // the jitter's frame index
+        // p[22]: fog colour
+        p[88] = fog_col_[0];
+        p[89] = fog_col_[1];
+        p[90] = fog_col_[2];
+        // inject per slice
+        c.Transition(hist.Get(), hist_st, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        hist_st = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        if (shadow)
+            c.Transition(shadow_target_->res.Get(), shadow_target_->state,
+                         D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        if (ring_)   // made by the first Fog(); until then FogCol reads a null view (no tint)
+            c.Transition(ring_.Get(), ring_state_, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        if (glow_[0])
+            c.Transition(glow_[0].Get(), glow_state_[0], D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        float ratio = kFarM / kNearM;
+        float step = powf(ratio, 1.0f / kVZ);
+        for (int k = 0; k < kVZ; k++) {
+            float dk = kNearM * powf(ratio, float(k) / kVZ);
+            float dxk = kNearM * powf(ratio, float(k + 1) / kVZ) - dk;
+            p[28] = dk;
+            p[29] = dxk;
+            c.Transition(cur.Get(), cur_st, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            ID3D12Resource* is[4]
+                    = {shadow ? shadow_target_->res.Get() : nullptr, hist.Get(), ring_.Get(), glow_[0].Get()};
+            DXGI_FORMAT ifm[4] = {shadow ? kDepthRead : DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_R16G16B16A16_FLOAT,
+                                  kBgra, kBgra};
+            c.Pass(kVolHlsl, "inject", DXGI_FORMAT_R16G16B16A16_FLOAT, Rtv(6 + (use_a ? 0 : kVZ) + k), kVX,
+                   kVY, is, ifm, p, 96, -1);
+            c.Transition(cur.Get(), cur_st, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            // integrate this slice: read from the current volume (just written), write to vol_int_
+            c.Transition(vol_int_.Get(), vol_int_state_, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            float ip[4] = {float(k), kNearM, step, 0};
+            ID3D12Resource* its[4] = {nullptr, cur.Get(), nullptr, nullptr};
+            DXGI_FORMAT itfm[4] = {DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_UNKNOWN,
+                                   DXGI_FORMAT_UNKNOWN};
+            c.Pass(kVolHlsl, "integ", DXGI_FORMAT_R16G16B16A16_FLOAT, Rtv(6 + 2 * kVZ + k), kVX, kVY, its,
+                   itfm, ip, 4, -1);
+        }
+        c.Transition(cur.Get(), cur_st, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        c.Transition(vol_int_.Get(), vol_int_state_, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        vol_frame_++;
+        // keep last frame's view for next frame's temporal; camera jump > 5 m: no history
+        float dx = view_[3] - last_view_[3], dy = view_[7] - last_view_[7], dz = view_[11] - last_view_[11];
+        bool jump = have_history_ && (dx * dx + dy * dy + dz * dz) > 25.0f;
+        for (int i = 0; i < 12; i++)
+            last_view_[i] = view_[i];
+        last_tan_x_ = fog_tan_x_;
+        last_tan_y_ = fog_tan_y_;
+        last_zsign_ = fog_zsign_;
+        have_history_ = !jump;
+        vol_built_frame_ = frame_;
+        c.Unbind();
+        if (!vol_logged_) {
+            vol_logged_ = true;
+            LOGI("fci volfog: %dx%dx%d, d %.1f-%.0f m, shadow %d", kVX, kVY, kVZ, kNearM, kFarM, int(shadow));
+        }
+    }
+
+    bool Volfog(Context& c, Target& rt, Target& ds)
+    {
+        float p[52] = {};
+        // p[0]: tx, ty, tanx, tany
+        p[0] = 1.0f / rt.w;
+        p[1] = 1.0f / rt.h;
+        p[2] = fog_tan_x_;
+        p[3] = fog_tan_y_;
+        // p[1..3]: view rows
+        for (int i = 0; i < 12; i++)
+            p[4 + i] = view_[i];
+        // p[4]: wpm, 0, 0, 0
+        p[16] = fog_wpm_frame_;
+        // p[7]: near, far, vold, 0
+        p[28] = kNearM;
+        p[29] = kFarM;
+        p[30] = float(kVZ);
+        // p[8]: glow_w, 0, 0, desat
+        p[32] = fog_glow_;
+        p[35] = fog_desat_;
+        // p[12]: zsign, 0, 0, 0
+        p[48] = fog_zsign_;
+        c.Transition(ds.res.Get(), ds.state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        if (glow_[0])   // last frame's glow (Fog() makes it after this pass)
+            c.Transition(glow_[0].Get(), glow_state_[0], D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        ID3D12Resource* fb = c.Feedback(rt);
+        if (!fb)
+            return true;
+        c.Transition(rt.res.Get(), rt.state, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        ID3D12Resource* fs[4] = {ds.res.Get(), vol_int_.Get(), fb, glow_[0].Get()};
+        DXGI_FORMAT ff[4] = {kDepthRead, DXGI_FORMAT_R16G16B16A16_FLOAT, rt.fmt, kBgra};
+        c.Pass(kVolHlsl, "volfog", rt.fmt, c.View(rt), rt.w, rt.h, fs, ff, p, 52, -1);
+        c.Unbind();
+        return true;
+    }
+
+    void Sampled(const gpu::TextureDesc& d, const Target* t, uint8_t, gpu::TexInfo&) override
+    {
+        if (!t)
+            return;
+        if (t->w == t->h && t->w >= kShadowMin && (d.format == 0x2C || d.format == 0x30)) {
+            shadow_target_ = const_cast<Target*>(t);
+            shadow_frame_ = frame_;
+        }
+    }
+
     uint32_t gen_ = 0;
     int ao_mode_ = 0, ao_at_ = 0, aa_mode_ = 0, shadow_filter_ = 0;
-    int fog_mode_ = 0;           // 0 off, 1 the fog, 2 the debug
+    int fog_mode_ = 0;           // 0 off, 1 the fog, 2 the debug, 3 the volume
     float fog_floor_ = 0.35f;    // a: the density floor
     float fog_height_ = 6.0f;    // H: the height scale, metres
     float fog_base_ = -1.0f;     // h0: the reference height, metres; -1 the water height
     float fog_sky_ = 0.2f;       // the sky fog's smoothstep knee
     float fog_wpm_ = 39475.0f;   // s: w-units per metre, when the projection is not found
     float fog_layer_ = 5.0f, fog_layer_vis_ = 40.0f, fog_layer_soft_ = 3.0f;   // the ground layer, metres
-    float fog_noise_ = 0.8f, fog_noise_scale_ = 25.0f, fog_far_ = 500.0f;     // its noise; the sky ray's length
+    float fog_noise_ = 0.8f, fog_noise_scale_ = 25.0f, fog_far_ = 500.0f;   // its noise; the sky ray's length
     float fog_wpm_frame_ = 39475.0f, fog_tan_x_ = 0.89f, fog_tan_y_ = 0.67f, fog_zsign_ = 1;   // this frame's
-    float shadow_scale_ = 0;     // 0: the render scale
+    float shadow_scale_ = 0;   // 0: the render scale
     static constexpr uint32_t kShadowMin = 512;
     FciShaderHooks hooks_;
     float ao_strength_ = 1, ao_radius_ = 1;
@@ -912,27 +1435,47 @@ class FciExtension final : public gpu::Extension {
     bool refl_captured_ = false;   // the reflection camera is set
     bool fog_done_ = false;        // the fog ran this frame
     bool fog_logged_ = false;
-    float fog_end_w_ = 0;                     // the fog register's end, w-units
-    float fog_thick_ = 0;                     // the fog register's thickness
-    float fog_col_[3] = {0, 0, 0};            // the game's fog colour
-    float view_[12] = {};                     // the main view rows 0..2 (world to view, metres)
-    float cam_main_[3] = {0, 0, 0};           // the main camera, world metres
-    float cam_refl_[3] = {0, 0, 0};           // the reflection camera, world metres
-    float sun_dir_[3] = {0, 0, 1};            // toward the sun, world (Evolution's c186)
-    float sun_col_[3] = {0, 0, 0};            // the sun's colour (c189)
-    float water_h_ = 0;                       // the fog's base: the last water height seen, metres
+    float fog_end_w_ = 0;             // the fog register's end, w-units
+    float fog_thick_ = 0;             // the fog register's thickness
+    float fog_col_[3] = {0, 0, 0};    // the game's fog colour
+    float view_[12] = {};             // the main view rows 0..2 (world to view, metres)
+    float cam_main_[3] = {0, 0, 0};   // the main camera, world metres
+    float cam_refl_[3] = {0, 0, 0};   // the reflection camera, world metres
+    float sun_dir_[3] = {0, 0, 1};    // toward the sun, world (Evolution's c186)
+    float sun_col_[3] = {0, 0, 0};    // the sun's colour (c189)
+    float water_h_ = 0;               // the fog's base: the last water height seen, metres
     bool water_seen_ = false;
-    bool sun_seen_ = false;                   // a sun was found in some frame
-    float fog_sun_ = 0.6f, fog_tint_ = 1.0f;  // the glow's strength; how much the fog takes the sky's colour
-    float fog_steps_ = 16, fog_march_ = 150;  // the layer's march: steps and metres (0 steps: closed form)
-    float fog_cap_ = 0;                       // 1: thickness caps the opacity, as the game
-    ComPtr<ID3D12Resource> ring_;             // the horizon colour per azimuth, 64 x 1, kept across frames
+    bool sun_seen_ = false;                    // a sun was found in some frame
+    float fog_sun_ = 0.6f, fog_tint_ = 1.0f;   // the glow's strength; how much the fog takes the sky's colour
+    float fog_steps_ = 16, fog_march_ = 150;   // the layer's march: steps and metres (0 steps: closed form)
+    float fog_cap_ = 0;                        // 1: thickness caps the opacity, as the game
+    ComPtr<ID3D12Resource> ring_;              // the horizon colour per azimuth, 64 x 1, kept across frames
     D3D12_RESOURCE_STATES ring_state_ = D3D12_RESOURCE_STATE_RENDER_TARGET;
-    ComPtr<ID3D12Resource> glow_[2];          // the scene's bright parts, blurred: the light in the fog
+    ComPtr<ID3D12Resource> glow_[2];   // the scene's bright parts, blurred: the light in the fog
     D3D12_RESOURCE_STATES glow_state_[2]{};
-    float fog_glow_ = 0.5f, fog_wisp_ = 0.6f, fog_wisp_size_ = 4.0f, fog_desat_ = 0.35f;   // the fog's additions
-    static constexpr UINT kRtvSlots = 6;      // the occlusion and its blur, the anti-aliased picture, the fog ring,
-                                              // the glow's two targets
+    float fog_glow_ = 0.5f, fog_wisp_ = 0.6f, fog_wisp_size_ = 4.0f,
+          fog_desat_ = 0.35f;                       // the fog's additions
+    bool fog_lookup_ = true;                        // true: in-shader lookup, false: post-pass
+    static constexpr UINT kRtvSlots = 6 + 3 * 64;   // AO(2), post, ring, glow(2), then 3 volume x 64 slices
+                                                    // the glow's two targets
+    // volume fog (mode 3)
+    ComPtr<ID3D12Resource> vol_a_, vol_b_, vol_int_;
+    D3D12_RESOURCE_STATES vol_a_state_{}, vol_b_state_{}, vol_int_state_{};
+    bool vols_ready_ = false;
+    bool vol_ready_ = false;         // the volume was built this frame (for the in-shader lookup)
+    bool vol_splitscreen_ = false;   // splitscreen detected: in-shader lookup off for the frame
+    int vol_frame_ = -1;
+    float last_view_[12] = {};
+    float last_tan_x_ = 0.89f, last_tan_y_ = 0.67f, last_zsign_ = 1;
+    bool have_history_ = false;
+    uint64_t vol_built_frame_ = ~0ull - 1;   // the frame the volume was last built
+    Target* shadow_target_ = nullptr;
+    uint64_t shadow_frame_ = 0;
+    float shadow_mtx_[16] = {};
+    bool vol_logged_ = false;
+    bool vol_glow_logged_ = false;   // the in-shader route was logged
+    static constexpr int kVX = 128, kVY = 72, kVZ = 64;
+    static constexpr float kNearM = 0.5f, kFarM = 500.0f;
 };
 
 // before the backend is made (d3d8.cpp makes it at CreateDevice): g_extension is constant initialised

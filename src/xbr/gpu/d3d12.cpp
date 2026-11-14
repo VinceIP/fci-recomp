@@ -1020,9 +1020,9 @@ void D3D12Backend::CreateHeaps() {
 bool D3D12Backend::CreateRootSignature() {
     D3D12_DESCRIPTOR_RANGE ranges[2] = {};
     ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    ranges[0].NumDescriptors = 4;
+    ranges[0].NumDescriptors = 5;
     ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
-    ranges[1].NumDescriptors = 4;
+    ranges[1].NumDescriptors = 5;
     D3D12_ROOT_PARAMETER params[4] = {};
     params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
     params[0].Descriptor.ShaderRegister = 0;
@@ -1708,13 +1708,13 @@ uint32_t D3D12Backend::EnsureBlitSamplers() {
     auto it = samplers_.find(key);
     uint32_t si;
     if (it == samplers_.end()) {
-        if (smp_used_ + 4 > kSamplerCount) {
+        if (smp_used_ + 5 > kSamplerCount) {
             samplers_.clear();
             smp_used_ = 0;
         }
         si = smp_used_;
-        smp_used_ += 4;
-        for (int i = 0; i < 4; i++) {
+        smp_used_ += 5;  // FCI: the root table has 5 (s4: the volume fog's)
+        for (int i = 0; i < 5; i++) {
             D3D12_SAMPLER_DESC sd{};
             sd.Filter = i == 0 ? D3D12_FILTER_MIN_MAG_MIP_LINEAR : D3D12_FILTER_MIN_MAG_MIP_POINT;
             sd.AddressU = sd.AddressV = sd.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
@@ -1795,7 +1795,7 @@ ID3DBlob* D3D12Backend::Compile(const std::string& src, const char* entry, const
 namespace {
 constexpr char kShaderCacheMagic[8] = {'F', 'C', 'I', 'S', 'H', 'D', '0', '1'};
 // D3DCompile's flags and the record layout: a change makes the old file unusable, and it is started again
-constexpr uint64_t kShaderCacheSalt = D3DCOMPILE_OPTIMIZATION_LEVEL1 | 1ull << 32;
+constexpr uint64_t kShaderCacheSalt = D3DCOMPILE_OPTIMIZATION_LEVEL1 | 2ull << 32;
 struct ShaderRecord {
     uint64_t hash;
     uint64_t check;
@@ -1931,17 +1931,28 @@ void D3D12Backend::Pass(const char* hlsl, const char* entry, DXGI_FORMAT rtv, D3
                         const float* p, size_t n, float blend) {
     ID3D12PipelineState* pso = EnsurePassPipeline(hlsl, entry, rtv, blend);
     if (!pso) return;
-    uint32_t slot = AllocSrvSlots(4);
+    uint32_t slot = AllocSrvSlots(5);
     for (int i = 0; i < 4; i++) {
         D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
         sv.Format = src[i] ? fmt[i] : kBgra;
-        sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        if (src[i] && src[i]->GetDesc().Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D) {
+            sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
+            sv.Texture3D.MipLevels = 1;
+        } else {
+            sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+            sv.Texture2D.MipLevels = 1;
+        }
         sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        sv.Texture2D.MipLevels = 1;
         dev_->CreateShaderResourceView(src[i], &sv, Cpu(srv_heap_.Get(), slot + i, srv_inc_));
     }
-    Alloc cb = Upload(256, 256);
-    std::memcpy(cb.cpu, p, std::min(n, size_t(64)) * sizeof(float));
+    D3D12_SHADER_RESOURCE_VIEW_DESC sv5{};
+    sv5.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    sv5.Format = kBgra;
+    sv5.Texture2D.MipLevels = 1;
+    sv5.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    dev_->CreateShaderResourceView(nullptr, &sv5, Cpu(srv_heap_.Get(), slot + 4, srv_inc_));
+    Alloc cb = Upload(512, 256);
+    std::memcpy(cb.cpu, p, std::min(n, size_t(128)) * sizeof(float));
     cl_->OMSetRenderTargets(1, &rh, FALSE, nullptr);
     SetFullViewport(w, h);
     if (blend >= 0) {
@@ -2330,19 +2341,23 @@ D3D12_SAMPLER_DESC StageSampler(const State& s, int i, const DrawTextures& stage
 }
 
 uint32_t D3D12Backend::EnsureStageSamplers(const State& s, const DrawTextures& stages, bool clamp) {
-    D3D12_SAMPLER_DESC sd[4];
+    D3D12_SAMPLER_DESC sd[5];
     uint32_t aniso = app::Get().aniso;
     for (int i = 0; i < 4; i++) sd[i] = StageSampler(s, i, stages, clamp, aniso);
+    sd[4] = {};
+    sd[4].Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    sd[4].AddressU = sd[4].AddressV = sd[4].AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    sd[4].MaxLOD = D3D12_FLOAT32_MAX;
     uint64_t key = Hash(sd, sizeof(sd));
     auto it = samplers_.find(key);
     if (it != samplers_.end()) return it->second;
-    if (smp_used_ + 4 > kSamplerCount) {
+    if (smp_used_ + 5 > kSamplerCount) {
         samplers_.clear();
         smp_used_ = 0;
     }
     uint32_t base = smp_used_;
-    smp_used_ += 4;
-    for (int i = 0; i < 4; i++) dev_->CreateSampler(&sd[i], Cpu(smp_heap_.Get(), base + i, smp_inc_));
+    smp_used_ += 5;
+    for (int i = 0; i < 5; i++) dev_->CreateSampler(&sd[i], Cpu(smp_heap_.Get(), base + i, smp_inc_));
     samplers_[key] = base;
     return base;
 }
@@ -2700,7 +2715,7 @@ void D3D12Backend::UploadConstants(const State& s, const DrawShaders& sh, const 
     FillFogConstants(s, sh.prog, c);
     std::memcpy(c.wbuf, wbuf_, sizeof(c.wbuf));
     FillCombinerConstants(s, c);
-    if (ext_) ext_->Constants(reinterpret_cast<float(*)[4]>(vc.cpu), c.ext, bound_rt_, k.blend ? k.src : 1);
+    if (ext_) ext_->Constants(reinterpret_cast<float(*)[4]>(vc.cpu), c.ext, c.vol, c.volsize, bound_rt_, k.blend ? k.src : 1, k.blend ? k.dst : 0);
     FillTextureConstants(s, stages, c);
     if (sh.fixed_transform) {
         FillTransformConstants(s, size, c);
@@ -2875,7 +2890,7 @@ bool UnitTexcoords(const Assembled& a) {
 
 // a stage without a texture gets a null view of its kind; the samplers read the views after
 void D3D12Backend::SetTextureViewsAndSamplers(const State& s, const Assembled& a, DrawTextures& stages) {
-    uint32_t slot = AllocSrvSlots(4);
+    uint32_t slot = AllocSrvSlots(5);
     for (int i = 0; i < 4; i++) {
         D3D12_SHADER_RESOURCE_VIEW_DESC& sv = stages.sv[i];
         if (!stages.res[i]) {
@@ -2884,6 +2899,13 @@ void D3D12Backend::SetTextureViewsAndSamplers(const State& s, const Assembled& a
         }
         dev_->CreateShaderResourceView(stages.res[i], &sv, Cpu(srv_heap_.Get(), slot + i, srv_inc_));
     }
+    ID3D12Resource* vol = ext_ ? ext_->Volume() : nullptr;
+    D3D12_SHADER_RESOURCE_VIEW_DESC sv5{};
+    sv5.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
+    sv5.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    sv5.Texture3D.MipLevels = 1;
+    sv5.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    dev_->CreateShaderResourceView(vol, &sv5, Cpu(srv_heap_.Get(), slot + 4, srv_inc_));
     cl_->SetGraphicsRootDescriptorTable(2, Gpu(srv_heap_.Get(), slot, srv_inc_));
     uint32_t samplers = EnsureStageSamplers(s, stages, UnitTexcoords(a));
     cl_->SetGraphicsRootDescriptorTable(3, Gpu(smp_heap_.Get(), samplers, smp_inc_));

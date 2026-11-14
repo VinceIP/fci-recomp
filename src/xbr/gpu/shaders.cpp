@@ -51,7 +51,9 @@ cbuffer DC : register(b1) {
     float4 bumplum[4];
     float4x4 wvp;
 )";
-const char* kCommonTail = R"(    float4 spread[4];
+const char* kCommonTail = R"(    float4 vol;
+    float4 volsize;
+    float4 spread[4];
     float4x4 wv;
     float4x4 wvn;
     float4x4 tm[4];
@@ -849,6 +851,7 @@ std::string PixelHlsl(const PixelKey& k) {
         const char* type = t.shadow ? "Texture2D<float>" : t.kind == kTex3D ? "Texture3D" : t.kind == kTexCube ? "TextureCube" : "Texture2D";
         s += F("%s tex%d : register(t%d);\n%s smp%d : register(s%d);\n", type, i, i, t.shadow ? "SamplerComparisonState" : "SamplerState", i, i);
     }
+    s += "Texture3D<float4> fogvol : register(t4);\nSamplerState fogsmp : register(s4);\n";
     s += k.wbuf ? F("float4 main(VOut i, bool front : SV_IsFrontFace, out float odep : SV_Depth) : SV_Target {\n")
                 : F("float4 main(VOut i, bool front : SV_IsFrontFace) : SV_Target {\n");
     // FCI: NV2A W-buffering stores w (the title scales it to the depth range) rather than z / w; offsets are
@@ -930,6 +933,19 @@ std::string PixelHlsl(const PixelKey& k) {
     // FCI diagnostic XBE_PS_SHOW=v1: programmable combiners output their interpolated v1 (g, b, a as r, g, b)
     if (k.programmable && std::getenv("XBE_PS_SHOW") && !std::strcmp(std::getenv("XBE_PS_SHOW"), "v1"))
         body += "outc = float4(v1.g, v1.b, v1.a, 1);\n";
+    // FCI volume fog: sample the integrated volume at the pixel's depth
+    body += R"(    if (ext.z > 0.5 && wbuf.x != 0) {
+        float d = i.wdep * vol.w;
+        float kf = vol.z * log(max(d, vol.x) / vol.x) * vol.y;
+        float w = saturate((kf - 0.5) / vol.z);
+        float2 uv = i.pos.xy / volsize.xy;
+        float4 v = fogvol.SampleLevel(fogsmp, float3(uv, w), 0);
+        float3 cs = lerp(outc.rgb, dot(outc.rgb, float3(0.299, 0.587, 0.114)).xxx, (1.0 - v.a) * ext.w);
+        outc.rgb = ext.z > 3.5 ? lerp(ext.z > 4.5 ? 0.5 : 1.0, outc.rgb, v.a)
+                 : ext.z > 2.5 ? cs * v.a + v.rgb * outc.a
+                 : ext.z > 1.5 ? cs * v.a : cs * v.a + v.rgb;
+    }
+)";
     body += "alphatest(outc.a);\n" + Hooks().Output() + "return outc;\n}\n";
     s += body;
     return k.quad ? QuadHlsl(std::move(s)) : s;
