@@ -509,7 +509,7 @@ private:
     }
     // Pass, then its step
     void Pass(const char* hlsl, const char* entry, DXGI_FORMAT rtv, D3D12_CPU_DESCRIPTOR_HANDLE rh, uint32_t w,
-              uint32_t h, ID3D12Resource* const src[3], const DXGI_FORMAT fmt[3], const float* p, size_t n,
+              uint32_t h, ID3D12Resource* const src[4], const DXGI_FORMAT fmt[4], const float* p, size_t n,
               float blend) override;
     ID3D12PipelineState* EnsurePassPipeline(const char* hlsl, const char* entry, DXGI_FORMAT rtv, float blend);
     // Draw, in call order, each callee right after its caller
@@ -1927,18 +1927,18 @@ ID3D12PipelineState* D3D12Backend::EnsurePassPipeline(const char* hlsl, const ch
 }
 
 void D3D12Backend::Pass(const char* hlsl, const char* entry, DXGI_FORMAT rtv, D3D12_CPU_DESCRIPTOR_HANDLE rh,
-                        uint32_t w, uint32_t h, ID3D12Resource* const src[3], const DXGI_FORMAT fmt[3],
+                        uint32_t w, uint32_t h, ID3D12Resource* const src[4], const DXGI_FORMAT fmt[4],
                         const float* p, size_t n, float blend) {
     ID3D12PipelineState* pso = EnsurePassPipeline(hlsl, entry, rtv, blend);
     if (!pso) return;
     uint32_t slot = AllocSrvSlots(4);
     for (int i = 0; i < 4; i++) {
         D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
-        sv.Format = i < 3 && src[i] ? fmt[i] : kBgra;
+        sv.Format = src[i] ? fmt[i] : kBgra;
         sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
         sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         sv.Texture2D.MipLevels = 1;
-        dev_->CreateShaderResourceView(i < 3 ? src[i] : nullptr, &sv, Cpu(srv_heap_.Get(), slot + i, srv_inc_));
+        dev_->CreateShaderResourceView(src[i], &sv, Cpu(srv_heap_.Get(), slot + i, srv_inc_));
     }
     Alloc cb = Upload(256, 256);
     std::memcpy(cb.cpu, p, std::min(n, size_t(64)) * sizeof(float));

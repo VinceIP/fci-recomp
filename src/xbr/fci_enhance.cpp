@@ -215,12 +215,13 @@ float4 aa(O i) : SV_Target {
 // p3 = (fog_col, w-units/metre); p4..p6 the view rows (world to view, translation in .w);
 // p7 = (thickness, sky knee, mode, water_h); p8 = (view z sign, -, -, -); p9 = (layer density, layer top,
 // soft, seconds); p10 = (noise, noise size m, sky ray m, -); p11 = (sun colour, sky tint);
-// p12 = (march steps, march metres, -, -)
+// p12 = (march steps, march metres, cap, glow blur axis); p13 = (glow, wisp strength, wisp size m, desaturate)
 const char* kFogHlsl = R"(
-cbuffer P : register(b1) { float4 p0; float4 p1; float4 p2; float4 p3; float4 p4; float4 p5; float4 p6; float4 p7; float4 p8; float4 p9; float4 p10; float4 p11; float4 p12; };
+cbuffer P : register(b1) { float4 p0; float4 p1; float4 p2; float4 p3; float4 p4; float4 p5; float4 p6; float4 p7; float4 p8; float4 p9; float4 p10; float4 p11; float4 p12; float4 p13; };
 Texture2D dep  : register(t0);   // the W-buffer depth (0..1 in .r)
-Texture2D colr : register(t1);   // the scene colour
+Texture2D colr : register(t1);   // the scene colour (the glow's blurred texture in the glow passes)
 Texture2D ring : register(t2);   // the horizon colour per azimuth, 64 x 1
+Texture2D glow : register(t3);   // the blurred bright parts, an eighth of the scene
 SamplerState sr : register(s0);
 struct O { float4 p : SV_Position; float2 uv : TEXCOORD0; };
 O vs(uint id : SV_VertexID) {
@@ -303,10 +304,52 @@ float G(float h) {
     float b = p9.y - p9.z, a = clamp(h - b, 0.0, p9.z);
     return min(h, b) + a - a * a / (2.0 * p9.z);
 }
+// wisps: fine drifting mist near the camera, world-anchored so it moves past as the player walks;
+// 4 slices along the ray, skipped past the pixel's distance (sky: none skipped)
+float Wisps(float3 cam, float3 rd, float dist) {
+    const float ds[4] = {2.5, 5.0, 8.5, 13.0};
+    const float ls[4] = {2.5, 3.0, 3.5, 4.5};
+    float tau = 0;
+    [unroll] for (int s = 0; s < 4; s++) {
+        if (ds[s] > dist) continue;
+        float3 q = cam + rd * ds[s];
+        float dens = p1.x * (p1.y + (1.0 - p1.y) * exp(-(q.z - p1.w) / p1.z))
+                     + p9.x * saturate((p9.y - q.z) / p9.z);
+        float3 nq = q / p13.z + p9.w * float3(0.12, 0.07, 0.03);
+        float n = 0.65 * VN3(nq) + 0.35 * VN3(nq * 2.13 + 5.2);
+        tau += p13.y * dens * saturate((n - 0.45) * 3.0) * ls[s] * 3.0;
+    }
+    return tau;
+}
 float LayerMean(float3 a, float3 b) {   // the closed form with the mean density
     float dh = b.z - a.z;
     float avg = abs(dh) < 1e-3 ? saturate((p9.y - a.z) / p9.z) : (G(b.z) - G(a.z)) / dh;
     return p9.x * length(b - a) * avg;
+}
+// glowdown: the scene's bright parts into an eighth: 4 bilinear taps at the 8 x 8 block's quadrant
+// centres, each weighted by how bright it is, so only the bright sky and the sun get through
+float4 glowdown(O i) : SV_Target {
+    float2 c = i.uv;   // the block centre: the same normalised position in the scene
+    float2 o = 2.0 * p0.xy;
+    float3 acc = 0;
+    [unroll] for (int j = 0; j < 4; j++) {
+        float2 uv = c + float2((j & 1) * 2.0 - 1.0, (j >> 1) * 2.0 - 1.0) * o;
+        float3 col = colr.SampleLevel(sr, uv, 0).rgb;
+        acc += col * smoothstep(0.55, 1.0, dot(col, float3(0.299, 0.587, 0.114)));
+    }
+    return float4(acc * 0.25, 1.0);   // the mean over the block: a dim tap adds little
+}
+// glowblur: a 9-tap Gaussian, sigma 2.5 texels, across the glow; p12.w 0: across, 1: down
+float4 glowblur(O i) : SV_Target {
+    float2 st = (p12.w > 0.5 ? float2(1.0, 0.0) : float2(0.0, 1.0)) * 8.0 * p0.xy;   // one glow texel
+    float3 acc = 0;
+    float wsum = 0;
+    [unroll] for (int k = -4; k <= 4; k++) {
+        float wgt = exp(-k * k * 0.08);
+        acc += colr.SampleLevel(sr, i.uv + k * st, 0).rgb * wgt;
+        wsum += wgt;
+    }
+    return float4(acc / wsum, 1.0);
 }
 // the ground layer's optical depth from a to b: marched through the noise for the near in-layer part
 // (p12.y metres, p12.x steps, jittered per pixel), the closed form beyond
@@ -354,16 +397,21 @@ float4 fog(O i) : SV_Target {
     float eu = exp(-(cam.z - p1.w) / p1.z);
     if (Sky(d)) {   // the sky: what a level ray gets at the sky ray's length, faded upward; then the layer
         float f = Amount(p1.x * p10.z * (p1.y + (1.0 - p1.y) * eu)) * (1.0 - smoothstep(0.0, p7.y, rd.z));
-        float fl = Amount(Layer(cam, cam + rd * p10.z, jit));
-        return float4(lerp(c.rgb, fc, 1.0 - (1.0 - f) * (1.0 - fl)), c.a);
+        float fl = Amount(Layer(cam, cam + rd * p10.z, jit) + Wisps(cam, rd, p10.z));
+        float amount = 1.0 - (1.0 - f) * (1.0 - fl);
+        fc += glow.SampleLevel(sr, uv, 0).rgb * p13.x * amount;   // bright sky and the sun, scattered in the fog
+        return float4(lerp(c.rgb, fc, amount), c.a);
     }
     float3 Pvm = dir * (d * 16777215.0 / p3.w);   // metres
     float3 Pw = World(Pvm);
     // the height fog's optical depth, integrated along the ray in closed form
     float k = (Pw.z - cam.z) / p1.z;
     float g = abs(k) < 1e-4 ? eu : eu * (1.0 - exp(-k)) / k;
-    float tau = p1.x * length(Pvm) * (p1.y + (1.0 - p1.y) * g) + Layer(cam, Pw, jit);
-    return float4(lerp(c.rgb, fc, Amount(tau)), c.a);
+    float tau = p1.x * length(Pvm) * (p1.y + (1.0 - p1.y) * g) + Layer(cam, Pw, jit) + Wisps(cam, rd, length(Pvm));
+    float amount = Amount(tau);
+    c.rgb = lerp(c.rgb, dot(c.rgb, float3(0.299, 0.587, 0.114)).xxx, p13.w * amount);   // far: no colour left
+    fc += glow.SampleLevel(sr, uv, 0).rgb * p13.x * amount;
+    return float4(lerp(c.rgb, fc, amount), c.a);
 }
 )";
 
@@ -422,6 +470,10 @@ class FciExtension final : public gpu::Extension {
         fog_steps_ = std::clamp(std::floor(fci_gfx::Number("RECOMP_FCI_XBR_FOG_STEPS", 16)), 0.0f, 64.0f);
         fog_march_ = std::max(1.0f, fci_gfx::Number("RECOMP_FCI_XBR_FOG_MARCH", 150));
         fog_cap_ = fci_gfx::Number("RECOMP_FCI_XBR_FOG_CAP", 0) > 0.5f ? 1.0f : 0.0f;
+        fog_glow_ = fci_gfx::Number("RECOMP_FCI_XBR_FOG_GLOW", 0.5f);
+        fog_wisp_ = fci_gfx::Number("RECOMP_FCI_XBR_FOG_WISPS", 0.6f);
+        fog_wisp_size_ = std::max(0.5f, fci_gfx::Number("RECOMP_FCI_XBR_FOG_WISP_SIZE", 4.0f));
+        fog_desat_ = fci_gfx::Number("RECOMP_FCI_XBR_FOG_DESAT", 0.35f);
         return remake;   // the shadow map is made again at its new size
     }
 
@@ -535,8 +587,8 @@ class FciExtension final : public gpu::Extension {
             return nullptr;
         c.Transition(t.res.Get(), t.state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         c.Transition(post_.Get(), post_state_, D3D12_RESOURCE_STATE_RENDER_TARGET);
-        ID3D12Resource* src[3] = {t.res.Get(), nullptr, nullptr};
-        DXGI_FORMAT sf[3] = {t.fmt, kBgra, kBgra};
+        ID3D12Resource* src[4] = {t.res.Get(), nullptr, nullptr, nullptr};
+        DXGI_FORMAT sf[4] = {t.fmt, kBgra, kBgra, kBgra};
         float p[8] = {1.0f / t.w, 1.0f / t.h, 0, 0, float(aa_mode_)};
         c.Pass(kAaHlsl, "aa", t.fmt, Rtv(2), t.w, t.h, src, sf, p, 8, -1);
         c.Unbind();
@@ -620,8 +672,8 @@ class FciExtension final : public gpu::Extension {
         float radius = ao_radius_ * kDepthPerMetre;
         c.Transition(ds.res.Get(), ds.state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         c.Transition(ao_[0].Get(), ao_state_[0], D3D12_RESOURCE_STATE_RENDER_TARGET);
-        ID3D12Resource* src[3] = {ds.res.Get(), nullptr, nullptr};
-        DXGI_FORMAT fmt[3] = {kDepthRead, kBgra, kBgra};
+        ID3D12Resource* src[4] = {ds.res.Get(), nullptr, nullptr, nullptr};
+        DXGI_FORMAT fmt[4] = {kDepthRead, kBgra, kBgra, kBgra};
         // fades out from 80 to 200 metres, into FCI's fog
         float p[8] = {1.0f / w,
                       1.0f / h,
@@ -636,8 +688,8 @@ class FciExtension final : public gpu::Extension {
             int from = axis, to = 1 - axis;
             c.Transition(ao_[from].Get(), ao_state_[from], D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
             c.Transition(ao_[to].Get(), ao_state_[to], D3D12_RESOURCE_STATE_RENDER_TARGET);
-            ID3D12Resource* bs[3] = {ao_[from].Get(), nullptr, nullptr};
-            DXGI_FORMAT bf[3] = {kAoFormat, kBgra, kBgra};
+            ID3D12Resource* bs[4] = {ao_[from].Get(), nullptr, nullptr, nullptr};
+            DXGI_FORMAT bf[4] = {kAoFormat, kBgra, kBgra, kBgra};
             float bp[8] = {axis == 0 ? 1.0f / w : 0.0f, axis == 1 ? 1.0f / h : 0.0f};
             c.Pass(kAoHlsl, "blur", kAoFormat, Rtv(to), w, h, bs, bf, bp, 8, -1);
         }
@@ -646,8 +698,8 @@ class FciExtension final : public gpu::Extension {
         if (!fb)
             return true;
         c.Transition(rt.res.Get(), rt.state, D3D12_RESOURCE_STATE_RENDER_TARGET);
-        ID3D12Resource* as[3] = {fb, ao_[0].Get(), nullptr};
-        DXGI_FORMAT af[3] = {rt.fmt, kAoFormat, kBgra};
+        ID3D12Resource* as[4] = {fb, ao_[0].Get(), nullptr, nullptr};
+        DXGI_FORMAT af[4] = {rt.fmt, kAoFormat, kBgra, kBgra};
         float ap[8] = {float(ao_mode_)};
         c.Pass(kAoHlsl, "apply", rt.fmt, c.View(rt), w, h, as, af, ap, 8, -1);
         c.Unbind();
@@ -766,7 +818,7 @@ class FciExtension final : public gpu::Extension {
         float scale = std::max(1.0f, fog_noise_scale_);
         float secs = float(GetTickCount64() % 3600000) * 0.001f;   // the noise drift; wraps hourly
         float sun = sun_seen_ ? fog_sun_ : 0.0f;
-        float p[52] = {1.0f / rt.w,      1.0f / rt.h, fog_tan_x_,  fog_tan_y_,      s0,          fog_floor_,
+        float p[56] = {1.0f / rt.w,      1.0f / rt.h, fog_tan_x_,  fog_tan_y_,      s0,          fog_floor_,
                        fog_height_,      h0,          sun_dir_[0], sun_dir_[1], sun_dir_[2], sun,
                        fog_col_[0],      fog_col_[1], fog_col_[2], fog_wpm_frame_,    view_[0],    view_[1],
                        view_[2],         view_[3],    view_[4],    view_[5],    view_[6],    view_[7],
@@ -774,24 +826,48 @@ class FciExtension final : public gpu::Extension {
                        float(fog_mode_), hw,          fog_zsign_,  0,           0,           0,
                        layer_s,          h0 + fog_layer_, soft,    secs,        fog_noise_,  scale,
                        fog_far_,         0,           sun_col_[0], sun_col_[1], sun_col_[2], fog_tint_,
-                       fog_steps_,       fog_march_,  fog_cap_,    0};
+                       fog_steps_,       fog_march_,  fog_cap_,    0,
+                       fog_glow_,        fog_wisp_,   fog_wisp_size_, fog_desat_};
         c.Transition(ds.res.Get(), ds.state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         ID3D12Resource* fb = c.Feedback(rt);
         fog_done_ = true;
         bool fresh = !ring_;
         if (!fb || !EnsureTexture(c, ring_, ring_state_, 64, 1, kBgra, 3))
             return true;
+        uint32_t gw = (rt.w + 7) / 8, gh = (rt.h + 7) / 8;   // the glow, an eighth of the scene
+        if (fog_glow_ > 0
+            && (!EnsureTexture(c, glow_[0], glow_state_[0], gw, gh, kBgra, 4)
+                || !EnsureTexture(c, glow_[1], glow_state_[1], gw, gh, kBgra, 5)))
+            return true;
         // the sky's horizon colours: seeded with the fog colour, then a running mean of what is visible
-        ID3D12Resource* fs[3] = {ds.res.Get(), fb, nullptr};
-        DXGI_FORMAT ff[3] = {kDepthRead, rt.fmt, kBgra};
+        ID3D12Resource* fs[4] = {ds.res.Get(), fb, nullptr, nullptr};
+        DXGI_FORMAT ff[4] = {kDepthRead, rt.fmt, kBgra, kBgra};
         c.Transition(ring_.Get(), ring_state_, D3D12_RESOURCE_STATE_RENDER_TARGET);
         if (fresh)
-            c.Pass(kFogHlsl, "ringinit", kBgra, Rtv(3), 64, 1, fs, ff, p, 52, -1);
-        c.Pass(kFogHlsl, "ringp", kBgra, Rtv(3), 64, 1, fs, ff, p, 52, 0.1f);
+            c.Pass(kFogHlsl, "ringinit", kBgra, Rtv(3), 64, 1, fs, ff, p, 56, -1);
+        c.Pass(kFogHlsl, "ringp", kBgra, Rtv(3), 64, 1, fs, ff, p, 56, 0.1f);
         c.Transition(ring_.Get(), ring_state_, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        if (fog_glow_ > 0) {   // the bright parts, down an eighth and blurred: the light in the fog
+            ID3D12Resource* gs[4] = {nullptr, fb, nullptr, nullptr};
+            DXGI_FORMAT gf[4] = {kBgra, rt.fmt, kBgra, kBgra};
+            c.Transition(glow_[0].Get(), glow_state_[0], D3D12_RESOURCE_STATE_RENDER_TARGET);
+            c.Pass(kFogHlsl, "glowdown", kBgra, Rtv(4), gw, gh, gs, gf, p, 56, -1);
+            for (int axis = 0; axis < 2; axis++) {
+                int from = axis, to = 1 - axis;
+                p[48 + 3] = float(axis);   // p12.w: across, then down
+                c.Transition(glow_[from].Get(), glow_state_[from], D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                c.Transition(glow_[to].Get(), glow_state_[to], D3D12_RESOURCE_STATE_RENDER_TARGET);
+                ID3D12Resource* bs[4] = {nullptr, glow_[from].Get(), nullptr, nullptr};
+                DXGI_FORMAT bf[4] = {kBgra, kBgra, kBgra, kBgra};
+                c.Pass(kFogHlsl, "glowblur", kBgra, Rtv(to), gw, gh, bs, bf, p, 56, -1);
+            }
+            c.Transition(glow_[0].Get(), glow_state_[0], D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        }
         c.Transition(rt.res.Get(), rt.state, D3D12_RESOURCE_STATE_RENDER_TARGET);
         fs[2] = ring_.Get();
-        c.Pass(kFogHlsl, "fog", rt.fmt, c.View(rt), rt.w, rt.h, fs, ff, p, 52, -1);
+        if (fog_glow_ > 0)
+            fs[3] = glow_[0].Get();
+        c.Pass(kFogHlsl, "fog", rt.fmt, c.View(rt), rt.w, rt.h, fs, ff, p, 56, -1);
         c.Unbind();
         if (!fog_logged_) {
             fog_logged_ = true;
@@ -852,7 +928,11 @@ class FciExtension final : public gpu::Extension {
     float fog_cap_ = 0;                       // 1: thickness caps the opacity, as the game
     ComPtr<ID3D12Resource> ring_;             // the horizon colour per azimuth, 64 x 1, kept across frames
     D3D12_RESOURCE_STATES ring_state_ = D3D12_RESOURCE_STATE_RENDER_TARGET;
-    static constexpr UINT kRtvSlots = 4;      // the occlusion and its blur, the anti-aliased picture, the fog ring
+    ComPtr<ID3D12Resource> glow_[2];          // the scene's bright parts, blurred: the light in the fog
+    D3D12_RESOURCE_STATES glow_state_[2]{};
+    float fog_glow_ = 0.5f, fog_wisp_ = 0.6f, fog_wisp_size_ = 4.0f, fog_desat_ = 0.35f;   // the fog's additions
+    static constexpr UINT kRtvSlots = 6;      // the occlusion and its blur, the anti-aliased picture, the fog ring,
+                                              // the glow's two targets
 };
 
 // before the backend is made (d3d8.cpp makes it at CreateDevice): g_extension is constant initialised
