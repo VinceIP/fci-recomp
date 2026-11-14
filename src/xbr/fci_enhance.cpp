@@ -265,11 +265,13 @@ float4 ringinit(O i) : SV_Target { return float4(p3.xyz, 0); }   // alpha: how m
 // the fog's colour along a world ray: the game's fog colour tinted by how the sky's horizon at this azimuth
 // (bins blurred, weighted by what they saw) differs from the horizon's mean; plus the sun's glow
 float3 FogCol(float3 rd) {
-    int i0 = (int)floor((atan2(rd.y, rd.x) / 6.2831853 + 0.5) * 64.0);
+    float x = (atan2(rd.y, rd.x) / 6.2831853 + 0.5) * 64.0 - 0.5;   // bin centres at integers
+    int i0 = (int)floor(x);
+    float fx = x - i0;
     float4 dc = 0, mc = 0;
-    [unroll] for (int k = -8; k <= 8; k++) {
+    [unroll] for (int k = -7; k <= 8; k++) {   // a tent 8 bins wide, sliding with the ray: no steps
         float4 r = ring.Load(int3((i0 + k + 128) % 64, 0, 0));
-        dc += float4(r.rgb * r.a, r.a) * (9.0 - abs(k)) * 0.25;
+        dc += float4(r.rgb * r.a, r.a) * max(0.0, 8.0 - abs(k - fx)) * 0.25;
     }
     [unroll] for (int j = 0; j < 16; j++) {
         float4 r = ring.Load(int3(j * 4, 0, 0));
@@ -747,7 +749,13 @@ class FciExtension final : public gpu::Extension {
     {
         // the reference height: the option, else the water (the two cameras' mean height), else the
         // main camera's height
-        float hw = refl_captured_ ? (cam_main_[2] + cam_refl_[2]) * 0.5f : cam_main_[2];
+        // the water height is kept: the game skips the reflection when no water is in view, and the fog
+        // must not jump to the camera then. Never seen: the first camera height, held
+        if (refl_captured_)
+            water_h_ = (cam_main_[2] + cam_refl_[2]) * 0.5f, water_seen_ = true;
+        else if (!water_seen_)
+            water_h_ = cam_main_[2], water_seen_ = true;
+        float hw = water_h_;
         float h0 = fog_base_ >= 0 ? fog_base_ : hw;
         // the base density: 3 optical depths over the game's fog end, in metres
         float end_m = fog_end_w_ / fog_wpm_frame_;
@@ -836,6 +844,8 @@ class FciExtension final : public gpu::Extension {
     float cam_refl_[3] = {0, 0, 0};           // the reflection camera, world metres
     float sun_dir_[3] = {0, 0, 1};            // toward the sun, world (Evolution's c186)
     float sun_col_[3] = {0, 0, 0};            // the sun's colour (c189)
+    float water_h_ = 0;                       // the fog's base: the last water height seen, metres
+    bool water_seen_ = false;
     bool sun_seen_ = false;                   // a sun was found in some frame
     float fog_sun_ = 0.6f, fog_tint_ = 1.0f;  // the glow's strength; how much the fog takes the sky's colour
     float fog_steps_ = 16, fog_march_ = 150;  // the layer's march: steps and metres (0 steps: closed form)
