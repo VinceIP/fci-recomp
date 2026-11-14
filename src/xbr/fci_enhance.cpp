@@ -277,9 +277,9 @@ float3 FogCol(float3 rd) {
         float4 r = ring.Load(int3(j * 4, 0, 0));
         mc += float4(r.rgb * r.a, r.a);
     }
-    float3 tint = 1.0;
-    if (dc.a > 2.0 && mc.a > 1.0)
-        tint = clamp((dc.rgb / dc.a) / max(mc.rgb / mc.a, 0.02), 0.7, 1.4);
+    // fades in with how much sky this direction and the ring have seen: a hard threshold made seams
+    float3 ratio = clamp((dc.rgb / max(dc.a, 1e-3)) / max(mc.rgb / max(mc.a, 1e-3), 0.02), 0.7, 1.4);
+    float3 tint = lerp(1.0, ratio, saturate(dc.a / 4.0) * saturate(mc.a / 2.0));
     // steeply down or up the azimuth means little and its bins fan out on screen: no tint there
     float3 col = p3.xyz * lerp(1.0, tint, p11.w * (1.0 - smoothstep(0.25, 0.7, abs(rd.z))));
     float mu = saturate(dot(rd, p2.xyz));
