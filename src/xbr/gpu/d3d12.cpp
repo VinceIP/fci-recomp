@@ -4280,6 +4280,7 @@ void D3D12Backend::Present(const Surface& front) {
     ResetFrame();
     DeliverQueries(false);  // FCI: visibility tests the GPU has finished, a frame or two late as on the console
     CountFps();
+    if (app::kGame.ui) app::kGame.ui(fps_);   // FCI: the fps readout (window title)
     if (diag::Perf()) LogPerf();
     ApplySettings();
 }
