@@ -33,12 +33,16 @@ CC = cc_helper.find_cc()
 # FCI_TEST_EXPECT is the fovy value after the run. The driver seeds the fovy at 1.1781
 # (the game's on-foot vfov in radians); the hook scales it by target/67.5.
 # The 'target' vector runs a full stability+zoom scenario in the C driver.
+# name: (RECOMP_FCI_FOV, FCI_TEST_EXPECT, RECOMP_FCI_TEST_ASPECT)
 VECTORS = {
-    "unset": (None, "1.1781"),
-    "zero": ("0", "1.1781"),
-    "target": ("60", None),  # the C driver handles the full scenario
-    "clamp-low": ("20", "0.698133"),
-    "clamp-high": ("200", "1.919867"),
+    "unset": (None, "1.1781", None),
+    "zero": ("0", "1.1781", None),
+    "target": ("60", None, None),  # the C driver handles the full scenario
+    "clamp-low": ("20", "0.698133", None),
+    "clamp-high": ("200", "1.919867", None),
+    # the display aspect: the aspect argument (g_esp + 12) is scaled by A / (16/9) when A is not 16:9;
+    # the C driver checks the scaling (A = 16/10) and that a square projection is left alone
+    "aspect": (None, None, "1.6"),
 }
 
 
@@ -50,19 +54,22 @@ def test_fov_c(tmp_path: Path) -> None:
     build, _ = cc_helper.build_run(sources, exe, cc=CC, includes=includes)
     assert build.returncode == 0, "the display-fov check failed to compile:\n" + build.stderr
 
-    for name, (fov, expect) in VECTORS.items():
+    for name, (fov, expect, aspect) in VECTORS.items():
         env = dict(os.environ)
         env.pop("RECOMP_FCI_FOV", None)
+        env.pop("RECOMP_FCI_TEST_ASPECT", None)
         if expect is not None:
             env["FCI_TEST_EXPECT"] = expect
         if fov is not None:
             env["RECOMP_FCI_FOV"] = fov
+        if aspect is not None:
+            env["RECOMP_FCI_TEST_ASPECT"] = aspect
         run = __import__("subprocess").run([str(exe), name], env=env, capture_output=True, text=True)
         line = [ln for ln in run.stdout.splitlines() if ln.startswith(("ok ", "FAIL "))]
         line = line[0] if line else "(no result line)\n" + run.stdout + run.stderr
         assert run.returncode == 0 and line.startswith("ok"), f"{name} failed:\n{line}"
 
-    print("5 checks, 0 failed")
+    print("6 checks, 0 failed")
 
 
 def test_fov_config_key() -> None:
@@ -72,9 +79,9 @@ def test_fov_config_key() -> None:
     mapping is checked at source level: the display-fov line in the keys[] table names RECOMP_FCI_FOV.
     """
     src = (REPO / "src" / "fci_config.c").read_text(encoding="utf-8")
-    line = [ln for ln in src.splitlines() if 'display-fov' in ln]
+    line = [ln for ln in src.splitlines() if "display-fov" in ln]
     assert line, "no display-fov key in fci_config.c's keys table"
-    assert 'RECOMP_FCI_FOV' in line[0], "display-fov does not map to RECOMP_FCI_FOV: " + line[0]
+    assert "RECOMP_FCI_FOV" in line[0], "display-fov does not map to RECOMP_FCI_FOV: " + line[0]
 
 
 def test_fov_ini_template() -> None:

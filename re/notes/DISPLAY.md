@@ -27,9 +27,19 @@ setting, which the console keeps in its EEPROM.
 
 The runtime's kernel answered `XC_VIDEO` with 0x03, the decoded flag values, so the game saw no
 setting at all. `fci_video_flags` now stores 0x00400000 (60 Hz) plus 0x00010000 (widescreen) with
-`RECOMP_FCI_ASPECT=16:9`. The host Direct3D layer takes `D3DPRESENTFLAG_WIDESCREEN` from
-CreateDevice and shows the picture at 16:9, rendering the anamorphic buffer with more columns than
-lines (a 1920x1080 picture renders at 3 x 2.25 of 640x480), so nothing is lost to the stretch.
+`RECOMP_FCI_ASPECT` set wide (`16:9`, `16:10`, `21:9`, `32:9`, `auto`; `4:3` clears the bit). The
+host Direct3D layer takes `D3DPRESENTFLAG_WIDESCREEN` from CreateDevice and shows the picture at the
+chosen aspect A, rendering the anamorphic buffer with more columns than lines (a 1920x1080 picture
+renders at 3 x 2.25 of 640x480), so nothing is lost to the stretch. For A wider than 16:9 the guest
+keeps answering 16:9 to the console query (the view's pixel aspect `this+0x6AC` stays 1.333); the
+host widens the projection (the prehook scales the aspect argument by A / (16/9)) and remaps the
+pretransformed HUD draws: edge-pinned at 16:10, a centred 16:9 box at wider aspects. A first run at 16:10 and
+wider reads the log line (`RECOMP_FCI_HUD_LOG=1`, one `[FCI] hud: ...` a second) and checks: the FVF
+marker map (which `vs_handle`s are world-derived markers, centred, not pinned), the multi-draw HUD
+elements across anchors (the radar, the weapon stats, the map: each is a separate draw with its own
+pixel-box centre and anchor), the sniper scope mask (a full-screen image quad, stretched, not
+pillarboxed), and the sides of a pillarboxed image when the game does not clear them (the letterbox bars
+show the un-cleared back buffer, not black).
 
 The map editor's XGetVideoFlags (004A56C3) and video setup (0017ED60) do the same.
 

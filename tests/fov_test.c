@@ -39,8 +39,17 @@ static char guest[0x00700000];
 ptrdiff_t g_xbox_mem_offset = (ptrdiff_t)guest;
 uint32_t g_esp = STACK_VA;
 
+// mock of fci_host_aspect (fci_xbr_glue.cpp): 16:9 by default, RECOMP_FCI_TEST_ASPECT to override
+float fci_host_aspect(void)
+{
+    const char *e = getenv("RECOMP_FCI_TEST_ASPECT");
+    return e ? (float)atof(e) : 16.0f / 9.0f;
+}
+
 static float fovy(void) { return *(float *)(guest + STACK_VA + FOV_SLOT); }
 static void set_fovy(float v) { *(float *)(guest + STACK_VA + FOV_SLOT) = v; }
+static float aspect(void) { return *(float *)(guest + STACK_VA + 12); }
+static void set_aspect(float v) { *(float *)(guest + STACK_VA + 12) = v; }
 
 int main(int argc, char **argv)
 {
@@ -90,6 +99,29 @@ int main(int argc, char **argv)
         }
         *(float *)(guest + STACK_VA + 12) = 0.0f;
         printf("ok %s: fovy=%g stable x3, %g after zoom, %g after reset\n", name, f2, f3, want);
+        return 0;
+    }
+
+    if (strcmp(name, "aspect") == 0) {
+        // the display aspect: the aspect argument (g_esp + 12) is scaled by A / (16/9) when A is not 16:9
+        // and the projection is not square; a square projection (1.0) is left alone
+        float A = (float)atof(getenv("RECOMP_FCI_TEST_ASPECT") ? getenv("RECOMP_FCI_TEST_ASPECT") : "1");
+        set_fovy(INITIAL);
+        set_aspect(16.0f / 9.0f);
+        fci_prehook_005514C9();
+        float want_a = (16.0f / 9.0f) * A / (16.0f / 9.0f);
+        if (fabsf(aspect() - want_a) > 1e-4f) {
+            printf("FAIL %s: aspect=%g (want %g)\n", name, aspect(), want_a);
+            return 1;
+        }
+        // a square projection is left alone (the aspect is not scaled)
+        set_aspect(1.0f);
+        fci_prehook_005514C9();
+        if (fabsf(aspect() - 1.0f) > 1e-6f) {
+            printf("FAIL %s: square aspect=%g (want 1.0)\n", name, aspect());
+            return 1;
+        }
+        printf("ok %s: aspect=%g (A=%g), square left alone\n", name, want_a, A);
         return 0;
     }
 

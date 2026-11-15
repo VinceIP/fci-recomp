@@ -44,6 +44,9 @@
 #include "gpu/vertex.h"
 #include "kernel/kernel.h"
 
+// FCI: HUD box anchor (fci_display.c): the 16:10 edge pin for a draw whose pixel-box centre is (cx, cy)
+extern "C" void fci_hud_anchor(float cx, float cy, float* ax, float* ay);
+
 using Microsoft::WRL::ComPtr;
 
 namespace gpu {
@@ -536,7 +539,9 @@ private:
     ID3D12PipelineState* EnsurePipeline(const PsoKey& k, ID3DBlob* vs, ID3DBlob* ps);
     void FillPipelineDesc(const PsoKey& k, ID3DBlob* vs, ID3DBlob* ps, D3D12_GRAPHICS_PIPELINE_STATE_DESC& d) const;
     void UploadConstants(const State& s, const DrawShaders& sh, const PsoKey& k, const DrawTextures& stages,
-                         GuestExtent size, DrawConstants& c);
+                         GuestExtent size, const Assembled& a, DrawConstants& c);
+    void FillHudBox(const State& s, const DrawShaders& sh, const DrawTextures& stages, const GuestExtent& size,
+                    const Assembled& a, DrawConstants& c);  // FCI: the pretransformed 2D's 16:9 -> A remap
     void FillTextureConstants(const State& s, const DrawTextures& stages, DrawConstants& c);
     void FillTexelConstants(int i, const TextureDesc& d, const DrawTextures& stages, DrawConstants& c);
     void CaptureDraw(const State& s, uint32_t prim, uint32_t count, const PsoKey& k, const DrawConstants& c,
@@ -2690,8 +2695,130 @@ void FillLightConstants(const State& s, const FixedKey& fk, DrawConstants& c) {
     }
 }
 
+// RECOMP_FCI_HUD_LOG=1: the per-draw class and FVF counts, one line to stderr a second
+static void HudLog(int cls, uint32_t fvf, float ax = 0, float ay = 0) {
+    static bool on = [] {
+        const char* e = std::getenv("RECOMP_FCI_HUD_LOG");
+        return e && e[0] == '1';
+    }();
+    if (!on)
+        return;
+    static uint64_t n[5] = {};    // post-effect/fill, image, marker, hud-centred, hud-anchored
+    static uint64_t anch[9] = {};  // hud-anchored per anchor (3x3 grid)
+    static uint64_t fn[16] = {};   // per FVF (vs_handle, bit 0 clear)
+    static uint64_t last = 0;
+    if (cls < 5)
+        n[cls]++;
+    if (cls == 4) {
+        int i = int(ay / 240.0f + 0.5f) * 3 + int(ax / 320.0f + 0.5f);
+        if (i >= 0 && i < 9)
+            anch[i]++;
+    }
+    uint32_t f = fvf & ~1u;
+    if (f < 16)
+        fn[f]++;
+    uint64_t now = GetTickCount64();
+    if (now - last < 1000)
+        return;
+    last = now;
+    char fvf_s[96] = "";
+    size_t pos = 0;
+    for (uint32_t i = 0; i < 16 && pos < sizeof(fvf_s) - 16; i++)
+        if (fn[i])
+            pos = size_t(std::snprintf(fvf_s + pos, sizeof(fvf_s) - pos, " %X:%llu", i, (unsigned long long)fn[i]));
+    char anch_s[64] = "";
+    pos = 0;
+    for (int i = 0; i < 9 && pos < sizeof(anch_s) - 12; i++)
+        if (anch[i])
+            pos = size_t(std::snprintf(anch_s + pos, sizeof(anch_s) - pos, " %d%d:%llu", i / 3, i % 3,
+                                       (unsigned long long)anch[i]));
+    std::fprintf(stderr, "[FCI] hud: post=%llu img=%llu mark=%llu hudc=%llu huda=%llu%s%s\n",
+                 (unsigned long long)n[0], (unsigned long long)n[1], (unsigned long long)n[2],
+                 (unsigned long long)n[3], (unsigned long long)n[4], anch_s, fvf_s);
+}
+
+// the guest pixel box from the position register (0): the raw path reads the guest's vertices, the converted
+// path the CPU's float4 copy; a float format with x and y first, else false
+static bool GuestBox(const Assembled& a, float& minx, float& miny, float& maxx, float& maxy) {
+    constexpr uint32_t kCap = 4096;
+    if (!a.vertex_count || a.vertex_count > kCap || !(a.regs & 1))
+        return false;
+    const VertexElement& e = a.elements[0];
+    if (e.format != DXGI_FORMAT_R32G32B32A32_FLOAT && e.format != DXGI_FORMAT_R32G32B32_FLOAT &&
+        e.format != DXGI_FORMAT_R32G32_FLOAT)
+        return false;
+    const VertexBuffer& vb = a.buffers[e.buffer];
+    if (!vb.src || !vb.stride || uint64_t(a.vertex_count) * vb.stride > vb.bytes)
+        return false;
+    const float* p0 = reinterpret_cast<const float*>(vb.src + e.offset);
+    minx = maxx = p0[0];
+    miny = maxy = p0[1];
+    for (uint32_t v = 1; v < a.vertex_count; v++) {
+        const float* p = p0 + size_t(v) * (vb.stride / 4);
+        if (p[0] < minx) minx = p[0];
+        if (p[0] > maxx) maxx = p[0];
+        if (p[1] < miny) miny = p[1];
+        if (p[1] > maxy) maxy = p[1];
+    }
+    return true;
+}
+
+// the pretransformed 2D's 16:9 -> A remap (sx, sy, ax, ay) in guest pixels, (1,1,0,0) the identity. A quad
+// that samples a render target or has no texture (a fill, a fade) is never moved; a quad sampling ordinary
+// textures is an image; a world-derived marker (the lift's 0x34/0x304) is centred; the rest is the HUD
+void D3D12Backend::FillHudBox(const State& s, const DrawShaders& sh, const DrawTextures& stages,
+                              const GuestExtent& size, const Assembled& a, DrawConstants& c) {
+    c.hudbox[0] = c.hudbox[1] = 1.0f;
+    c.hudbox[2] = c.hudbox[3] = 0.0f;
+    if (!a.pretransformed || size.w != 640 || size.h != 480)
+        return;
+    float A = app::fci_host_aspect();
+    if (A <= 4.0f / 3.0f + 1e-4f || fabsf(A - 16.0f / 9.0f) < 1e-4f)
+        return;  // 4:3 and 16:9: the identity
+    float minx, miny, maxx, maxy;
+    if (!GuestBox(a, minx, miny, maxx, maxy))
+        return;  // no position: the identity
+    bool rt = false, any_res = false;
+    for (int i = 0; i < 4; i++) {
+        rt = rt || stages.rt[i];
+        any_res = any_res || stages.res[i];
+    }
+    if (sh.quad && (rt || !any_res)) {
+        HudLog(0, s.vs_handle);  // post-effect or fill: never moved
+        return;
+    }
+    float sx = (16.0f / 9.0f) / A;  // the 3D view's x scale: a 16:9 point moves to 320 + (x-320)*sx
+    if (sh.quad && any_res) {
+        if (A > 16.0f / 9.0f) {
+            c.hudbox[0] = sx;
+            c.hudbox[2] = 320.0f;  // the centred 16:9 box
+        }  // else stretched to A: the identity
+        HudLog(1, s.vs_handle);
+        return;
+    }
+    if (s.vs_handle == 0x34 || s.vs_handle == 0x304) {
+        c.hudbox[0] = sx;  // a world-derived marker: centred, y unchanged
+        c.hudbox[2] = 320.0f;
+        HudLog(2, s.vs_handle);
+        return;
+    }
+    if (A > 16.0f / 9.0f) {
+        c.hudbox[0] = sx;  // the HUD: the centred 16:9 box
+        c.hudbox[2] = 320.0f;
+        HudLog(3, s.vs_handle);
+        return;
+    }
+    // 16:10: the edge pin, the box centre's nearest edge (x in thirds, y in halves)
+    float ax, ay;
+    fci_hud_anchor((minx + maxx) * 0.5f, (miny + maxy) * 0.5f, &ax, &ay);
+    c.hudbox[0] = c.hudbox[1] = A / (16.0f / 9.0f);
+    c.hudbox[2] = ax;
+    c.hudbox[3] = ay;
+    HudLog(4, s.vs_handle, ax, ay);
+}
+
 void D3D12Backend::UploadConstants(const State& s, const DrawShaders& sh, const PsoKey& k, const DrawTextures& stages,
-                                   GuestExtent size, DrawConstants& c) {
+                                   GuestExtent size, const Assembled& a, DrawConstants& c) {
     Alloc vc = Upload(sizeof(s.vsc), 256);
     std::memcpy(vc.cpu, s.vsc.data(), sizeof(s.vsc));
     Alloc dc = Upload(sizeof(DrawConstants), 256);
@@ -2706,6 +2833,7 @@ void D3D12Backend::UploadConstants(const State& s, const DrawShaders& sh, const 
         FillTransformConstants(s, size, c);
         FillLightConstants(s, sh.fk, c);
     }
+    FillHudBox(s, sh, stages, size, a, c);  // the pretransformed 2D's 16:9 -> A remap
     std::memcpy(dc.cpu, &c, sizeof(c));
     cl_->SetGraphicsRootConstantBufferView(0, vc.gpu);
     cl_->SetGraphicsRootConstantBufferView(1, dc.gpu);
@@ -3023,7 +3151,7 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     GuestExtent size;
     SurfaceSize(bound_rt_ ? s.rt : s.zs, size.w, size.h);
     DrawConstants c{};
-    UploadConstants(s, sh, k, stages, size, c);
+    UploadConstants(s, sh, k, stages, size, a, c);
 
     if (cap_) {
         CaptureDraw(s, prim, count, k, c, stages);
@@ -3441,9 +3569,8 @@ void D3D12Backend::UploadGammaRamp() {
 }
 
 void D3D12Backend::BlitFrame(Target& t) {
-    // 16:9 when the console reports a widescreen display, else 4:3
-    bool wide = app::Widescreen();
-    float aspect = wide ? 16.0f / 9.0f : 4.0f / 3.0f;
+    // the host's display aspect A: the 3D view fills the output at its true aspect, letterboxed to A
+    float aspect = app::fci_host_aspect();
     float w = float(bb_w_);
     float h = float(bb_h_);
     float vw = std::min(w, h * aspect);
@@ -4074,7 +4201,7 @@ D3D12Backend::Picture D3D12Backend::ShowPicture() {
     float black[4] = {0, 0, 0, 1};
     l->ClearRenderTargetView(rh, black, 0, nullptr);
     l->OMSetRenderTargets(1, &rh, FALSE, nullptr);
-    float aspect = app::Widescreen() ? 16.0f / 9.0f : 4.0f / 3.0f;
+    float aspect = app::fci_host_aspect();  // the host's display aspect A
     float w = float(bb_w_), h = float(bb_h_);
     float vw = std::min(w, h * aspect), vh = vw / aspect;
     D3D12_VIEWPORT vp{(w - vw) / 2, (h - vh) / 2, vw, vh, 0, 1};

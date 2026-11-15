@@ -6,6 +6,7 @@
 #include <string.h>
 #include <time.h>
 
+#include "fci_display.h"
 #include "fci_image.h"
 
 #define SESSION_END "[FCI] session ended normally"
@@ -112,8 +113,10 @@ static int translate(const char *key, const char *value, char *out, size_t size)
         if (!_stricmp(value, "auto")
             && (!strcmp(keys[i].key, "display-dimensions") || !strcmp(keys[i].key, "gfx-shadow-scale")))
             return 0; /* the runtime's own default */
-        if (!strcmp(keys[i].key, "display-aspect"))
-            value = !strcmp(value, "1") || !strcmp(value, "16:9") ? "16:9" : "4:3";
+        if (!strcmp(keys[i].key, "display-aspect")) {
+            static char aspect[16];
+            value = fci_normalize_aspect(value, aspect, sizeof aspect) ? aspect : "4:3";
+        }
         if (!strcmp(keys[i].key, "gfx-ssao"))
             value = atoi(value) ? "1" : "0"; /* the debug views (2, 3) stay developer options */
         snprintf(out, size, "%s=%s", keys[i].option, value);
