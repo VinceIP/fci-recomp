@@ -56,7 +56,8 @@ int fci_input_capture_enabled(void);
 void fci_input_set_captured(int on);
 int fci_input_captured(void);
 int fci_guest_set_event_handle(uint32_t token);
-int fci_aspect_wide(void);                        // fci_display.c: RECOMP_FCI_ASPECT=16:9
+int fci_aspect_wide(void);                        // fci_display.c: the guest is told 16:9 for any A > 4:3
+float fci_display_aspect(void);                   // fci_display.c: RECOMP_FCI_ASPECT as a float, 0 for auto
 int fci_window_size(uint32_t* w, uint32_t* h);    // fci_display.c: RECOMP_FCI_WINDOW
 void fci_log_session_end(void);                   // fci_config.c: a clean exit, for the log
 void fci_net_leave(void);                         // fci_net_worker.c: leave the host list on a clean exit
@@ -294,6 +295,14 @@ namespace {
 // which overlays such as NVIDIA's follow. A render window inside the frame takes the device.
 HWND g_window = nullptr;   // this instance's render window
 HWND g_frame = nullptr;    // this instance's frame
+
+// the window's client aspect for auto, updated on WM_SIZE and at creation; 0 before the window exists
+static std::atomic<float> g_window_aspect{0.0f};
+static void UpdateWindowAspect(HWND w) {
+    RECT c;
+    if (w && GetClientRect(w, &c) && c.right > 0 && c.bottom > 0)
+        g_window_aspect.store(float(c.right) / float(c.bottom), std::memory_order_relaxed);
+}
 DWORD g_window_thread = 0;
 std::wstring g_title_base;                // the window title without the fps (FpsReadout)
 bool g_alt_enter = true;                  // RECOMP_FCI_ALT_ENTER=0: no fullscreen toggle
@@ -371,6 +380,7 @@ LRESULT CALLBACK FrameProc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
     case WM_SIZE: {
         RECT r;
         GetClientRect(w, &r);
+        UpdateWindowAspect(w);
         EnumChildWindows(w, FitChild, reinterpret_cast<LPARAM>(&r));
         return 0;
     }
@@ -586,10 +596,23 @@ Settings& Get()
 }
 
 // the title asked for a widescreen display (CreateDevice: D3DPRESENTFLAG_WIDESCREEN, which FCI sets when
-// RECOMP_FCI_ASPECT=16:9 reaches it through XGetVideoFlags, fci_display.c): its 4:3 buffer is shown at 16:9
+// the display aspect is wide, fci_display.c): its 4:3 buffer is shown at 16:9
 std::atomic<bool> g_widescreen{false};
 void SetWidescreen(bool on) { g_widescreen = on; }
 bool Widescreen() { return g_widescreen; }
+
+// the host's effective display aspect A: the configured 4:3/16:9/16:10/21:9/32:9, or for auto the window's
+// client aspect (cached), clamped to >= 4:3. The guest is told 16:9 widescreen for any A > 4:3
+extern "C" float fci_host_aspect(void)
+{
+    float a = fci_display_aspect();
+    if (a > 0.0f)
+        return a;
+    a = g_window_aspect.load(std::memory_order_relaxed);
+    if (a <= 0.0f)
+        a = 16.0f / 9.0f;  // no window yet
+    return a < 4.0f / 3.0f ? 4.0f / 3.0f : a;
+}
 
 // The render scale per axis: RECOMP_FCI_XBR_SCALE=auto follows the shown picture's size, <n> (0.25 to 4)
 // is n times the console's lines with the columns the aspect needs; above the window size it supersamples.
@@ -607,7 +630,7 @@ void RenderScale(uint32_t guest_w, uint32_t guest_h, float& sx, float& sy)
         sx = sy = 1;
         return;
     }
-    float aspect = Widescreen() ? 16.0f / 9.0f : 4.0f / 3.0f;
+    float aspect = fci_host_aspect();
     if (fixed == 0) {
         static float last_w = 0;
         RECT c;
@@ -681,7 +704,8 @@ void* Window()
             uint32_t cw = 0, ch = 0;
             if (!fci_window_size(&cw, &ch)) {
                 ch = uint32_t(work.bottom - work.top);
-                cw = fci_aspect_wide() ? ch * 16 / 9 : ch * 4 / 3;
+                // the display aspect (16:9 for auto before the window)
+                cw = uint32_t(ch * fci_host_aspect());
             }
             float fit = std::min(
                     {1.0f, float(work.right - work.left - 32) / cw, float(work.bottom - work.top - 64) / ch});
@@ -714,6 +738,7 @@ void* Window()
             GetClientRect(frame, &c);
             g_window = CreateWindowExW(0, wc.lpszClassName, L"", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS, 0,
                                        0, c.right, c.bottom, frame, nullptr, inst, nullptr);
+            UpdateWindowAspect(g_window);
             if (!background)
                 SetFocus(g_window);
             {   // raw mouse motion, delivered while the game is in front (checked per message)

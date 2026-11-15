@@ -111,7 +111,8 @@
     ],
     "sub_0005022C": ["prehook", "the UI input manager's router (ecx the manager, its vtable slot 1; the function table at 004AF750 gives 0005022C-000508CF), as Instincts' 000675B0; its popup root is +0x24 (FCI_VKB_MODAL): typing stops under a popup (fci_vkb.c)", "000675B0"],
     "sub_000D0750": ["prehook", "the on-screen keyboard's open, as Instincts' 0010B500: typing starts (fci_vkb.c)", "0010B500"],
-    "sub_000D07EC": ["prehook", "the on-screen keyboard's close, as Instincts' 0010B5E0: typing stops (fci_vkb.c)", "0010B5E0"]
+    "sub_000D07EC": ["prehook", "the on-screen keyboard's close, as Instincts' 0010B5E0: typing stops (fci_vkb.c)", "0010B5E0"],
+    "sub_004048C9": ["prehook", "the shared perspective matrix builder (param2 = vertical FOV in radians, at g_esp+8): display-fov scales the fovy so the vertical FOV is the target (fci_fov.c, Instincts 005514C9)", "005514C9"]
   },
   "evidence": "Exploratory Evolution profile: descriptor helper by masked bytes (unique match); code end = BINKDATA end (as Instincts' 0070C6E4).",
   "constants": {

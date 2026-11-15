@@ -17,6 +17,9 @@ Settings& Get();
 void RenderScale(uint32_t guest_width, uint32_t guest_height, float& sx, float& sy);
 bool Widescreen();
 void SetWidescreen(bool on);  // FCI: from the title's CreateDevice
+// FCI: the host's effective display aspect A: the configured 4:3/16:9/16:10/21:9/32:9, or for auto
+// the window's client aspect re-read on resize (>= 4:3). The guest is told 16:9 for any A > 4:3 (fci_xbr_glue.cpp)
+extern "C" float fci_host_aspect(void);
 std::filesystem::path ExeDir();
 std::filesystem::path ShaderCacheDir();  // FCI: RECOMP_FCI_XBR_SHADER_CACHE, empty for none
 void* Window();  // HWND

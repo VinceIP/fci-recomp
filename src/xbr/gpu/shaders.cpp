@@ -61,6 +61,7 @@ const char* kCommonTail = R"(    float4 vol;
     float4 amb;
     float4 lt[56];
     float4 wbuf;
+    float4 hudbox;
 };
 )";
 
@@ -234,6 +235,9 @@ const char* kVsEpilogue = R"(
     // of the far edges on D3D12's, which upscaled leaves the last host columns and rows undrawn
     if (abs(p.x - (surf.x - 0.5)) < 1e-3) p.x = surf.x;
     if (abs(p.y - (surf.y - 0.5)) < 1e-3) p.y = surf.y;
+    // the pretransformed 2D remapped from the guest's 16:9 to the host aspect A about its anchor
+    // (the centred 16:9 box at A > 16:9, the edge pin at 16:10); (1,1,0,0) is the identity
+    p.xy = (p.xy - hudbox.zw) * hudbox.xy + hudbox.zw;
     q.x = p.x * 2 / surf.x - 1;
     q.y = 1 - p.y * 2 / surf.y;
     q.z = p.z * surf.z;
