@@ -7,10 +7,10 @@ any run or player's log, each close of a write-opened UDATA file, each delete an
 save folder. A write-opened file closed with no writes, whose open changed nothing, leaves no line; if
 the open created the file or truncated an existing one (the create disposition and whether the file
 existed before the open tell), the close line says so: "created, ..." / "truncated, ...". Read-only
-opens and other files leave no line. No title issues a class-10 rename (measured, Instincts): the
+opens and other files leave no line. Saves themselves never rename (measured, Instincts): the
 level-start save deletes the free slot and writes <level>.fcs fresh, and a re-save over an existing
-.fcs rewrites it in place -- no rename, no overwrite of a live name; the rename case is kept only so a
-title that does rename leaves a line. Runs of path separators the game doubles are collapsed, so a
+.fcs rewrites it in place. A profile rename does move each level save (0038 implements class 10 and
+logs it; the rename case here read the Xbox structure with the wrong layout). Runs of path separators the game doubles are collapsed, so a
 delete reads 9FBDF33E7A0C\fcs0.fcs, not 9FBDF33E7A0C\\fcs0.fcs.
 
 The filter recognises both spellings of the save partition, because a title may open the same files

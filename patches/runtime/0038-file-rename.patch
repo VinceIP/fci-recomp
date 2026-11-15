@@ -1,0 +1,191 @@
+Subject: NtSetInformationFile renames: class 10 moves the file instead of overflowing a buffer
+
+Instincts' profile rename moves each level save from the old profile folder into the new one with the XDK's
+MoveFile: NtOpenFile for DELETE, then NtSetInformationFile class 10 (FileRenameInformation). The Xbox
+structure is 16 bytes: BOOLEAN ReplaceIfExists, a 32-bit RootDirectory (-3 for the DOS-device namespace) and
+an OBJECT_STRING (ANSI_STRING, 32-bit Buffer) naming the target, not NT's inline WCHAR array. The save log's
+rename case (0026) read it with an NT-shaped native struct: its "FileNameLength" came from past the guest
+structure, a negative value skipped the MAX_PATH cap, and memcpy ran off the host stack (C0000005 on
+Windows, C00000FD under Proton) right after the new folder's SaveMeta.xbx was written.
+
+bridge_NtSetInformationFile now copies the guest structure field by field into the native
+XBOX_FILE_RENAME_INFORMATION (ANSI_STRING with a host Buffer, the name NUL-terminated, a bad or unmapped
+name refused with STATUS_INVALID_PARAMETER and a stderr line). xbox_NtSetInformationFile resolves the
+target the way NtCreateFile does (translate_obj_path, so path confinement and root-relative names apply)
+and renames through SetFileInformationByHandle(FileRenameInfo) honouring ReplaceIfExists; the POSIX
+backend uses rename(2) on the handle's path. A failure logs one stderr line and returns the matching
+status (name collision, path not found, access denied). A successful rename under UDATA leaves a save log
+line "<target> renamed into place".
+
+---
+
+--- a/src/kernel/kernel.h
++++ b/src/kernel/kernel.h
+@@ -234,14 +234,13 @@ typedef struct _XBOX_FILE_DISPOSITION_INFORMATION {
+     BOOLEAN DeleteFile;
+ } XBOX_FILE_DISPOSITION_INFORMATION, *PXBOX_FILE_DISPOSITION_INFORMATION;
+ 
+-/* FILE_RENAME_INFORMATION - NT layout. NtSetInformationFile does not
+- * implement class 10, but the save log names a rename attempt with it
+- * (kernel_file.c). */
++/* FILE_RENAME_INFORMATION, Xbox layout: the new name is an OBJECT_STRING,
++ * not NT's inline WCHAR array. The guest's is 16 bytes with 32-bit fields;
++ * bridge_NtSetInformationFile copies it into this native form. */
+ typedef struct _XBOX_FILE_RENAME_INFORMATION {
+-    BOOLEAN       ReplaceIfExists;
+-    HANDLE        RootDirectory;
+-    ULONG         FileNameLength;
+-    CHAR          FileName[1];
++    BOOLEAN          ReplaceIfExists;
++    HANDLE           RootDirectory;
++    XBOX_ANSI_STRING FileName;
+ } XBOX_FILE_RENAME_INFORMATION, *PXBOX_FILE_RENAME_INFORMATION;
+ 
+ /* FILE_NETWORK_OPEN_INFORMATION (used by NtQueryFullAttributesFile) */
+--- a/src/kernel/kernel_bridge.c
++++ b/src/kernel/kernel_bridge.c
+@@ -3659,9 +3659,35 @@ static void bridge_NtSetInformationFile(void)
+         g_eax = 0xC0000005u;                 /* STATUS_ACCESS_VIOLATION */
+         return;
+     }
+-    g_eax = (uint32_t)xbox_NtSetInformationFile(handle, &ios,
+-                XBOX_TO_NATIVE(info_va), length,
+-                (XBOX_FILE_INFORMATION_CLASS)infoclass);
++    if (infoclass == XboxFileRenameInformation) {
++        /* Guest layout: BOOLEAN, 32-bit RootDirectory, ANSI_STRING with a guest Buffer. */
++        XBOX_FILE_RENAME_INFORMATION ri;
++        static RECOMP_TLS char name[MAX_PATH];
++        uint16_t n = length >= 16 ? BRIDGE_MEM16(info_va + 8) : 0;
++        uint32_t buf_va = length >= 16 ? BRIDGE_MEM32(info_va + 12) : 0;
++        uint32_t root = length >= 16 ? BRIDGE_MEM32(info_va + 4) : 0;
++        if (!buf_va || !n || n >= sizeof name || !bridge_va_mapped(buf_va, n)) {
++            fprintf(stderr, "  [FILE] NtSetInformationFile rename: bad name (len %u, buffer %08X)\n",
++                    (unsigned)n, buf_va);
++            bridge_write_iostatus(ios_va, STATUS_INVALID_PARAMETER, 0);
++            g_eax = (uint32_t)STATUS_INVALID_PARAMETER;
++            return;
++        }
++        memcpy(name, XBOX_TO_NATIVE(buf_va), n);
++        name[n] = 0;
++        ri.ReplaceIfExists = BRIDGE_MEM8(info_va) != 0;
++        /* -3 is the XDK DOS-device namespace, not a file handle (as in bridge_build_oa). */
++        ri.RootDirectory = root && root != 0xFFFFFFFDu ? bridge_resolve_handle(root) : NULL;
++        ri.FileName.Buffer = name;
++        ri.FileName.Length = n;
++        ri.FileName.MaximumLength = (USHORT)(n + 1);
++        g_eax = (uint32_t)xbox_NtSetInformationFile(handle, &ios, &ri, sizeof ri,
++                    XboxFileRenameInformation);
++    } else {
++        g_eax = (uint32_t)xbox_NtSetInformationFile(handle, &ios,
++                    XBOX_TO_NATIVE(info_va), length,
++                    (XBOX_FILE_INFORMATION_CLASS)infoclass);
++    }
+     bridge_write_iostatus(ios_va, ios.Status, (uint32_t)ios.Information);
+ }
+ 
+--- a/src/kernel/kernel_file.c
++++ b/src/kernel/kernel_file.c
+@@ -268,6 +268,16 @@ static void savelog_delete(const char* xbox_path, HANDLE root)
+     ReleaseSRWLockExclusive(&s_savelog_lock);
+ }
+ 
++/* A rename's destination; the source handle is open for DELETE only, so it is not tracked. */
++static void savelog_rename(const char* xbox_path, HANDLE root)
++{
++    char rel[MAX_PATH];
++    savelog_lock();
++    if (savelog_resolve(xbox_path, root, rel, sizeof rel))
++        savelog_emit(rel, "renamed into place");
++    ReleaseSRWLockExclusive(&s_savelog_lock);
++}
++
+ /* Set-EOF to a smaller size, on a tracked handle. Caller holds the lock. */
+ static void savelog_shrink_locked(SAVELOG_ENTRY* e, long long new_size)
+ {
+@@ -777,18 +787,36 @@ NTSTATUS __stdcall xbox_NtSetInformationFile(
+             return STATUS_SUCCESS;
+         }
+         case XboxFileRenameInformation: {
+-            /* Not implemented (see default below); name the attempted move in
+-             * the save log, so a title that renames a save object leaves a line. */
++            /* Instincts' profile rename moves each level save into the new folder this way. */
+             PXBOX_FILE_RENAME_INFORMATION info = (PXBOX_FILE_RENAME_INFORMATION)FileInformation;
+-            char newname[MAX_PATH];
+-            int n = (int)info->FileNameLength;
+-            if (n >= (int)sizeof(newname)) n = (int)sizeof(newname) - 1;
+-            memcpy(newname, info->FileName, n);
+-            newname[n] = 0;
+-            char action[MAX_PATH + 48];
+-            snprintf(action, sizeof(action), "rename to %s (not implemented)", newname);
+-            savelog_event(FileHandle, action);
+-            return STATUS_NOT_IMPLEMENTED;
++            XBOX_OBJECT_ATTRIBUTES oa = { info->RootDirectory, &info->FileName, 0 };
++            WCHAR win_path[MAX_PATH];
++            if (!info->FileName.Buffer || !translate_obj_path(&oa, win_path, MAX_PATH))
++                return STATUS_OBJECT_PATH_NOT_FOUND;
++            size_t n = wcslen(win_path);
++            DWORD sz = (DWORD)(sizeof(FILE_RENAME_INFO) + n * sizeof(WCHAR));
++            FILE_RENAME_INFO* fri = (FILE_RENAME_INFO*)calloc(1, sz);
++            if (!fri)
++                return STATUS_NO_MEMORY;
++            fri->ReplaceIfExists = info->ReplaceIfExists ? TRUE : FALSE;
++            fri->FileNameLength = (DWORD)(n * sizeof(WCHAR));
++            memcpy(fri->FileName, win_path, (n + 1) * sizeof(WCHAR));
++            BOOL ok = SetFileInformationByHandle(FileHandle, FileRenameInfo, fri, sz);
++            DWORD err = GetLastError();
++            free(fri);
++            if (!ok) {
++                fprintf(stderr, "  [FILE] rename to %S failed: err=%u\n", win_path, err);
++                switch (err) {
++                    case ERROR_FILE_EXISTS:
++                    case ERROR_ALREADY_EXISTS: return STATUS_OBJECT_NAME_COLLISION;
++                    case ERROR_PATH_NOT_FOUND: return STATUS_OBJECT_PATH_NOT_FOUND;
++                    case ERROR_ACCESS_DENIED:  return STATUS_ACCESS_DENIED;
++                    default:                   return STATUS_UNSUCCESSFUL;
++                }
++            }
++            savelog_rename(info->FileName.Buffer, info->RootDirectory);
++            IoStatusBlock->Status = STATUS_SUCCESS;
++            return STATUS_SUCCESS;
+         }
+         case XboxFileBasicInformation: {
+             PXBOX_FILE_BASIC_INFORMATION info = (PXBOX_FILE_BASIC_INFORMATION)FileInformation;
+@@ -1421,18 +1449,27 @@ NTSTATUS __stdcall xbox_NtSetInformationFile(
+             return STATUS_SUCCESS;
+         }
+         case XboxFileRenameInformation: {
+-            /* Not implemented (see default below); name the attempted move in
+-             * the save log, so a title that renames a save object leaves a line. */
+             PXBOX_FILE_RENAME_INFORMATION info = (PXBOX_FILE_RENAME_INFORMATION)FileInformation;
+-            char newname[MAX_PATH];
+-            int n = (int)info->FileNameLength;
+-            if (n >= (int)sizeof(newname)) n = (int)sizeof(newname) - 1;
+-            memcpy(newname, info->FileName, n);
+-            newname[n] = 0;
+-            char action[MAX_PATH + 48];
+-            snprintf(action, sizeof(action), "rename to %s (not implemented)", newname);
+-            savelog_event(FileHandle, action);
+-            return STATUS_NOT_IMPLEMENTED;
++            const char* old_path = w32_handle_path(FileHandle);
++            char host_path[MAX_PATH];
++            /* Root-relative targets need the root's host path, which this backend does not keep. */
++            if (info->RootDirectory && info->FileName.Buffer && info->FileName.Buffer[0] != '\\') {
++                fprintf(stderr, "  [FILE] rename relative to a root directory: not implemented\n");
++                return STATUS_NOT_IMPLEMENTED;
++            }
++            if (!old_path || !info->FileName.Buffer ||
++                !xbox_translate_path(info->FileName.Buffer, host_path, MAX_PATH))
++                return STATUS_OBJECT_PATH_NOT_FOUND;
++            if (!info->ReplaceIfExists && access(host_path, F_OK) == 0)
++                return STATUS_OBJECT_NAME_COLLISION;
++            if (rename(old_path, host_path) != 0) {
++                int e = errno;
++                fprintf(stderr, "  [FILE] rename to %s failed: errno=%d\n", host_path, e);
++                return errno_to_status(e);
++            }
++            savelog_rename(info->FileName.Buffer, info->RootDirectory);
++            IoStatusBlock->Status = STATUS_SUCCESS;
++            return STATUS_SUCCESS;
+         }
+         case XboxFileBasicInformation:
+             /* Setting file times is non-essential for the game; accept it. */
