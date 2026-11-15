@@ -295,9 +295,11 @@ namespace {
 HWND g_window = nullptr;   // this instance's render window
 HWND g_frame = nullptr;    // this instance's frame
 DWORD g_window_thread = 0;
+std::wstring g_title_base;                // the window title without the fps (FpsReadout)
 bool g_alt_enter = true;                  // RECOMP_FCI_ALT_ENTER=0: no fullscreen toggle
 constexpr UINT kMsgToggle = WM_APP + 1;   // render window to frame: Alt+Enter
 constexpr UINT kMsgLeave = WM_APP + 2;    // fci_window_handoff: the render window goes
+constexpr UINT kMsgFps = WM_APP + 3;      // renderer to frame: the fps for the title (-1: none)
 constexpr UINT_PTR kExitTimer = 1;        // the frame's poll while a user exit waits for a save (fci_exit.c)
 constexpr int kClientW = 1280, kClientH = 960;
 
@@ -378,6 +380,13 @@ LRESULT CALLBACK FrameProc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
     case kMsgToggle:
         ToggleFullscreen(w);
         return 0;
+    case kMsgFps: {   // set here: SetWindowText from the render thread would wait on this thread
+        std::wstring t = g_title_base;
+        if (int(wp) >= 0)
+            t += L" (" + std::to_wstring(int(wp)) + L" fps)";
+        SetWindowTextW(w, t.c_str());
+        return 0;
+    }
     case WM_CLOSE:   // the session ends: the first instance waits for this one's job to empty
         fci_log_session_end();
         fci_exit_begin();
@@ -438,6 +447,10 @@ LRESULT CALLBACK WindowProc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
     case WM_KEYDOWN:
     case WM_KEYUP:
         if (msg == WM_KEYDOWN && fci_vkb_key(int(wp))) return 0;  // typing into the on-screen keyboard
+        if (msg == WM_KEYDOWN && wp == VK_F11 && g_alt_enter) {   // F11 toggles fullscreen, as Alt+Enter
+            PostMessageW(g_frame, kMsgToggle, 0, 0);
+            return 0;
+        }
         fci_framebuffer_key(int(wp), msg == WM_KEYDOWN);
         fci_input_key(SpecificKey(wp, lp), msg == WM_KEYDOWN);
         return 0;
@@ -530,7 +543,22 @@ LRESULT CALLBACK WindowProc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
 }
 }   // namespace
 
-const GameInfo kGame{nullptr};
+// the fps in the window title (RECOMP_FCI_SHOW_FPS=1): the backend has no text path (no ImGui,
+// FCI_XBR_IMGUI=0, no font renderer), so the title carries the readout instead of a drawn overlay
+void FpsReadout(double fps)
+{
+    if (!g_frame)
+        return;
+    static int shown = -2;
+    int on = Option("RECOMP_FCI_SHOW_FPS", false) ? 1 : 0;
+    int v = on ? int(fps) : -1;
+    if (v == shown)
+        return;
+    shown = v;
+    PostMessageW(g_frame, kMsgFps, WPARAM(v), 0);
+}
+
+const GameInfo kGame{FpsReadout};
 
 // Graphics options (fci_gfx.h) are read again when they change. RECOMP_FCI_XBR_NO_PRESENT_WAIT=1 (tests)
 // drops a frame the compositor cannot take now: with the display asleep it would wait hundreds of ms.
@@ -542,6 +570,7 @@ Settings& Get()
     if (gen.load(std::memory_order_relaxed) != now) {
         int n = int(fci_gfx::Number("RECOMP_FCI_XBR_ANISO", 0));
         s.aniso = n >= 2 ? uint32_t(std::min(n, 16)) : 0;
+        s.vsync = Option("RECOMP_FCI_VSYNC", true);   // display-vsync: 0 = no present wait
         s.present_never_waits = Option("RECOMP_FCI_XBR_NO_PRESENT_WAIT", false);
         gen.store(now, std::memory_order_relaxed);
     }
@@ -631,6 +660,7 @@ void* Window()
             bool editor = fci_xbe_path && std::strstr(fci_xbe_path, "ige.xbe");
             const wchar_t* title = editor ? L"" FCI_TITLE_NAME " Map Editor (recompiled)"
                                           : L"" FCI_TITLE_NAME " (recompiled)";
+            g_title_base = title;
             // the previous instance's frame (a relaunch): this one takes its place, then hides it
             const char* fe = std::getenv("RECOMP_FCI_FRAME");
             HWND prev = fe ? reinterpret_cast<HWND>(uintptr_t(std::strtoull(fe, nullptr, 16))) : nullptr;
