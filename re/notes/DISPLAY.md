@@ -37,3 +37,24 @@ Checks (2026-10-16): with 16:9 the log shows CreateDevice flags 0x30 (widescreen
 instead of 0x20. Captures of the intro fly-over and the Training tunnel at 1920x1080 show
 unstretched palms, ship and hands, a round radar and crosshair, and the HUD at the widescreen
 layout.
+
+## Field of view (display-fov, src/fci_fov.c)
+
+Each camera's projection is built by one perspective builder, `D3DXMatrixPerspectiveFovLH`-shaped
+(out, fovy in radians, aspect, near, far): Instincts `sub_005514C9`, Evolution `sub_004048C9` (same
+bytes). Its callers in Instincts: the world camera's gather `sub_002A84E0` (fovy from camera+0x38 over
+camera+0x384; camera+0x38 starts at the image float 0x62A874, about 1.178 rad, 67.5 degrees; measured on
+foot: projection m[0] 1.122, m[5] 1.497); the first-person view model's gather `sub_002469E0` (view+0x698,
+from the image float 0x62A9A8, pi/4, 45 degrees; measured 2026-11-15: one view, called from 0x0024CF2E,
+viewport 640x480, pixel aspect 1.0); and `sub_00241C70` at 0x00241FC3, aspect 1.0 with the FOV from an
+object (a light's or shadow's frustum).
+
+The title's vertex programs read the matrix it uploads as shader constants, not the device's projection
+transform, so the host's SetTransform cannot change the view. `display-fov` (RECOMP_FCI_FOV, vertical
+degrees, clamped 40-110) prehooks the builder and scales its fovy argument by target / 67.5. Only the
+argument changes, never the game's fields, so the scale cannot compound and the game's own variation
+(zoom, vehicles) keeps its ratio. The world and the view model move together; square projections are left
+alone. 67.5 is Instincts' on-foot value; Evolution's own was not measured, so there the target is
+approximate. Frames: Instincts Training tunnel at 0/60/90 (drive fov0-025127, fw60-033753, fw90-033835),
+Evolution story at 0/90 (evo drive efov0-040601, efov90-040657).
+

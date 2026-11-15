@@ -138,6 +138,12 @@ REPLACE = {
         "Camera_BuildViews (re/symbols): counts 3D frames for RECOMP_FCI_STATUS, a line per frame for "
         "RECOMP_FCI_TRACE (fci_trace.c)",
     ),
+    "sub_005514C9": (
+        "prehook",
+        "the shared perspective matrix builder (param2 = vertical FOV in radians, at g_esp+8): "
+        "display-fov scales the fovy so the vertical FOV is the target; world camera (camera+0x38, "
+        "~67.5 deg) and view model (view+0x698, ~45 deg) both follow (fci_fov.c)",
+    ),
     "sub_00098AE0": (
         "prehook",
         "Player_ProcessInput (re/symbols): adds direct mouse aim, in degrees, to the "
