@@ -688,13 +688,14 @@ class FciExtension final : public gpu::Extension {
     }
 
     // the sun shadow map: a square depth target drawn with a colour target of its size (1024 x 1024 in
-    // Training); it takes the larger render scale so it stays square, other targets keep the render scale
+    // Training); it takes the larger render scale so it stays square, other targets keep the render scale.
+    // A whole number: the game moves the map in whole texels, which a fractional scale makes edges crawl.
     void MakeTarget(const gpu::Surface&, bool, uint32_t gw, uint32_t gh, float& sx, float& sy,
                     DXGI_FORMAT&) override
     {
         if (gw != gh || gw < kShadowMin)
             return;
-        sx = sy = shadow_scale_ > 0 ? shadow_scale_ : std::max(sx, sy);
+        sx = sy = std::max(1.0f, std::round(shadow_scale_ > 0 ? shadow_scale_ : std::max(sx, sy)));
     }
 
     const gpu::ShaderHooks* Shaders() const override { return &hooks_; }
