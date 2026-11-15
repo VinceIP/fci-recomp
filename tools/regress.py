@@ -258,8 +258,9 @@ if game_driver.TITLE.key == "evolution":
 
 
 def fixture(name, src):
-    if name not in FIXTURE_NAMES:
-        raise SystemExit("fixtures: " + ", ".join(FIXTURE_NAMES))
+    # slot-<name>: a save folder holding a quick save at a problem spot, for scenarios written against it
+    if name not in FIXTURE_NAMES and not (name.startswith("slot-") and len(name) > 5 and Path(src).is_dir()):
+        raise SystemExit("fixtures: " + ", ".join(FIXTURE_NAMES) + ", slot-<name> (a save folder)")
     src, dst = Path(src), FIXTURES / name
     if dst.exists():
         raise SystemExit(f"error: {dst} exists; remove it first to replace it")

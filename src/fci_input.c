@@ -8,6 +8,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "fci_image.h"
+
 /* src/input/xinput_xbox.h, the state the runtime fills */
 typedef struct {
     uint16_t wButtons;
@@ -127,6 +129,7 @@ static int binds[C_COUNT][MAX_BINDS];
 static struct {
     double sens, degrees, y_scale, curve, deadzone, walk;
     int aim, invert_y, window_ms, capture, wheel_ms, log, kbm, mp_assist;
+    int quicksave_key, quickload_key; /* virtual key codes, -1 when unset */
 } opt;
 
 static double opt_num(const char *name, double fallback)
@@ -186,6 +189,12 @@ static BOOL CALLBACK load_config(PINIT_ONCE once, PVOID param, PVOID *ctx)
     opt.log = opt_num("RECOMP_INPUT_LOG", 0) != 0;
     opt.kbm = opt_num("RECOMP_KEYBOARD", 0) != 0;
     opt.mp_assist = opt_num("RECOMP_MOUSE_AIM_ASSIST", 0) != 0;
+    opt.quicksave_key = parse_input(getenv("RECOMP_QUICKSAVE_KEY") && *getenv("RECOMP_QUICKSAVE_KEY")
+                                            ? getenv("RECOMP_QUICKSAVE_KEY")
+                                            : "F5");
+    opt.quickload_key = parse_input(getenv("RECOMP_QUICKLOAD_KEY") && *getenv("RECOMP_QUICKLOAD_KEY")
+                                            ? getenv("RECOMP_QUICKLOAD_KEY")
+                                            : "F9");
     if (opt.curve <= 0)
         opt.curve = 1.0;
     if (opt.window_ms < 4)
@@ -286,13 +295,37 @@ int fci_input_mp_assist_kept(void)
 /* a key the on-screen keyboard took for typing (fci_vkb.c): the keyboard is in use all the same */
 void fci_input_typed(void) { kbm_at = (LONGLONG)GetTickCount64(); }
 
+/* quick save and quick load: the configured key sets a one-shot request the frame boundary takes
+ * (src/xbr/fci_quicksave.cpp). A press, not a hold: the flag is set on the key-down edge only. */
+static volatile LONG quicksave_request, quickload_request;
+
+int fci_input_take_quicksave_request(void)
+{
+    return InterlockedExchange(&quicksave_request, 0) != 0;
+}
+int fci_input_take_quickload_request(void)
+{
+    return InterlockedExchange(&quickload_request, 0) != 0;
+}
+/* the quick save addresses are the Instincts game's; the map editor and Evolution are other images */
+int fci_input_quicksave_supported(void)
+{
+    return !_stricmp(FCI_IMAGE_FILENAME, "default.xbe") && !strcmp(FCI_TITLE_NAME, "Far Cry Instincts");
+}
+
 /* a key (virtual key, left/right resolved by the caller) or mouse button: the generic Shift/Ctrl/Alt follow */
 void fci_input_key(int code, int is_down)
 {
     if (code < 0 || code >= IN_COUNT)
         return;
-    if (is_down)
+    if (is_down) {
         kbm_at = (LONGLONG)GetTickCount64();
+        config();
+        if (code == opt.quicksave_key)
+            InterlockedExchange(&quicksave_request, 1);
+        else if (code == opt.quickload_key)
+            InterlockedExchange(&quickload_request, 1);
+    }
     InterlockedExchange(&down[code], is_down ? 1 : 0);
     if (code == VK_LSHIFT || code == VK_RSHIFT)
         InterlockedExchange(&down[VK_SHIFT], down[VK_LSHIFT] | down[VK_RSHIFT]);
