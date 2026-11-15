@@ -129,8 +129,15 @@ REPLACE = {
         "until it reads 0; the hook registers that address with the APU "
         "acknowledgement (fci_manual.c)",
     ),
-    "sub_000675B0": ("prehook", "the UI input manager's router (ecx the manager, its vtable slot 1, from the game loop sub_001FCD40): recorded, so typing stops while a popup takes the pad input (fci_vkb.c)"),
-    "sub_0010B500": ("prehook", "the on-screen keyboard's open (eax keyboard): typing on the PC keyboard starts (fci_vkb.c)"),
+    "sub_000675B0": (
+        "prehook",
+        "the UI input manager's router (ecx the manager, its vtable slot 1, from the game loop sub_001FCD40): "
+        "recorded, so typing stops while a popup takes the pad input (fci_vkb.c)",
+    ),
+    "sub_0010B500": (
+        "prehook",
+        "the on-screen keyboard's open (eax keyboard): typing on the PC keyboard starts (fci_vkb.c)",
+    ),
     "sub_0010B5E0": ("prehook", "the on-screen keyboard's close: typing stops (fci_vkb.c)"),
     "sub_001F6C00": ("prehook", "Input_PollPads (re/symbols): counts polls for RECOMP_FCI_STATUS"),
     "sub_000F0500": (
