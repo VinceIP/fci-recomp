@@ -1,7 +1,7 @@
 """The quick save and quick load keys (quicksave-key, quickload-key in fci.ini)."""
 
-import re
 from pathlib import Path
+import re
 
 REPO = Path(__file__).resolve().parent.parent
 
