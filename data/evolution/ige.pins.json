@@ -21,6 +21,10 @@
   "D3DDevice_EndVisibilityTest": {
    "va": "0x00517E70",
    "evidence": "Instincts' editor 004F17F0, first 64 bytes, addresses masked: unique match"
+  },
+  "D3DDevice_SetPalette": {
+   "va": "0x00517C80",
+   "evidence": "Evolution map editor: stdcall (stage, palette), ret 8, 141 bytes; writes CDevice Palettes + stage * 4 (0xF98) with the AddRef/Release pair and pushes the stage's palette methods. The 5849 signature misses it. The same body as Instincts' 005070E0."
   }
  }
 }
