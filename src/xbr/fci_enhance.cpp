@@ -14,6 +14,7 @@
 #include "core/log.h"
 #include "fci_gfx.h"
 #include "fci_glyphs.h"
+#include "fci_quicksave.h"
 #include "gpu/ext.h"
 
 // ---- options ---------------------------------------------------------------------------------
@@ -151,6 +152,38 @@ float4 apply(O i) : SV_Target {
 
 // Edge anti-aliasing (RECOMP_FCI_XBR_AA), after FXAA: blend across luma edges by the distance to the
 // edge's nearer end. p0 = texel size; p1.x = 2 leaves the left half alone (a side-by-side comparison).
+// The host notice (quick save, the fog toggle): 5x7 glyphs from fci_quicksave over a dimmed box, drawn on the
+// presented picture so it shows at any render scale. p[0]: the text's top left in pixels, pixels per font
+// pixel, characters; p[1].xy the size; glyph i in p[2 + i / 2] (.xy or .zw: rows 0-3, rows 4-6, 5 bits a row).
+const char* kNoticeHlsl = R"(
+cbuffer P : register(b1) { float4 p[17]; };
+Texture2D src0 : register(t0);
+SamplerState ls : register(s0);
+SamplerState ps : register(s1);
+struct O { float4 p : SV_Position; float2 uv : TEXCOORD0; };
+O vs(uint id : SV_VertexID) {
+    O o;
+    o.uv = float2((id << 1) & 2, id & 2);
+    o.p = float4(o.uv * float2(2, -2) + float2(-1, 1), 0, 1);
+    return o;
+}
+float4 notice(O i) : SV_Target {
+    float4 c = src0.SampleLevel(ps, i.uv, 0);
+    float2 q = (i.uv * p[1].xy - p[0].xy) / p[0].z;
+    float n = p[0].w;
+    if (q.x < -2 || q.y < -2 || q.x >= n * 6 + 1 || q.y >= 9) return c;
+    float3 col = lerp(c.rgb, float3(0.05, 0.05, 0.05), 0.75);
+    int ci = (int)floor(q.x / 6), gx = (int)floor(q.x) - ci * 6, gy = (int)floor(q.y);
+    if (q.x >= 0 && q.y >= 0 && gy < 7 && ci < (int)n && gx < 5) {
+        float4 v = p[2 + ci / 2];
+        float2 g = (ci & 1) ? v.zw : v.xy;
+        uint bits = (uint)(gy < 4 ? g.x : g.y), row = (uint)(gy < 4 ? gy : gy - 4);
+        if ((bits >> (row * 5 + 4 - gx)) & 1) col = float3(1, 1, 1);
+    }
+    return float4(col, c.a);
+}
+)";
+
 const char* kAaHlsl = R"(
 cbuffer P : register(b1) { float4 p0; float4 p1; };
 Texture2D src0 : register(t0);
@@ -680,6 +713,7 @@ class FciExtension final : public gpu::Extension {
         for (auto& r : ao_)
             r.Reset();
         post_.Reset();
+        notice_.Reset();
         scene_rt_ = scene_ds_ = nullptr;
         refl_rt_ = nullptr;
         done_ = fog_done_ = false;
@@ -868,6 +902,53 @@ class FciExtension final : public gpu::Extension {
     }
 
     ID3D12Resource* Present(Context& c, Target& t, DXGI_FORMAT& fmt) override
+    {
+        ID3D12Resource* shown = Antialias(c, t, fmt);
+        std::string msg = fci_quicksave::Notice();
+        if (msg.empty() || t.depth || !EnsureTexture(c, notice_, notice_state_, t.w, t.h, t.fmt, kNoticeSlot))
+            return shown;
+        if (!shown)
+            c.Transition(t.res.Get(), t.state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        c.Transition(notice_.Get(), notice_state_, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        size_t n = std::min<size_t>(msg.size(), 30);
+        float p[68] = {};
+        float cell = std::max(2.0f, std::floor(t.h / 240.0f));   // 2 screen pixels per font pixel at 480 lines
+        p[0] = std::floor(t.w * 0.5f - (n * 6 - 1) * cell * 0.5f);
+        p[1] = std::floor(t.h / 5.0f);   // below the compass
+        p[2] = cell;
+        p[3] = float(n);
+        p[4] = float(t.w);
+        p[5] = float(t.h);
+        for (size_t i = 0; i < n; i++) {
+            uint8_t r[7] = {};
+            fci_quicksave::GlyphRows(msg[i], r);   // a character the font lacks stays blank
+            uint32_t lo = 0, hi = 0;
+            for (int k = 0; k < 4; k++)
+                lo |= uint32_t(r[k] & 31) << (k * 5);
+            for (int k = 0; k < 3; k++)
+                hi |= uint32_t(r[4 + k] & 31) << (k * 5);
+            p[8 + i * 2] = float(lo);   // 20 and 15 bits: exact in a float
+            p[9 + i * 2] = float(hi);
+        }
+        ID3D12Resource* src[4] = {shown ? shown : t.res.Get(), nullptr, nullptr, nullptr};
+        DXGI_FORMAT sf[4] = {t.fmt, kBgra, kBgra, kBgra};
+        c.Pass(kNoticeHlsl, "notice", t.fmt, Rtv(kNoticeSlot), t.w, t.h, src, sf, p, 8 + n * 2, -1);
+        c.Unbind();
+        Target out;   // F3 / RECOMP_FCI_XBR_CAPTURE: the picture as shown, as the anti-aliasing saves it
+        out.res = notice_;
+        out.w = out.gw = t.w;
+        out.h = out.gh = t.h;
+        out.fmt = t.fmt;
+        out.state = notice_state_;
+        c.Capture(out, "shown", 1);
+        notice_state_ = out.state;
+        c.Transition(notice_.Get(), notice_state_, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        fmt = t.fmt;
+        return notice_.Get();
+    }
+
+    // edge anti-aliasing into post_ (left in the pixel shader resource state), or null when off
+    ID3D12Resource* Antialias(Context& c, Target& t, DXGI_FORMAT& fmt)
     {
         if (!aa_mode_ || t.depth || !EnsureTexture(c, post_, post_state_, t.w, t.h, t.fmt, 2))
             return nullptr;
@@ -1514,6 +1595,8 @@ class FciExtension final : public gpu::Extension {
     D3D12_RESOURCE_STATES ao_state_[2]{};
     ComPtr<ID3D12Resource> post_;   // the anti-aliased picture
     D3D12_RESOURCE_STATES post_state_{};
+    ComPtr<ID3D12Resource> notice_;   // the picture with the host notice over it
+    D3D12_RESOURCE_STATES notice_state_{};
     float fog_gate_ = 0;           // the per-draw ext[1]: kill the game fog on this draw
     bool fog_captured_ = false;    // the fog register, colour and main view are set
     bool refl_captured_ = false;   // the reflection camera is set
@@ -1544,7 +1627,8 @@ class FciExtension final : public gpu::Extension {
     float refl_wpm_ = 0;
     bool refl_logged_ = false;   // the reflection's w units per metre; 0: not found, the main view's   // the water reflection's target, fogged by its own path in mode 3   // metres above the base where the distance fog ends (mode 3)
     bool fog_lookup_ = true;                        // true: in-shader lookup, false: post-pass
-    static constexpr UINT kRtvSlots = 6 + 3 * 64;   // AO(2), post, ring, glow(2), then 3 volume x 64 slices
+    static constexpr UINT kRtvSlots = 7 + 3 * 64;   // AO(2), post, ring, glow(2), 3 volume x 64 slices, notice
+    static constexpr int kNoticeSlot = 6 + 3 * 64;
                                                     // the glow's two targets
     // volume fog (mode 3)
     ComPtr<ID3D12Resource> vol_a_, vol_b_, vol_int_;

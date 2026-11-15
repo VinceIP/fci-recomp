@@ -2,13 +2,18 @@
 // scripts do, at the frame boundary on the game thread; Refusal() lists when it will not
 #include "fci_quicksave.h"
 
+#include <cctype>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
+#include <mutex>
+#include <string>
 
 #include "kernel/kernel.h"
 #include "xdk/hle.h"
 
 extern "C" int fci_input_quicksave_supported(void);  // fci_input.c
+extern "C" const char* fci_save_dir;                 // fci_main.c
 
 #ifdef _WIN32
 #include <windows.h>
@@ -23,9 +28,13 @@ constexpr uint32_t kObject = 0x6B3984;
 // The command path: the in-game console's post function. edx = the command text, the object pushed
 // on the stack, a ret 4 call (the callee skips the object).
 constexpr uint32_t kPost = 0x00012000;
-// The command texts, as the game's own console spells them (q62-checkpoints.md).
-constexpr const char* kSaveText = "SaveGame checkpoint=Quick";
-constexpr const char* kLoadText = "LoadGame";
+// The commands, as the game's scripts spell them: the save is named per level (Quick_<level>) so a load never
+// restores another level's state; the load restarts the level at it, as the scripts' level changes do
+// (sub_000B9080, 0x600150), since "LoadGame" restores the profile's last checkpoint, not the last save.
+constexpr const char* kSaveFormat = "SaveGame checkpoint=Quick_%s";
+constexpr const char* kLoadFormat = "RestartStartLevel level=%s mission=%s checkpoint=Quick_%s";
+constexpr uint32_t kLevelName = 0x2A4;    // the game object's level and mission names (strings), as
+constexpr uint32_t kMissionName = 0x2C0;  // sub_0004D010 sets them when a level starts
 // The multiplayer test (sub_00013760, recomp_0000.c:6007): byte +0x329 != 0 OR dword +0x60 > 1.
 constexpr uint32_t kNetFlag = 0x329;
 constexpr uint32_t kPlayers = 0x60;
@@ -33,9 +42,11 @@ constexpr uint32_t kLevel = 0x24;  // the level object (null-checked by LoadGame
 // The notice expiry, in milliseconds.
 constexpr unsigned long long kNoticeMs = 2000;
 
-// ---- host-side notice state ----
-// The last message and its expiry (milliseconds since boot). Drawn on every Swap until it expires.
-char notice_msg[64] = {};
+// ---- the notice ----
+// The last message and its expiry (milliseconds since boot): set on the game thread, read by the
+// renderer's present (fci_enhance.cpp draws it over the picture).
+std::mutex notice_mu;
+std::string notice_msg;
 unsigned long long notice_expiry = 0;
 
 unsigned long long NowMs() {
@@ -47,13 +58,14 @@ unsigned long long NowMs() {
 }
 
 void SetNotice(const char* msg) {
-    std::snprintf(notice_msg, sizeof notice_msg, "%s", msg);
+    std::lock_guard lock(notice_mu);
+    notice_msg = msg;
     notice_expiry = NowMs() + kNoticeMs;
 }
 
 // ---- a 5x7 bitmap font, for the on-screen notice ----
-// The GDI text renderer in fci_glyphs.cpp draws to a Canvas (its own buffer type) and is not
-// exported; a small bitmap font is simpler and has no GDI dependency.
+// The renderer draws it with a pixel shader from these bits; the GDI glyph code (fci_glyphs.cpp) only
+// patches the game's font textures.
 struct Glyph {
     char c;
     uint8_t r[7];
@@ -105,33 +117,28 @@ const Glyph* GlyphOf(char c) {
     return nullptr;
 }
 
-inline void SetPx(uint32_t* frame, uint32_t pitch, int x, int y, uint32_t bgr) {
-    frame[size_t(y) * (pitch / 4) + x] = bgr;
+// a guest string object (+4 the text, inline while the capacity +0x18 is under 16, +0x14 the length):
+// empty unless it is a plain name, so nothing odd reaches a command line or a file name
+std::string GuestName(uint32_t at) {
+    uint32_t len = kernel::R32(at + 0x14), cap = kernel::R32(at + 0x18);
+    if (len == 0 || len > 40 || cap < len) return {};
+    uint32_t data = cap < 16 ? at + 4 : kernel::R32(at + 4);
+    std::string out;
+    for (uint32_t i = 0; i < len; i++) {
+        char c = char(kernel::R8(data + i));
+        if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '-')) return {};
+        out += c;
+    }
+    return out;
 }
 
-void DrawGlyph(uint32_t* frame, uint32_t pitch, int x, int y, const Glyph& g, uint32_t ink, uint32_t rim) {
-    for (int dy = -1; dy <= 7; dy++) {
-        for (int dx = -1; dx <= 5; dx++) {
-            int px = x + dx, py = y + dy;
-            if (px < 0 || py < 0) continue;
-            if (dx >= 0 && dx < 5 && dy >= 0 && dy < 7) {
-                if ((g.r[dy] >> (4 - dx)) & 1) SetPx(frame, pitch, px, py, ink);
-            } else {
-                SetPx(frame, pitch, px, py, rim);
-            }
-        }
-    }
-}
-
-void DrawText(uint32_t* frame, uint32_t pitch, int cx, int y, const char* s, uint32_t ink, uint32_t rim) {
-    int len = int(strlen(s));
-    int x = cx - (len * 6 - 1) / 2;
-    for (int i = 0; i < len; i++) {
-        char c = s[i];
-        if (c >= 'a' && c <= 'z') c = char(c - 32);
-        if (const Glyph* g = GlyphOf(c)) DrawGlyph(frame, pitch, x, y, *g, ink, rim);
-        x += 6;
-    }
+// a Quick_<level>.fcs in any of the title's profile folders (UDATA\55530008\<profile>)
+bool HaveQuickSave(const std::string& level) {
+    std::error_code ec;
+    std::filesystem::path udata = std::filesystem::path(fci_save_dir ? fci_save_dir : "") / "UDATA" / "55530008";
+    for (const auto& e : std::filesystem::directory_iterator(udata, ec))
+        if (e.is_directory(ec) && std::filesystem::exists(e.path() / ("Quick_" + level + ".fcs"), ec)) return true;
+    return false;
 }
 
 // the refusal reason into the buffer, or null when the command may go
@@ -150,6 +157,10 @@ const char* Refusal(uint32_t object, int is_load, char* buf, size_t n) {
     // it is unverified, so every post logs it
     else if (kernel::R32(object + kLevel) == 0)
         why = "no level";
+    else if (GuestName(object + kLevelName).empty() || GuestName(object + kMissionName).empty())
+        why = "no level name";
+    else if (is_load && !HaveQuickSave(GuestName(object + kLevelName)))
+        why = "no quick save for this level";
     if (!why) return nullptr;
     std::snprintf(buf, n, "%s refused: %s", verb, why);
     return buf;
@@ -159,27 +170,36 @@ const char* Refusal(uint32_t object, int is_load, char* buf, size_t n) {
 
 void ShowNotice(const char* msg) { SetNotice(msg); }
 
-void DrawNotice(uint32_t* frame, uint32_t w, uint32_t h, uint32_t pitch) {
-    if (!frame || w < 64 || h < 24 || !notice_msg[0]) return;
-    if (NowMs() >= notice_expiry) {
-        notice_msg[0] = 0;
-        return;
-    }
-    DrawText(frame, pitch, int(w) / 2, int(h) / 8, notice_msg, 0xFFFFFF, 0x101010);
+std::string Notice() {
+    std::lock_guard lock(notice_mu);
+    if (notice_msg.empty() || NowMs() >= notice_expiry) return {};
+    return notice_msg;
 }
 
-void Execute(X86Context& ctx, int is_load, uint32_t* frame, uint32_t w, uint32_t h, uint32_t pitch) {
+bool GlyphRows(char c, uint8_t rows[7]) {
+    if (c >= 'a' && c <= 'z') c = char(c - 32);
+    const Glyph* g = GlyphOf(c);
+    if (!g) return false;
+    std::memcpy(rows, g->r, 7);
+    return true;
+}
+
+void Execute(X86Context& ctx, int is_load) {
     uint32_t object = kernel::R32(kObject);
     char reason[96];
     if (const char* r = Refusal(object, is_load, reason, sizeof reason)) {
         std::fprintf(stderr, "[FCI] %s\n", r);
         std::fflush(stderr);
         SetNotice(is_load ? "QUICK LOAD REFUSED" : "QUICK SAVE REFUSED");
-        DrawNotice(frame, w, h, pitch);
         return;
     }
 
-    const char* text = is_load ? kLoadText : kSaveText;
+    std::string level = GuestName(object + kLevelName), mission = GuestName(object + kMissionName);
+    char text[200];
+    if (is_load)
+        std::snprintf(text, sizeof text, kLoadFormat, level.c_str(), mission.c_str(), level.c_str());
+    else
+        std::snprintf(text, sizeof text, kSaveFormat, level.c_str());
     // the text sits in 0x100 bytes reserved below the old esp: the callees' frames grow down from the new
     // esp, under the text, and the saved context puts esp back
     std::fprintf(stderr, "[FCI] %s: posting \"%s\" to %08X (level %08X)\n", is_load ? "quick load" : "quick save",
@@ -199,7 +219,6 @@ void Execute(X86Context& ctx, int is_load, uint32_t* frame, uint32_t w, uint32_t
     ctx = saved;
 
     SetNotice(is_load ? "QUICK LOAD" : "QUICK SAVE");
-    DrawNotice(frame, w, h, pitch);
 }
 
 }  // namespace fci_quicksave

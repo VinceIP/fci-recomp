@@ -648,16 +648,12 @@ HLE_STDCALL(D3DDevice_Swap, 1) {
         }
     }
     ComposeOverlay(g_buffers[1]);
-    // FCI: quick save (F5) and quick load (F9): the frame boundary, the game thread, the guest lock
-    // held. The host input path set a request; post it to the game's own command path (sub_00012000).
-    // The on-screen notice (success or refusal) is drawn on every frame until it expires (~2 s).
+    // FCI: quick save (F5), quick load (F9) and the fog toggle (F8): the frame boundary, the game thread, the guest
+    // lock held. The host input path set a request; the notice is drawn by the renderer (fci_enhance.cpp).
     {
-        uint32_t hdr = g_buffers[1], size = R32(hdr + 16);
-        uint32_t* qframe = static_cast<uint32_t*>(HostPtr(R32(hdr + 4)));
-        uint32_t qw = (size & 0xFFF) + 1, qh = (size >> 12 & 0xFFF) + 1, qp = ((size >> 24) + 1) * 64;
         int qs_save = fci_input_take_quicksave_request(), qs_load = fci_input_take_quickload_request();
         if (qs_save || qs_load)
-            fci_quicksave::Execute(ctx, qs_load, qframe, qw, qh, qp);
+            fci_quicksave::Execute(ctx, qs_load);
         if (fci_input_take_fog_request()) {   // original <-> the configured custom fog (3 when gfx-fog is 0)
             static const int custom = [] { int m = std::atoi(fci_getenv_or("RECOMP_FCI_XBR_FOG")); return m > 0 && m <= 3 ? m : 3; }();
             bool on = std::atoi(fci_getenv_or("RECOMP_FCI_XBR_FOG")) > 0;
@@ -666,7 +662,6 @@ HLE_STDCALL(D3DDevice_Swap, 1) {
             fci_gfx_set(kv);
             fci_quicksave::ShowNotice(on ? "FOG ORIGINAL" : custom == 3 ? "FOG VOLUMETRIC" : "FOG CUSTOM");
         }
-        fci_quicksave::DrawNotice(qframe, qw, qh, qp);
     }
     if (diag::Perf()) {  // FCI: latency figures (diag.h)
         int64_t start = diag::g_frame_start_ns.load();
