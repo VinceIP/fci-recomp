@@ -157,6 +157,8 @@ const char* Refusal(uint32_t object, int is_load, char* buf, size_t n) {
 
 }  // namespace
 
+void ShowNotice(const char* msg) { SetNotice(msg); }
+
 void DrawNotice(uint32_t* frame, uint32_t w, uint32_t h, uint32_t pitch) {
     if (!frame || w < 64 || h < 24 || !notice_msg[0]) return;
     if (NowMs() >= notice_expiry) {

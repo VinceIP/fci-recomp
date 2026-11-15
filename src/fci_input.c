@@ -129,7 +129,7 @@ static int binds[C_COUNT][MAX_BINDS];
 static struct {
     double sens, degrees, y_scale, curve, deadzone, walk;
     int aim, invert_y, window_ms, capture, wheel_ms, log, kbm, mp_assist;
-    int quicksave_key, quickload_key; /* virtual key codes, -1 when unset */
+    int quicksave_key, quickload_key, fog_key; /* virtual key codes, -1 when unset */
 } opt;
 
 static double opt_num(const char *name, double fallback)
@@ -195,6 +195,9 @@ static BOOL CALLBACK load_config(PINIT_ONCE once, PVOID param, PVOID *ctx)
     opt.quickload_key = parse_input(getenv("RECOMP_QUICKLOAD_KEY") && *getenv("RECOMP_QUICKLOAD_KEY")
                                             ? getenv("RECOMP_QUICKLOAD_KEY")
                                             : "F9");
+    opt.fog_key = parse_input(getenv("RECOMP_FOG_TOGGLE_KEY") && *getenv("RECOMP_FOG_TOGGLE_KEY")
+                                      ? getenv("RECOMP_FOG_TOGGLE_KEY")
+                                      : "F8");
     if (opt.curve <= 0)
         opt.curve = 1.0;
     if (opt.window_ms < 4)
@@ -297,7 +300,7 @@ void fci_input_typed(void) { kbm_at = (LONGLONG)GetTickCount64(); }
 
 /* quick save and quick load: the configured key sets a one-shot request the frame boundary takes
  * (src/xbr/fci_quicksave.cpp). A press, not a hold: the flag is set on the key-down edge only. */
-static volatile LONG quicksave_request, quickload_request;
+static volatile LONG quicksave_request, quickload_request, fog_request;
 
 int fci_input_take_quicksave_request(void)
 {
@@ -306,6 +309,11 @@ int fci_input_take_quicksave_request(void)
 int fci_input_take_quickload_request(void)
 {
     return InterlockedExchange(&quickload_request, 0) != 0;
+}
+/* the fog toggle is taken at the frame boundary too, so a mode never changes inside a frame */
+int fci_input_take_fog_request(void)
+{
+    return InterlockedExchange(&fog_request, 0) != 0;
 }
 /* the quick save addresses are the Instincts game's; the map editor and Evolution are other images */
 int fci_input_quicksave_supported(void)
@@ -325,6 +333,8 @@ void fci_input_key(int code, int is_down)
             InterlockedExchange(&quicksave_request, 1);
         else if (code == opt.quickload_key)
             InterlockedExchange(&quickload_request, 1);
+        else if (code == opt.fog_key)
+            InterlockedExchange(&fog_request, 1);
     }
     InterlockedExchange(&down[code], is_down ? 1 : 0);
     if (code == VK_LSHIFT || code == VK_RSHIFT)

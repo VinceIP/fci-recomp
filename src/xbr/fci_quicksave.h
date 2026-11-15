@@ -16,4 +16,6 @@ namespace fci_quicksave {
 void DrawNotice(uint32_t* frame, uint32_t w, uint32_t h, uint32_t pitch);
 // Called when a quicksave or quickload request is taken at the frame boundary.
 void Execute(X86Context& ctx, int is_load, uint32_t* frame, uint32_t w, uint32_t h, uint32_t pitch);
+// Shows another host message (the fog toggle) the same way.
+void ShowNotice(const char* msg);
 }  // namespace fci_quicksave

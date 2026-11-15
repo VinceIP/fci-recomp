@@ -1,6 +1,8 @@
 // Direct3D 8 (XDK 5849) entry points the title calls, implemented on the host renderer.
 // Resource creation, locking and the XG helpers stay recompiled: they only manage memory.
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <atomic>
 #include <chrono>
 #include <map>
@@ -27,6 +29,9 @@ extern "C" int fci_contig_reuse(void);                 // fci_xbr_glue.cpp
 extern "C" void fci_status_present(void);              // fci_threads.c
 extern "C" int fci_input_take_quicksave_request(void); // fci_input.c
 extern "C" int fci_input_take_quickload_request(void); // fci_input.c
+extern "C" int fci_input_take_fog_request(void);       // fci_input.c
+extern "C" int fci_gfx_set(const char* key_value);     // fci_enhance.cpp
+static const char* fci_getenv_or(const char* n) { const char* e = std::getenv(n); return e ? e : ""; }
 
 #include "fci_quicksave.h"
 
@@ -653,6 +658,14 @@ HLE_STDCALL(D3DDevice_Swap, 1) {
         int qs_save = fci_input_take_quicksave_request(), qs_load = fci_input_take_quickload_request();
         if (qs_save || qs_load)
             fci_quicksave::Execute(ctx, qs_load, qframe, qw, qh, qp);
+        if (fci_input_take_fog_request()) {   // original <-> the configured custom fog (3 when gfx-fog is 0)
+            static const int custom = [] { int m = std::atoi(fci_getenv_or("RECOMP_FCI_XBR_FOG")); return m > 0 && m <= 3 ? m : 3; }();
+            bool on = std::atoi(fci_getenv_or("RECOMP_FCI_XBR_FOG")) > 0;
+            char kv[32];
+            std::snprintf(kv, sizeof kv, "RECOMP_FCI_XBR_FOG=%d", on ? 0 : custom);
+            fci_gfx_set(kv);
+            fci_quicksave::ShowNotice(on ? "FOG ORIGINAL" : custom == 3 ? "FOG VOLUMETRIC" : "FOG CUSTOM");
+        }
         fci_quicksave::DrawNotice(qframe, qw, qh, qp);
     }
     if (diag::Perf()) {  // FCI: latency figures (diag.h)
