@@ -21,8 +21,10 @@ build/regress), never in Git. Fixtures, each copied in once:
   python -B tools/regress.py list
 
 Timing is wall-clock, so frames vary a little run to run (two runs: mean <= 2.6, worst block <= 31 on
-the animated title); the block tolerance is per scenario and the report prints every difference. A failed
-check names the scenario folder to look at.
+the animated title); the block tolerance is per scenario and the report prints every difference. A
+scenario may also mask a region that animates on wall clock (the view model, "block_mask") out of the
+worst-block score; the mean and the other blocks still catch a real change. A failed check names the
+scenario folder to look at.
 """
 
 import ctypes
@@ -36,6 +38,7 @@ import subprocess
 import sys
 import time
 
+from frame_diff import block_mask, diff, lum_stats  # noqa: E402
 import game_driver
 from game_driver import EDITOR_EXE, FIXTURES, GAME_DIR, GAME_EXE, KINIT, REGRESS  # noqa: E402
 
@@ -122,6 +125,8 @@ SCENARIOS = {
         "seconds": 80,
         "plan": EDITOR_TO_TERRAIN + ["62:back:300", "75:capture", "76.5:capture"],
         "block": 30,
+        # the hand and pistol sway on wall clock: keep that region out of the worst-block score
+        "block_mask": [64, 64, 128, 120],
     },
     "relaunch-window": {
         "what": "game -> Map Editor -> Exit Editor -> main menu, one window in front, each instance's own",
@@ -268,30 +273,7 @@ def fixture(name, src):
     print("fixture", name, "from", src)
 
 
-def lum_stats(path):
-    from PIL import Image
-
-    im = Image.open(path).convert("L").resize((160, 120))
-    return im, sum(im.tobytes()) / (160 * 120)
-
-
 MEAN_TOLERANCE = 6.0  # whole-frame mean; two runs of each scenario differed by at most 2.6
-
-
-def diff(a, b):
-    """mean absolute difference over the frame, and the worst 8x8 block's (a missing piece of a
-    model is local: it barely moves the mean)"""
-    pa, pb = a.tobytes(), b.tobytes()
-    mean = sum(abs(x - y) for x, y in zip(pa, pb)) / (160 * 120)
-    worst = 0.0
-    for by in range(15):
-        for bx in range(20):
-            s = 0
-            for y in range(by * 8, by * 8 + 8):
-                o = y * 160 + bx * 8
-                s += sum(abs(pa[o + i] - pb[o + i]) for i in range(8))
-            worst = max(worst, s / 64)
-    return mean, worst
 
 
 def timeline(child, start, plan, pad, cap):
@@ -569,9 +551,11 @@ def check(name, sc, result, folder, bless):
         elif ref.exists():
             from PIL import Image
 
-            mean, block = diff(im, Image.open(ref).convert("L"))
+            mask = block_mask(sc["block_mask"]) if "block_mask" in sc else frozenset()
+            mean, block = diff(im, Image.open(ref).convert("L"), mask)
             limit = sc.get("mean", MEAN_TOLERANCE)
-            notes.append(f"frame {i} mean {mean:.1f} (<= {limit}), worst block {block:.1f} (<= {sc['block']})")
+            masked = f", {len(mask)} blocks masked" if mask else ""
+            notes.append(f"frame {i} mean {mean:.1f} (<= {limit}), worst block {block:.1f} (<= {sc['block']}){masked}")
             if mean > limit or block > sc["block"]:
                 problems.append(f"frame {i} differs from its reference: mean {mean:.1f}, worst block {block:.1f}")
         else:
