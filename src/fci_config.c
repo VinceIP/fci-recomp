@@ -183,6 +183,27 @@ static void prune_logs(const char *dir, int limit)
     }
 }
 
+/* log=<file>: the previous sessions move to <file>.1, .2, ... so a new start does not erase them; limit
+ * counts the new one too, as for log-dir (0: unlimited, kept to 100) */
+static void rotate_log(const char *file, int limit)
+{
+    char from[MAX_PATH], to[MAX_PATH];
+    int keep = limit > 0 ? limit - 1 : 100, i;
+    if (keep <= 0) {
+        DeleteFileA(file);
+        return;
+    }
+    snprintf(to, sizeof to, "%s.%d", file, keep);
+    DeleteFileA(to);
+    for (i = keep - 1; i >= 1; i--) {
+        snprintf(from, sizeof from, "%s.%d", file, i);
+        snprintf(to, sizeof to, "%s.%d", file, i + 1);
+        MoveFileExA(from, to, MOVEFILE_REPLACE_EXISTING);
+    }
+    snprintf(to, sizeof to, "%s.1", file);
+    MoveFileExA(file, to, MOVEFILE_REPLACE_EXISTING);
+}
+
 /* the session's log (and the kernel's trace with verbosity 2), when there is no console to print to */
 static void open_session_log(const char *dir, int verbosity, int limit, const char *fixed)
 {
@@ -200,6 +221,7 @@ static void open_session_log(const char *dir, int verbosity, int limit, const ch
         return;
     }
     if (fixed) { /* the older log=<file> */
+        rotate_log(fixed, limit);
         snprintf(path, sizeof path, "%s", fixed);
         snprintf(kernel, sizeof kernel, "NUL");
     } else {
