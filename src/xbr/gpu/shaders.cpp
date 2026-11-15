@@ -240,6 +240,7 @@ const char* kVsEpilogue = R"(
     // FCI: W-buffered draws take depth from w in the pixel shader; the game's z row equals w (z / w = 1, on the
     // far plane), so z is kept inside to avoid clipping by rounding, as the console does not clip them by z
     if (wbuf.x != 0) q.z = 0.5 * q.w;
+    q.z += wbuf.w * q.w;  // FCI: the console's fixed-point depth bias, the same at every depth
     o.pos = q;
     o.d0 = saturate(oD0);
     o.d1 = saturate(oD1);
@@ -825,6 +826,7 @@ std::string FixedVertexHlsl(uint16_t regs, bool pretransformed, uint64_t decode,
     if (abs(sp.y - (surf.y - 0.5)) < 1e-3) cp.y = -cp.w;
     o.pos = cp;
     if (wbuf.x != 0) o.pos.z = 0.5 * cp.w;  // FCI: as for programs, W-buffered depth is not clipped by z
+    o.pos.z += wbuf.w * cp.w;  // FCI: as for programs, the constant depth bias
     o.d0 = saturate(oD0);
     o.d1 = saturate(oD1);
     o.b0 = o.d0;
