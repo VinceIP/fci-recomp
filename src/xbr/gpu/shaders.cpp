@@ -934,8 +934,14 @@ std::string PixelHlsl(const PixelKey& k) {
     if (k.programmable && std::getenv("XBE_PS_SHOW") && !std::strcmp(std::getenv("XBE_PS_SHOW"), "v1"))
         body += "outc = float4(v1.g, v1.b, v1.a, 1);\n";
     // FCI volume fog: sample the integrated volume at the pixel's depth
-    body += R"(    if (ext.z > 0.5 && wbuf.x != 0) {
-        float d = i.wdep * vol.w;
+    // FCI: ext.z 6 (7 additive): the water's reflection, which the main volume does not cover; a mirrored
+    // view's depth is the whole path camera-water-object, so it is fogged by that length (vol.y if no depth)
+    body += R"(    if (ext.z > 5.5) {
+        float d = wbuf.x != 0 ? i.wdep * wbuf.x * 16777215.0 * vol.w : vol.y;
+        float t = exp(-vol.x * d);
+        outc.rgb = ext.z > 6.5 ? outc.rgb * t : outc.rgb * t + volsize.rgb * (1.0 - t);
+    } else if (ext.z > 0.5 && wbuf.x != 0) {
+        float d = i.wdep * wbuf.x * 16777215.0 * vol.w;  // as the depth buffer: fixed function w is not in w-units
         float kf = vol.z * log(max(d, vol.x) / vol.x) * vol.y;
         float w = saturate((kf - 0.5) / vol.z);
         float2 uv = i.pos.xy / volsize.xy;

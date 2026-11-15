@@ -404,7 +404,6 @@ float4 fog(O i) : SV_Target {
         fc += glow.SampleLevel(sr, uv, 0).rgb * p13.x * amount;   // bright sky and the sun, scattered in the fog
         return float4(lerp(c.rgb, fc, amount), c.a);
     }
-    if (p8.y > 0.5) return c;   // sky only: non-sky pixels unchanged (mode 3's Volfog handles them)
     float3 Pvm = dir * (d * 16777215.0 / p3.w);   // metres
     float3 Pw = World(Pvm);
     // the height fog's optical depth, integrated along the ray in closed form
@@ -424,11 +423,13 @@ float4 fog(O i) : SV_Target {
 //   inject:  p[0]=(tx,ty,tanx,tany) p[1..3]=view rows p[4]=(s0,thick,wpm,zsign) p[5]=(sdir,sstr)
 //            p[6]=(scol,tint) p[7]=(dk,dxk,volw,volh) p[8]=(vold,time,near,far)
 //            p[9]=(sh_gw,sh_gh,sh_hw,sh_hh) p[10..13]=shadow mtx p[14..17]=last view rows
-//            p[18]=(last_tanx,last_tany,last_zsign,have_hist) p[19]=(h0,H,floor,0)
-//            p[20]=(layer_s,top,soft,0) p[21]=(nscale,noise,0,0) p[22]=(fcol,0)
+//            p[18]=(last_tanx,last_tany,last_zsign,have_hist) p[19]=(h0,H,floor,ceiling)
+//            p[20]=(layer_s,top,soft,0) p[21]=(nscale,noise,glow,0) p[22]=(fcol,0)
+//            p[23]=(frame, jitter xyz)
 //   integ:   p[0]=(k,near,step,0)
 //   volfog:  p[0]=(tx,ty,tanx,tany) p[1..3]=view rows p[4]=(wpm,0,0,0) p[7]=(near,far,vold,0)
-//            p[8]=(glow_w,0,0,desat) p[12]=(zsign,0,0,0)
+//            p[8]=(glow_w,sky only,0,desat) p[12]=(zsign,0,0,0)
+//   aoapply: p[0]=(ao mode,0,0,0) p[4]=(wpm,0,0,0) p[7]=(near,far,vold,0)
 const char* kVolHlsl = R"(
 cbuffer P : register(b1) { float4 p[24]; };
 Texture2D<float> t0 : register(t0);    // shadow map (inject) / depth (volfog)
@@ -462,7 +463,8 @@ float VN3(float3 x) {
                 lerp(lerp(H3(i + float3(0,0,1)), H3(i + float3(1,0,1)), f.x), lerp(H3(i + float3(0,1,1)), H3(i + 1.0), f.x), f.y), f.z);
 }
 float Mist(float3 q) {
-    float3 n = q / float3(p[21].x, p[21].x, p[21].x * 0.4) + p[8].y * float3(0.031, 0.017, 0.004);
+    // a slow drift (a quarter of mode 1's): faster mist read as a river against the 90% history
+    float3 n = q / float3(p[21].x, p[21].x, p[21].x * 0.4) + p[8].y * float3(0.008, 0.004, 0.001);
     float v = 0.65 * VN3(n) + 0.35 * VN3(n * 2.13 + 5.2);
     return lerp(1.0, 2.0 * saturate(0.5 + (v - 0.5) * 2.5), p[21].y);
 }
@@ -478,7 +480,10 @@ float Sigma(float3 a, float3 b, float3 q, float len) {
     // below h0 the density stops growing at 2 scale heights: froxels under the terrain overflowed half floats
     float za = max(a.z, h - 2.0 * H), zb = max(b.z, h - 2.0 * H), dz = zb - za;
     float e = abs(dz) < 1e-3 ? exp(-(za - h) / H) : H * (exp(-(za - h) / H) - exp(-(zb - h) / H)) / dz;
-    float s = p[4].x * (fl + (1.0 - fl) * e);
+    // the floor (distance fog) ends at the ceiling p[19].w, so a sky ray leaves it: the sky above stays clear
+    float lo = min(a.z, b.z), hi = max(a.z, b.z);
+    float below = hi - lo < 1e-3 ? (lo < p[19].w ? 1.0 : 0.0) : saturate((p[19].w - lo) / (hi - lo));
+    float s = p[4].x * (fl * below + (1.0 - fl) * e);
     if (p[20].x > 0.0) {
         float lz = b.z - a.z;
         float lay = abs(lz) < 1e-3 ? saturate((p[20].y - a.z) / p[20].z) : (GL(b.z) - GL(a.z)) / lz;
@@ -520,10 +525,11 @@ float Shad(float2 tc_xy, float tc_z) {
     return sum * 0.25;
 }
 float4 inject(O i) : SV_Target {
-    float2 uv = i.uv;
-    float2 px = floor(uv * p[7].zw);
-    float h = frac(frac(52.9829189 * frac(dot(px, float2(0.06711056, 0.00583715)))) + p[23].x * 0.6180340);
-    float d = p[7].x + h * p[7].y;
+    // one sub-froxel offset for all froxels per frame (Halton 2, 3, 5 over 16 frames), so the history
+    // averages the froxel's whole cell; the centre while there is no history to average into
+    float3 jit = p[18].w > 0.5 ? p[23].yzw : 0.5;
+    float2 uv = (floor(i.uv * p[7].zw) + jit.xy) / p[7].zw;
+    float d = p[7].x + jit.z * p[7].y;
     float2 ndc = uv * float2(2, -2) + float2(-1, 1);
     float3 dir = float3(ndc * p[0].zw, p[4].w);   // dir.z = zsign: view forward
     float3 Pw = World(dir * d);
@@ -535,8 +541,10 @@ float4 inject(O i) : SV_Target {
     float mu = dot(rd, p[5].xyz);
     float4 s4 = float4(dot(p[10].xyz, Pw) + p[10].w, dot(p[11].xyz, Pw) + p[11].w,
                        dot(p[12].xyz, Pw) + p[12].w, dot(p[13].xyz, Pw) + p[13].w);
-    float sun = (s4.w > 0 && s4.x >= 0 && s4.x <= p[9].x && s4.y >= 0 && s4.y <= p[9].y)
-                ? Shad(s4.xy, s4.z) : 1.0;
+    // the map covers only the player's surroundings: fade its shadow out over the outer tenth
+    float2 sx = s4.xy / p[9].xy;
+    float edge = saturate(min(min(sx.x, 1.0 - sx.x), min(sx.y, 1.0 - sx.y)) * 10.0);
+    float sun = (s4.w > 0 && edge > 0) ? lerp(1.0, Shad(s4.xy, s4.z), edge) : 1.0;
     float3 L = sig * (fc + p[6].xyz * p[5].w * sun * Lobe(mu));
     float4 cur = float4(L, sig);
     // temporal: reproject through last frame's view (world -> last view space -> NDC -> uv, depth)
@@ -556,7 +564,12 @@ float4 integ(O i) : SV_Target {
     float3 S = 0;
     float T = 1.0;
     [loop] for (int j = 0; j <= k; j++) {
-        float4 v = vol3.SampleLevel(smp, float3(uv, (float)(j + 0.5) / 64.0), 0);
+        // four taps half a texel out: a 1-2-1 tent across, so froxel edges do not show as blocks
+        float w = (float)(j + 0.5) / 64.0;
+        float2 o = 0.5 / float2(128.0, 72.0);
+        float4 v = 0.25 * (vol3.SampleLevel(smp, float3(uv + o, w), 0) + vol3.SampleLevel(smp, float3(uv - o, w), 0)
+                           + vol3.SampleLevel(smp, float3(uv + float2(o.x, -o.y), w), 0)
+                           + vol3.SampleLevel(smp, float3(uv + float2(-o.x, o.y), w), 0));
         if (any(!isfinite(v))) v = 0;   // one bad froxel must not poison the rest of the column
         float sig = v.a;
         float dx = near_m * pow(step, (float)j) * (step - 1.0);
@@ -566,15 +579,32 @@ float4 integ(O i) : SV_Target {
     }
     return float4(S, T);
 }
+// the slice position of a view depth in metres
+float VolK(float dm) { return p[7].z * log(max(dm, p[7].x) / p[7].x) / log(p[7].y / p[7].x); }
+// the AO after in-shader fog: occlude the surface's share only, out = S + (c - S) * ao, so the fog's own
+// light is not darkened and fogged creases do not show as dark seams
+float4 aoapply(O i) : SV_Target {
+    float2 uv = i.uv;
+    float4 c = t2.SampleLevel(smp, uv, 0);
+    float a = t3.SampleLevel(smp, uv, 0).r;
+    if (p[0].x > 1.5 && p[0].x < 2.5) return float4(a, a, a, c.a);
+    if (p[0].x > 2.5 && uv.x < 0.5) return c;
+    float d = t0.SampleLevel(smp, uv, 0).r;
+    if (d <= 0.0 || d >= 0.9999) return c;
+    float w = (VolK(d * 16777215.0 / p[4].x) - 0.5) / p[7].z;
+    float3 S = vol3.SampleLevel(smp, float3(uv, saturate(w)), 0).rgb;
+    return float4(S + max(c.rgb - S, 0.0) * a, c.a);
+}
 float4 volfog(O i) : SV_Target {
     float2 uv = i.uv;
     float d = t0.SampleLevel(smp, uv, 0).r;
     float4 c = t2.SampleLevel(smp, uv, 0);
-    if (d <= 0.0 || d >= 0.9999) return c;   // sky: unchanged (Fog() handles it)
-    float dm = d * 16777215.0 / p[4].x;
-    float kf = p[7].z * log(max(dm, p[7].x) / p[7].x) / log(p[7].y / p[7].x);
-    float w = (kf - 0.5) / p[7].z;
-    float4 v = vol3.Sample(smp, float3(uv, saturate(w)));
+    bool sky = d <= 0.0 || d >= 0.9999;
+    if (!sky && p[8].y > 0.5) return c;   // sky only: the surfaces fogged themselves
+    // the sky takes the volume's far end, as geometry there does: far shapes melt into the sky behind them
+    float w = sky ? 1.0 : (VolK(d * 16777215.0 / p[4].x) - 0.5) / p[7].z;
+    float4 v = vol3.SampleLevel(smp, float3(uv, saturate(w)), 0);
+    if (sky) return float4(c.rgb * v.a + v.rgb, c.a);
     // the surface loses colour with distance, then the fog's light is added: the fog keeps its own colour
     float3 cs = lerp(c.rgb, dot(c.rgb, float3(0.299, 0.587, 0.114)).xxx, p[8].w * (1.0 - v.a));
     return float4(cs * v.a + v.rgb, c.a);
@@ -640,6 +670,7 @@ class FciExtension final : public gpu::Extension {
         fog_wisp_ = fci_gfx::Number("RECOMP_FCI_XBR_FOG_WISPS", 0.6f);
         fog_wisp_size_ = std::max(0.5f, fci_gfx::Number("RECOMP_FCI_XBR_FOG_WISP_SIZE", 4.0f));
         fog_desat_ = fci_gfx::Number("RECOMP_FCI_XBR_FOG_DESAT", 0.35f);
+        fog_ceil_ = std::max(1.0f, fci_gfx::Number("RECOMP_FCI_XBR_FOG_CEIL", 150.0f));
         fog_lookup_ = fci_gfx::Number("RECOMP_FCI_XBR_FOG_LOOKUP", 1) > 0.5f;   // 1: in-shader, 0: post-pass
         return remake;   // the shadow map is made again at its new size
     }
@@ -650,6 +681,7 @@ class FciExtension final : public gpu::Extension {
             r.Reset();
         post_.Reset();
         scene_rt_ = scene_ds_ = nullptr;
+        refl_rt_ = nullptr;
         done_ = fog_done_ = false;
         fog_captured_ = refl_captured_ = false;
         fog_gate_ = 0;
@@ -696,6 +728,18 @@ class FciExtension final : public gpu::Extension {
                 volsize[0] = float(rt->w);
                 volsize[1] = float(rt->h);
             }
+        } else if (fog_mode_ == 3 && rt && rt == refl_rt_ && fog_end_w_ > 0) {
+            // the reflection: a uniform fog at the density near the water, the sky taken as kFarM away
+            float s0 = 3.0f * fog_wpm_frame_ / fog_end_w_;
+            float layer = fog_layer_ > 0 && fog_layer_vis_ > 0 ? 3.0f / fog_layer_vis_ : 0.0f;
+            ext[1] = 1.0f;   // the game's own fog off: this replaces it
+            ext[2] = dst == kBlendOne ? 7.0f : 6.0f;
+            vol[0] = fog_thick_ * (s0 + 0.5f * layer);
+            vol[1] = kFarM;
+            vol[3] = 1.0f / (refl_wpm_ > 0 ? refl_wpm_ : fog_wpm_frame_);
+            volsize[0] = fog_col_[0];
+            volsize[1] = fog_col_[1];
+            volsize[2] = fog_col_[2];
         }
     }
 
@@ -724,10 +768,10 @@ class FciExtension final : public gpu::Extension {
         bool main = rt->gw == gw && rt->gh == gh && world && ds->w == rt->w && ds->h == rt->h;
         // kill the game fog on the draws our pass covers; in mode 3 the volume lookup covers all main draws
         // once built (splitscreen: post-pass route, gate until the trigger as in mode 1)
-        // mode 3's volume fogs every scene draw, the game's fog flag aside: the water (and the draws under
-        // it) are drawn with the fog off, and popped out of the fog as the game's water came and went
+        // mode 3 also fogs fog-off draws of the game's vertex programs (the water popped out of the fog);
+        // fixed function fog-off draws are the editor's cursor and lines, kept clear
         bool fog_on = s.rs[kRsFogEnable] != 0;
-        bool vol = fog_mode_ == 3 && !vol_splitscreen_;
+        bool vol = fog_mode_ == 3 && !vol_splitscreen_ && (fog_on || (s.vs_handle & 1));
         fog_gate_ = main && (vol ? vol_ready_ : fog_mode_ && fog_on && !fog_done_) ? 1.0f : 0.0f;
         if (main) {
             bool zwrite = s.simple[kMZWriteEnable >> 2] != 0;
@@ -791,8 +835,14 @@ class FciExtension final : public gpu::Extension {
             return false;
         }
         // a non-main W-buffered fogged draw: the water reflection; its camera sets the water height
-        if (fog_mode_ && !refl_captured_ && world && s.rs[kRsFogEnable] != 0)
+        if (fog_mode_ && !refl_captured_ && world && s.rs[kRsFogEnable] != 0) {
             CaptureRefl(s);
+            refl_rt_ = rt;   // kept across frames: its sky is drawn before its first W-buffered draw
+            if (fog_mode_ == 3 && !refl_logged_) {
+                refl_logged_ = true;
+                LOGI("fci volfog: reflection %ux%u, w per metre %.0f", rt->w, rt->h, refl_wpm_);
+            }
+        }
         // the world is done: the first non-main draw after the opaque world; the AO (ao_at_ 0) and the
         // fog run here, on the world scene target, the fog after the AO
         if (opaque_ >= kOpaqueDraws && scene_rt_) {
@@ -802,14 +852,13 @@ class FciExtension final : public gpu::Extension {
             }
             if (fog_mode_ && !fog_done_ && fog_captured_) {
                 if (fog_mode_ == 3) {
-                    // in-shader lookup: the volume was built on the first main draw; sky only here
-                    if (vol_ready_)
-                        return Fog(c, *scene_rt_, *scene_ds_, true);
-                    // post-pass lookup (RECOMP_FCI_XBR_FOG_LOOKUP=0): build and composite here
-                    WaterHeight();
-                    Volume(c, s);
-                    Volfog(c, *scene_rt_, *scene_ds_);
-                    return Fog(c, *scene_rt_, *scene_ds_, true);   // sky only
+                    // in-shader lookup: the volume was built on the first main draw, the sky is fogged
+                    // here; post-pass lookup (RECOMP_FCI_XBR_FOG_LOOKUP=0): build it now, fog everything
+                    if (!vol_ready_) {
+                        WaterHeight();
+                        Volume(c, s);
+                    }
+                    return Fog(c, *scene_rt_, *scene_ds_, true);
                 }
                 return Fog(c, *scene_rt_, *scene_ds_);
             }
@@ -942,6 +991,18 @@ class FciExtension final : public gpu::Extension {
         if (!fb)
             return true;
         c.Transition(rt.res.Get(), rt.state, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        if (Volume()) {   // mode 3's surfaces are already fogged: occlude their share, not the fog's light
+            ID3D12Resource* vs[4] = {ds.res.Get(), vol_int_.Get(), fb, ao_[0].Get()};
+            DXGI_FORMAT vf[4] = {kDepthRead, DXGI_FORMAT_R16G16B16A16_FLOAT, rt.fmt, kAoFormat};
+            float vp[32] = {float(ao_mode_)};
+            vp[16] = fog_wpm_frame_;
+            vp[28] = kNearM;
+            vp[29] = kFarM;
+            vp[30] = float(kVZ);
+            c.Pass(kVolHlsl, "aoapply", rt.fmt, c.View(rt), w, h, vs, vf, vp, 32, -1);
+            c.Unbind();
+            return true;
+        }
         ID3D12Resource* as[4] = {fb, ao_[0].Get(), nullptr, nullptr};
         DXGI_FORMAT af[4] = {rt.fmt, kAoFormat, kBgra, kBgra};
         float ap[8] = {float(ao_mode_)};
@@ -1003,8 +1064,13 @@ class FciExtension final : public gpu::Extension {
     // the reflection camera, from a fogged W-buffered draw on the other target (the water reflection)
     void CaptureRefl(const State& s)
     {
-        Camera(s.transforms[kTsView].data(), cam_refl_);
+        const float* vm = s.transforms[kTsView].data();
+        Camera(vm, cam_refl_);
         refl_captured_ = true;
+        // its own w units per metre (Projection()'s pw), for mode 3's reflection fog
+        const auto& r = s.vsc[170];
+        float pw = std::abs(vm[2] * r[0] + vm[6] * r[1] + vm[10] * r[2]);
+        refl_wpm_ = pw > 1 ? pw : 0;
     }
 
     // The projection the vertex programs use: Evolution's view-projection columns in c167-c170 (hardware
@@ -1051,7 +1117,8 @@ class FciExtension final : public gpu::Extension {
     }
 
     // the post-pass fog: one full-screen pass over the scene, composited in place with c.Feedback
-    bool Fog(Context& c, Target& rt, Target& ds, bool sky_only = false)
+    // vol: mode 3, the ring and glow as here, then the volume's composite (Volfog) in place of the fog
+    bool Fog(Context& c, Target& rt, Target& ds, bool vol = false)
     {
         WaterHeight();
         float hw = water_h_;
@@ -1098,7 +1165,7 @@ class FciExtension final : public gpu::Extension {
                        float(fog_mode_),
                        hw,
                        fog_zsign_,
-                       sky_only ? 1.0f : 0.0f,
+                       0,
                        0,
                        0,
                        layer_s,
@@ -1157,6 +1224,8 @@ class FciExtension final : public gpu::Extension {
             }
             c.Transition(glow_[0].Get(), glow_state_[0], D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         }
+        if (vol)
+            return Volfog(c, rt, ds, vol_ready_ && fog_lookup_);
         c.Transition(rt.res.Get(), rt.state, D3D12_RESOURCE_STATE_RENDER_TARGET);
         fs[2] = ring_.Get();
         if (fog_glow_ > 0)
@@ -1288,6 +1357,7 @@ class FciExtension final : public gpu::Extension {
         p[76] = h0;
         p[77] = fog_height_;
         p[78] = fog_floor_;
+        p[79] = h0 + fog_ceil_;
         // p[20]: layer_s, top, soft, 0
         float layer_s = fog_layer_ > 0 && fog_layer_vis_ > 0 ? 3.0f / fog_layer_vis_ : 0.0f;
         float soft = std::clamp(fog_layer_soft_, 0.1f, std::max(0.1f, fog_layer_));
@@ -1298,7 +1368,18 @@ class FciExtension final : public gpu::Extension {
         p[84] = std::max(1.0f, fog_noise_scale_);
         p[85] = fog_noise_;
         p[86] = glow_[0] ? fog_glow_ : 0.0f;
-        p[92] = float(vol_frame_ & 1023);   // the jitter's frame index
+        // the jitter: Halton bases 2, 3, 5 over 16 frames
+        auto halton = [](int i, int b) {
+            float f = 1, r = 0;
+            for (; i > 0; i /= b)
+                f /= b, r += f * (i % b);
+            return r;
+        };
+        int hi = int(vol_frame_ & 15) + 1;
+        p[92] = float(vol_frame_ & 1023);
+        p[93] = halton(hi, 2);
+        p[94] = halton(hi, 3);
+        p[95] = halton(hi, 5);
         // p[22]: fog colour
         p[88] = fog_col_[0];
         p[89] = fog_col_[1];
@@ -1357,7 +1438,8 @@ class FciExtension final : public gpu::Extension {
         }
     }
 
-    bool Volfog(Context& c, Target& rt, Target& ds)
+    // sky_only: the in-shader lookup fogged the surfaces; this pass fogs the sky
+    bool Volfog(Context& c, Target& rt, Target& ds, bool sky_only)
     {
         float p[52] = {};
         // p[0]: tx, ty, tanx, tany
@@ -1376,6 +1458,7 @@ class FciExtension final : public gpu::Extension {
         p[30] = float(kVZ);
         // p[8]: glow_w, 0, 0, desat
         p[32] = fog_glow_;
+        p[33] = sky_only ? 1.0f : 0.0f;
         p[35] = fog_desat_;
         // p[12]: zsign, 0, 0, 0
         p[48] = fog_zsign_;
@@ -1455,6 +1538,10 @@ class FciExtension final : public gpu::Extension {
     D3D12_RESOURCE_STATES glow_state_[2]{};
     float fog_glow_ = 0.5f, fog_wisp_ = 0.6f, fog_wisp_size_ = 4.0f,
           fog_desat_ = 0.35f;                       // the fog's additions
+    float fog_ceil_ = 150.0f;
+    const Target* refl_rt_ = nullptr;
+    float refl_wpm_ = 0;
+    bool refl_logged_ = false;   // the reflection's w units per metre; 0: not found, the main view's   // the water reflection's target, fogged by its own path in mode 3   // metres above the base where the distance fog ends (mode 3)
     bool fog_lookup_ = true;                        // true: in-shader lookup, false: post-pass
     static constexpr UINT kRtvSlots = 6 + 3 * 64;   // AO(2), post, ring, glow(2), then 3 volume x 64 slices
                                                     // the glow's two targets

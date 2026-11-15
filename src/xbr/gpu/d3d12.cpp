@@ -1795,7 +1795,7 @@ ID3DBlob* D3D12Backend::Compile(const std::string& src, const char* entry, const
 namespace {
 constexpr char kShaderCacheMagic[8] = {'F', 'C', 'I', 'S', 'H', 'D', '0', '1'};
 // D3DCompile's flags and the record layout: a change makes the old file unusable, and it is started again
-constexpr uint64_t kShaderCacheSalt = D3DCOMPILE_OPTIMIZATION_LEVEL1 | 2ull << 32;
+constexpr uint64_t kShaderCacheSalt = D3DCOMPILE_OPTIMIZATION_LEVEL1 | 4ull << 32;
 struct ShaderRecord {
     uint64_t hash;
     uint64_t check;
