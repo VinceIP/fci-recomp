@@ -198,6 +198,13 @@ static int s_nlpeers;
 static unsigned s_report_peers;
 static int s_lpending;                /* count of LP_PENDING peers (cap at LIST_PENDING_MAX) */
 static volatile LONG s_lpeer_dropped; /* count of peers dropped due to failure (no relay, punch failed) */
+/* a guest's peers that ended (fci_nic_list_gone_take): the worker forgets their hosts, so a host that
+ * relaunched under its id on a new port is connected again. Under s_lock */
+static struct {
+    uint8_t nonce[16];
+    int was_live; /* it carried frames (then went quiet), or it never got through */
+} s_gone[8];
+static int s_gone_n;
 static struct sockaddr_in s_stun_ep;  /* the card's public endpoint (from STUN or _ENDPOINT) */
 static int s_stun_known;              /* 1 when the endpoint is set */
 static ULONGLONG s_stun_next;         /* next STUN send deadline */
@@ -414,7 +421,7 @@ static void transport_stop(void)
     s_lan_bc_logged = 0;
     s_lan_knock_next = s_dir_knock_next = 0;
     s_list = 0;
-    s_nlpeers = s_lpending = 0;
+    s_nlpeers = s_lpending = s_gone_n = 0;
     InterlockedExchange(&s_lpeer_dropped, 0);
     s_stun_known = s_stun_srv_valid = 0;
     s_stun_next = 0;
@@ -1149,6 +1156,14 @@ static void lpeer_remove(int i)
 {
     lpeer_t *p = &s_lpeers[i];
     finish_probe(p, p->state == LP_PENDING ? "punch" : p->state == LP_TURN_WAIT ? "turn" : "no_frame");
+    if (p->guest) {
+        if (s_gone_n == (int)(sizeof s_gone / sizeof s_gone[0]))
+            memmove(&s_gone[0], &s_gone[1], sizeof s_gone - sizeof s_gone[0]); /* keep the newest */
+        else
+            s_gone_n++;
+        memcpy(s_gone[s_gone_n - 1].nonce, p->nonce, 16);
+        s_gone[s_gone_n - 1].was_live = p->state == LP_LIVE || p->state == LP_RELAY;
+    }
     if (p->state == LP_PENDING)
         s_lpending--;
     memmove(&s_lpeers[i], &s_lpeers[i + 1], (size_t)(s_nlpeers - i - 1) * sizeof(lpeer_t));
@@ -1263,6 +1278,17 @@ int fci_nic_list_local_port(void)
     if (getsockname(s_sock, (struct sockaddr *)&a, &len))
         return 0;
     return (int)ntohs(a.sin_port);
+}
+
+/* the oldest ended guest peer: its nonce, and whether it had been live; 0 when none. Under s_lock */
+int fci_nic_list_gone_take(uint8_t nonce[16], int *was_live)
+{
+    if (!s_gone_n)
+        return 0;
+    memcpy(nonce, s_gone[0].nonce, 16);
+    *was_live = s_gone[0].was_live;
+    memmove(&s_gone[0], &s_gone[1], (size_t)(--s_gone_n) * sizeof s_gone[0]);
+    return 1;
 }
 
 /* 1 when a peer with the given endpoint ("ip:port") is pending or live; called under s_lock */
