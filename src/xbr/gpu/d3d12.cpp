@@ -2003,7 +2003,8 @@ D3D12_PRIMITIVE_TOPOLOGY_TYPE TopologyType(uint32_t topo) {
 }
 
 constexpr uint32_t kFillWireframe = 0x1B01;  // D3DFILL_WIREFRAME
-constexpr uint32_t kCullCw = 0x900;          // D3DCULL_CW
+constexpr uint32_t kCullCw = 0x900;          // D3DCULL_CW, D3DFRONT_CW
+constexpr uint32_t kCullCcw = 0x901;         // D3DCULL_CCW, D3DFRONT_CCW
 
 void FillDepthStencilDesc(const PsoKey& k, D3D12_DEPTH_STENCIL_DESC& ds) {
     ds.DepthEnable = k.zen;
@@ -2033,7 +2034,7 @@ void D3D12Backend::FillPipelineDesc(const PsoKey& k, ID3DBlob* vs, ID3DBlob* ps,
     b.RenderTargetWriteMask = UINT8(k.wmask);
     d.SampleMask = UINT_MAX;
     d.RasterizerState.FillMode = k.fill == kFillWireframe ? D3D12_FILL_MODE_WIREFRAME : D3D12_FILL_MODE_SOLID;
-    d.RasterizerState.CullMode = k.cull ? D3D12_CULL_MODE_BACK : D3D12_CULL_MODE_NONE;
+    d.RasterizerState.CullMode = k.cull == 2 ? D3D12_CULL_MODE_FRONT : k.cull ? D3D12_CULL_MODE_BACK : D3D12_CULL_MODE_NONE;
     d.RasterizerState.FrontCounterClockwise = k.ccw;
     d.RasterizerState.DepthBias = k.zbias;
     d.RasterizerState.SlopeScaledDepthBias = k.zslope;
@@ -2480,9 +2481,11 @@ void D3D12Backend::KeyDepthStencil(const State& s, const Assembled& a, PsoKey& k
 }
 
 void KeyRasterizer(const State& s, const Assembled& a, PsoKey& k) {
-    uint32_t cull = s.rs[kRsCullMode];
-    k.cull = cull != 0 && a.topology == Topology::Triangles;
-    k.ccw = cull == kCullCw;  // culling clockwise leaves counter clockwise as the front
+    // as the XDK sets the NV2A: FrontFace names the front winding (clockwise by default); CullMode culls its
+    // winding, the front face when they match and the back face otherwise. Two-sided lighting reads the front.
+    uint32_t cull = s.rs[kRsCullMode], front = s.rs[kRsFrontFace] == kCullCcw ? kCullCcw : kCullCw;
+    k.cull = cull == 0 || a.topology != Topology::Triangles ? 0 : cull == front ? 2 : 1;
+    k.ccw = front != kCullCw;
     k.fill = s.rs[kRsFillMode];
 }
 
