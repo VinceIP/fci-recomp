@@ -29,6 +29,7 @@ static const struct {
         {"display-borderless", "RECOMP_FCI_FULLSCREEN"},
         {"display-dimensions", "RECOMP_FCI_WINDOW"},
         {"display-aspect", "RECOMP_FCI_ASPECT"},
+        {"display-fov", "RECOMP_FCI_FOV"},
         {"skip-intro-movies", "RECOMP_FCI_SKIP_INTROS"},
         {"gfx-res-scale", "RECOMP_FCI_XBR_SCALE"},
         {"gfx-anisotropic-filtering", "RECOMP_FCI_XBR_ANISO"},
