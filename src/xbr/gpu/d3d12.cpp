@@ -2470,9 +2470,9 @@ void D3D12Backend::KeyDepthStencil(const State& s, const Assembled& a, PsoKey& k
         k.szfail = SimpleState(s, kMStencilZFail);
         k.spass = SimpleState(s, kMStencilPass);
     }
-    // polygon offset: bias in 24 bit depth units (the host target is float: D3D12 scales an integer bias by
-    // 2^(exponent - 23), 2^-24 for depths in [0.5, 1), where z / w depths sit); the slope is per console
-    // pixel, and an upscaled target's pixels are smaller
+    // polygon offset: bias in 24 bit depth units (the host target is float, so Draw moves it into the shader's
+    // z: D3D12 would scale it by 2^(exponent - 23)); the slope is per console pixel, and an upscaled target's
+    // pixels are smaller
     if (a.topology == Topology::Triangles && SimpleState(s, kMSolidOffsetEnable)) {
         k.zbias = int32_t(std::lround(Bits(SimpleState(s, kMDepthOffset)) * kDepth24Max / s.zscale));
         k.zslope = Bits(SimpleState(s, kMSlopeScale)) * (bound_ds_ ? float(bound_ds_->w) / bound_ds_->gw : 1.0f);
@@ -3045,6 +3045,11 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
         wbuf_[2] = k.zslope;
         k.zbias = 0;
         k.zslope = 0;
+    } else if (k.zbias && !sh.quad) {
+        // FCI: a float target scales DepthBias by its depth's exponent (a quarter below 0.25, where the sun's
+        // shadow map sits); the vertex shader adds the console's fixed-point bias to z instead
+        wbuf_[3] = float(k.zbias) / kDepth24Max;
+        k.zbias = 0;
     }
     ID3D12PipelineState* pso = EnsurePipeline(k, sh.vs_code, sh.ps_code);
     if (!pso) return;
