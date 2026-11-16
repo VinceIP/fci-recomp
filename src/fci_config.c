@@ -51,6 +51,14 @@ static const struct {
         {"controls-mouse-stick-curve", "RECOMP_MOUSE_CURVE"},
         {"controls-mouse-stick-deadzone", "RECOMP_MOUSE_DEADZONE"},
         {"controls-mouse-stick-window-ms", "RECOMP_MOUSE_WINDOW_MS"},
+        {"controls-stick-aim", "RECOMP_STICK_AIM"},
+        {"controls-stick-speed", "RECOMP_STICK_SPEED"},
+        {"controls-stick-y-scale", "RECOMP_STICK_Y_SCALE"},
+        {"controls-stick-deadzone", "RECOMP_STICK_DEADZONE"},
+        {"controls-stick-curve", "RECOMP_STICK_CURVE"},
+        {"controls-stick-boost", "RECOMP_STICK_BOOST"},
+        {"controls-stick-boost-ms", "RECOMP_STICK_BOOST_MS"},
+        {"controls-stick-invert-y", "RECOMP_STICK_INVERT_Y"},
 };
 
 /* controls-bind-<name> -> RECOMP_BIND_<CONTROL> (fci_input.c) */

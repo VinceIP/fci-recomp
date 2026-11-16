@@ -23,7 +23,8 @@ double fci_game_clock(void);                                                    
 uint32_t fci_trace_player(void);                                                   /* fci_trace.c */
 int fci_player_position(float xyz[3]);                                             /* fci_trace.c */
 
-uint32_t fci_game_view(void); /* fci_threads.c */
+uint32_t fci_game_view(void);                       /* fci_threads.c */
+void fci_input_pad_stick(int pad, uint8_t *report); /* fci_input.c: the right stick, when it aims directly */
 
 /* the id of the entity the game view controls (Camera_BuildViews, re/notes/INPUT-CAMERA.md) and the player's
  * own entity's id; the same in both games (re/notes/FRAME-RATE.md) */
@@ -251,6 +252,8 @@ void fci_pad_report(int pad, uint8_t *report)
         fflush(rec);
         ReleaseSRWLockExclusive(&lock);
     }
+    /* after the recording, so a replay drives the stick aim the same way */
+    fci_input_pad_stick(pad, report);
 }
 
 /* the direct aim of this game frame (fci_aim.c): recorded, or replaced by the recording's over the same span
