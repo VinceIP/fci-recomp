@@ -1,5 +1,5 @@
-// FCI: quick save and load post the game's own "SaveGame checkpoint=" / "LoadGame" commands, as its level
-// scripts do, at the frame boundary on the game thread; Refusal() lists when it will not
+// FCI: quick save and load post the game's own "SaveGame checkpoint=" / "StartLevel" commands, as its
+// Checkpoint trigger and Story Resume do, at the frame boundary on the game thread; Refusal() lists when it will not
 #include "fci_quicksave.h"
 
 #include <cctype>
@@ -28,11 +28,12 @@ constexpr uint32_t kObject = 0x6B3984;
 // The command path: the in-game console's post function. edx = the command text, the object pushed
 // on the stack, a ret 4 call (the callee skips the object).
 constexpr uint32_t kPost = 0x00012000;
-// The commands, as the game's scripts spell them: the save is named per level (Quick_<level>) so a load never
-// restores another level's state; the load restarts the level at it, as the scripts' level changes do
-// (sub_000B9080, 0x600150), since "LoadGame" restores the profile's last checkpoint, not the last save.
+// The commands, as the game spells them: the save as a Checkpoint trigger's Game:SaveCheckpoint, named per
+// level (Quick_<level>) so a load never restores another level's state; the load as Story Resume (format
+// 0x6095A0, sub_001509A0), which restores the level, the player's place and facing from the save.
+// RestartStartLevel (0x600150) restores the state but spawns the player at the level start.
 constexpr const char* kSaveFormat = "SaveGame checkpoint=Quick_%s";
-constexpr const char* kLoadFormat = "RestartStartLevel level=%s mission=%s checkpoint=Quick_%s";
+constexpr const char* kLoadFormat = "StartLevel level=%s mission=%s checkpoint=Quick_%s";
 constexpr uint32_t kLevelName = 0x2A4;    // the game object's level and mission names (strings), as
 constexpr uint32_t kMissionName = 0x2C0;  // sub_0004D010 sets them when a level starts
 // The multiplayer test (sub_00013760, recomp_0000.c:6007): byte +0x329 != 0 OR dword +0x60 > 1.
