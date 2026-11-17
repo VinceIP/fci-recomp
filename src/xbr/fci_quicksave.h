@@ -15,6 +15,12 @@
 namespace fci_quicksave {
 // Called when a quicksave or quickload request is taken at the frame boundary.
 void Execute(X86Context& ctx, int is_load);
+// A game command queued by the control path (RECOMP_FCI_CONTROL "post <text>"), any thread; one at a
+// time, a new one replaces the older unposted one. Taken and posted at the frame boundary (D3DDevice_Swap)
+// with the quick save and load's own mechanism, refusing only when there is no game object.
+void QueuePost(const char* text);
+std::string TakePost();
+void PostControl(X86Context& ctx, const char* text);
 // Shows another host message (the fog toggle) the same way.
 void ShowNotice(const char* msg);
 // The message to show now, empty when none or expired (any thread).

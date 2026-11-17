@@ -662,6 +662,10 @@ HLE_STDCALL(D3DDevice_Swap, 1) {
             fci_gfx_set(kv);
             fci_quicksave::ShowNotice(on ? "FOG ORIGINAL" : custom == 3 ? "FOG VOLUMETRIC" : "FOG CUSTOM");
         }
+        // RECOMP_FCI_CONTROL "post <text>": a game command the control thread queued (fci_threads.c)
+        std::string queued = fci_quicksave::TakePost();
+        if (!queued.empty())
+            fci_quicksave::PostControl(ctx, queued.c_str());
     }
     if (diag::Perf()) {  // FCI: latency figures (diag.h)
         int64_t start = diag::g_frame_start_ns.load();

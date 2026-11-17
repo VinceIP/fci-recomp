@@ -709,7 +709,7 @@ static DWORD WINAPI status_thread(LPVOID param)
         if (control) { /* new command lines since last time */
             FILE *c = fopen(control, "r");
             if (c) {
-                char line[128];
+                char line[256];  /* room for "post " + a 200-character command + the newline */
                 if (fseek(c, control_at, SEEK_SET) == 0)
                     while (fgets(line, sizeof line, c)) {
                         char *nl = strchr(line, '\n');
@@ -740,6 +740,18 @@ static DWORD WINAPI status_thread(LPVOID param)
                             extern int fci_gfx_set(const char *key_value);  /* xbr/fci_enhance.cpp */
                             extern int fci_cvar_set(const char *key_value); /* fci_cvars.c */
                             if (!fci_cvar_set(line + 4) && !fci_gfx_set(line + 4))
+                                fprintf(stderr, "[FCI] control: refused %s\n", line);
+                        } else if (!strncmp(line, "post ", 5)) {  /* a game command at the frame boundary */
+                            const char *text = line + 5;
+                            size_t n = strlen(text);
+                            int ok = n > 0 && n <= 200;
+                            for (size_t i = 0; ok && i < n; i++)
+                                if ((unsigned char)text[i] < 0x20 || (unsigned char)text[i] > 0x7E)
+                                    ok = 0;
+                            if (ok) {
+                                extern void fci_quicksave_queue_post(const char *text); /* xbr/fci_quicksave.cpp */
+                                fci_quicksave_queue_post(text);
+                            } else
                                 fprintf(stderr, "[FCI] control: refused %s\n", line);
                         } else if (!strncmp(line, "watch ", 6) || !strncmp(line, "watchrw ", 8)) {
                             extern void fci_data_watch_set(uint32_t va, int rw);

@@ -197,6 +197,33 @@ bool GlyphRows(char c, uint8_t rows[7]) {
     return true;
 }
 
+// posts a game command: the text 0x100 bytes below esp, the object pushed, ret 4; the context is restored
+// so the game's own code leaves no side effects (docs/debugging.md, "Quick save and quick load")
+bool PostText(X86Context& ctx, const char* text) {
+    if (!fci_input_quicksave_supported()) {  // kPost and kObject are Instincts' addresses
+        std::fprintf(stderr, "[FCI] post refused: not supported for this image\n");
+        std::fflush(stderr);
+        return false;
+    }
+    uint32_t object = kernel::R32(kObject);
+    if (object == 0) {
+        std::fprintf(stderr, "[FCI] post refused: no game object\n");
+        std::fflush(stderr);
+        return false;
+    }
+    X86Context saved = ctx;
+    ctx.esp -= 0x100;
+    uint32_t at = ctx.esp;
+    size_t n = std::strlen(text);
+    for (size_t i = 0; i <= n; i++) kernel::W8(at + i, i < n ? text[i] : 0);
+
+    // hle::Call places the text in edx and the object on the stack (a ret 4 call).
+    constexpr hle::Map map = hle::Make({hle::edx, hle::stack});
+    hle::Call(ctx, kPost, map, {at, object});
+    ctx = saved;
+    return true;
+}
+
 void Execute(X86Context& ctx, int is_load) {
     uint32_t object = kernel::R32(kObject);
     char reason[96];
@@ -213,25 +240,38 @@ void Execute(X86Context& ctx, int is_load) {
         std::snprintf(text, sizeof text, kLoadFormat, level.c_str(), mission.c_str(), level.c_str());
     else
         std::snprintf(text, sizeof text, kSaveFormat, level.c_str());
-    // the text sits in 0x100 bytes reserved below the old esp: the callees' frames grow down from the new
-    // esp, under the text, and the saved context puts esp back
     std::fprintf(stderr, "[FCI] %s: posting \"%s\" to %08X (level %08X)\n", is_load ? "quick load" : "quick save",
                  text, object, kernel::R32(object + kLevel));
     std::fflush(stderr);
-    X86Context saved = ctx;
-    ctx.esp -= 0x100;
-    uint32_t at = ctx.esp;
-    size_t n = std::strlen(text);
-    for (size_t i = 0; i <= n; i++) kernel::W8(at + i, i < n ? text[i] : 0);
-
-    // The whole context is saved and restored: the save and load run the game's own code (the command
-    // dispatcher, the file layer), and none of their register or FPU side effects may reach the frame
-    // that follows. hle::Call places the text in edx and the object on the stack (a ret 4 call).
-    constexpr hle::Map map = hle::Make({hle::edx, hle::stack});
-    hle::Call(ctx, kPost, map, {at, object});
-    ctx = saved;
+    PostText(ctx, text);
 
     SetNotice(is_load ? "QUICK LOAD" : "QUICK SAVE");
 }
+
+// ---- a game command queued by the control path (RECOMP_FCI_CONTROL "post <text>") ----
+// The control thread queues one text; the frame boundary (D3DDevice_Swap) posts it with PostText. One
+// command at a time: a new one replaces the older unposted one.
+std::mutex post_mu;
+std::string post_text;
+
+void QueuePost(const char* text) {
+    std::lock_guard lock(post_mu);
+    post_text = text;
+}
+
+std::string TakePost() {
+    std::lock_guard lock(post_mu);
+    std::string out;
+    std::swap(out, post_text);
+    return out;
+}
+
+void PostControl(X86Context& ctx, const char* text) {
+    if (!PostText(ctx, text)) return;
+    std::fprintf(stderr, "[FCI] control: posted \"%s\"\n", text);
+    std::fflush(stderr);
+}
+
+extern "C" void fci_quicksave_queue_post(const char* text) { QueuePost(text); }
 
 }  // namespace fci_quicksave

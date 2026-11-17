@@ -12,6 +12,7 @@ variables) in a folder of its own with copied fixtures, drives the pad, captures
 References and fixtures come from the game, so they live in the test folder (FCI_REGRESS, default
 build/regress), never in Git. Fixtures, each copied in once:
   save-tunnel        a save folder whose checkpoint is Story Mode's Training tunnel
+  save-bunker        a save folder at The Bunker (the quick save and load scenario's level)
   editor-save        the save folder of a game that went to the Map Editor
   editor-launch.bin  the launch page that switch wrote (RECOMP_LAUNCH_DATA)
 
@@ -43,7 +44,7 @@ import game_driver
 from game_driver import EDITOR_EXE, FIXTURES, GAME_DIR, GAME_EXE, KINIT, REGRESS  # noqa: E402
 
 GOLDEN = REGRESS / "golden"
-FIXTURE_NAMES = ("save-tunnel", "editor-save", "editor-launch.bin")
+FIXTURE_NAMES = ("save-tunnel", "save-bunker", "editor-save", "editor-launch.bin")
 
 # the editor's menus to terrain mode (Create a New Map), about 60 s after start
 EDITOR_TO_TERRAIN = ["16.2:down:200", "16.6:a:200", "29.4:up:200", "29.8:a:200", "31.4:a:200", "50.9:a:200"]
@@ -111,6 +112,42 @@ SCENARIOS = {
             "capture",
         ],
         "block": 30,
+    },
+    "quicksave": {
+        "what": "quick save and load: F5 saves, walk away, F9 loads back at the save's view",
+        "kind": "driven",
+        "save": "save-bunker",
+        "seconds": 60,
+        "steps": [
+            "wait:title",
+            "sleep:2",
+            "pad:start:200",
+            "sleep:3",
+            "pad:a:200",
+            "sleep:3",
+            "pad:a:200",
+            "sleep:3",
+            "pad:a:200",
+            "wait:ingame",
+            "sleep:2",
+            "pad:lup:5000",
+            "sleep:1",
+            "key:74",
+            "sleep:3",  # past the 2 s notice, which the frame after the load does not have
+            "capture",
+            "mouse:3600:0",
+            "pad:lup:2000",
+            "sleep:1",
+            "capture",
+            "key:78",
+            "wait:ingame",
+            "sleep:3",
+            "capture",
+        ],
+        "block": 30,
+        "log": ["quick save: posting", "quick load: posting"],
+        # the load restores the save's view: the last frame matches the first (same run)
+        "same_frames": [(0, 2)],
     },
     "editor-terrain": {
         "what": "map editor: Create a New Map, terrain bump with Y raises a hill",
@@ -522,6 +559,14 @@ def check(name, sc, result, folder, bless):
             problems.append(f"log line {needle!r} seen {text.count(needle)} times, {count} expected")
     if sc.get("cache_times"):
         problems += cache_time_problems(folder / "save" / "Cache" / "sounds_xb", text)
+    for a, b in sc.get("same_frames", []):  # frames of this run that must match each other
+        if a >= len(result["frames"]) or b >= len(result["frames"]):
+            problems.append(f"same_frames {a}/{b}: only {len(result['frames'])} frames captured")
+            continue
+        mask = block_mask(sc["block_mask"]) if "block_mask" in sc else frozenset()
+        mean, block = diff(lum_stats(result["frames"][a])[0], lum_stats(result["frames"][b])[0], mask)
+        if mean > MEAN_TOLERANCE or block > sc["block"]:
+            problems.append(f"frames {a} and {b} differ: mean {mean:.1f}, worst block {block:.1f}")
     if "windows" in result:
         w = result["windows"]
         if any(x["frames"] != 1 for x in w):

@@ -12,6 +12,8 @@ as long as the game does and no longer.
   pad:<button>[+<button>][:<ms>]   live pad (RECOMP_PAD_LIVE syntax: a b x y start back lup rright ...)
   mouse:<dx>:<dy>       mouse motion in counts, as if captured (on foot: dx * 0.05 degrees of turn)
   set:<KEY>=<value>     change a graphics option now (RECOMP_FCI_XBR_*, src/xbr/fci_gfx.h)
+  post:<text>           a game command, posted at the next frame boundary (~ is a space)
+  checkpoint:<L>:<N>    post:StartLevel level=<L> mission=<L> checkpoint=<N> (Story Resume's command)
   capture               the next presented frame, under capture/
   dump:<name>           guest RAM now, memdump-<name>.bin
 
@@ -80,6 +82,20 @@ def stage_builds():
 
 class StepFailed(Exception):
     pass
+
+
+# The RECOMP_FCI_CONTROL line of a control-file step (tests/test_driver_steps.py); StepFailed on a
+# malformed one
+def control_line(spec):
+    kind, _, arg = spec.partition(":")
+    if kind == "post":  # a game command, posted at the next frame boundary (~ is a space)
+        return f"post {arg.replace('~', ' ')}"
+    if kind == "checkpoint":  # LEVEL:NAME: Story Resume's command at the level's checkpoint
+        level, _, name = arg.partition(":")
+        if not level or not name:
+            raise StepFailed(f"checkpoint: want LEVEL:NAME, got {spec}")
+        return f"post StartLevel level={level} mission={level} checkpoint={name}"
+    raise StepFailed(f"unknown control step {spec}")
 
 
 # FCI_TEST_QUIET=1 (the default): the game runs below normal priority and its window is kept beyond the
@@ -272,6 +288,10 @@ class Game:
             with open(self.control, "a") as f:
                 f.write(f"{kind} {arg.replace('~', ' ') if kind == 'type' else arg}\n")
             time.sleep(0.3)  # read within 100 ms, replayed on the next frame
+        elif kind in ("post", "checkpoint"):
+            with open(self.control, "a") as f:
+                f.write(control_line(spec) + "\n")
+            time.sleep(0.3)  # read within 100 ms, posted at the next frame boundary
         elif kind == "set":
             with open(self.control, "a") as f:
                 f.write(f"set {arg}\n")
