@@ -143,7 +143,17 @@ bool HaveQuickSave(const std::string& level) {
 }
 
 // the refusal reason into the buffer, or null when the command may go
-const char* Refusal(uint32_t object, int is_load, char* buf, size_t n) {
+// player 0 alive, the test a Checkpoint trigger makes before it saves (Script:IsAlive, sub_00205290): the
+// entity from sub_0004CD60 (eax the game object, ecx the player), then sub_00020390 with esi the entity
+bool PlayerAlive(X86Context& ctx, uint32_t object) {
+    X86Context saved = ctx;
+    uint32_t ent = hle::Call(ctx, 0x0004CD60, hle::Make({hle::eax, hle::ecx}), {object, 0});
+    bool alive = ent && (hle::Call(ctx, 0x00020390, hle::Make({hle::esi}), {ent}) & 0xFF) != 0;
+    ctx = saved;
+    return alive;
+}
+
+const char* Refusal(X86Context& ctx, uint32_t object, int is_load, char* buf, size_t n) {
     const char* verb = is_load ? "quick load" : "quick save";
     const char* why = nullptr;
     if (!fci_input_quicksave_supported())
@@ -160,6 +170,8 @@ const char* Refusal(uint32_t object, int is_load, char* buf, size_t n) {
         why = "no level";
     else if (GuestName(object + kLevelName).empty() || GuestName(object + kMissionName).empty())
         why = "no level name";
+    else if (!is_load && !PlayerAlive(ctx, object))
+        why = "the player is not alive";
     else if (is_load && !HaveQuickSave(GuestName(object + kLevelName)))
         why = "no quick save for this level";
     if (!why) return nullptr;
@@ -188,7 +200,7 @@ bool GlyphRows(char c, uint8_t rows[7]) {
 void Execute(X86Context& ctx, int is_load) {
     uint32_t object = kernel::R32(kObject);
     char reason[96];
-    if (const char* r = Refusal(object, is_load, reason, sizeof reason)) {
+    if (const char* r = Refusal(ctx, object, is_load, reason, sizeof reason)) {
         std::fprintf(stderr, "[FCI] %s\n", r);
         std::fflush(stderr);
         SetNotice(is_load ? "QUICK LOAD REFUSED" : "QUICK SAVE REFUSED");
