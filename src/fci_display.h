@@ -13,10 +13,8 @@ float fci_display_aspect(void);
 /* the display-aspect ini value normalised to one of 4:3/16:9/16:10/21:9/32:9/auto, 1 when it is one
  * of these (the WxH and W/H spellings too), 0 otherwise (fci_display.c) */
 int fci_normalize_aspect(const char *value, char *out, size_t size);
-/* the 16:10 HUD anchor for a draw whose pixel-box centre is (cx, cy) in the 640x480 guest space: the
- * nearest vertical edge by the centre's x in thirds, the nearest horizontal edge by y in halves, the
- * screen centre when the box is around the middle (fci_display.c) */
-void fci_hud_anchor(float cx, float cy, float *ax, float *ay);
+/* the HUD remap at 16:10: the 16:9 layout fitted to the width, y scaled about the middle (fci_display.c) */
+void fci_hud_fit(float a, float *sx, float *sy, float *ax, float *ay);
 /* the host's effective display aspect A: the configured aspect, or for auto the window's client aspect
  * re-read on resize (>= 4:3). Defined in fci_xbr_glue.cpp (extern "C") */
 float fci_host_aspect(void);

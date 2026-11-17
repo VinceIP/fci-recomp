@@ -80,14 +80,15 @@ int fci_normalize_aspect(const char *value, char *out, size_t size)
     return 0;
 }
 
-/* the 16:10 HUD anchor for a draw whose pixel-box centre is (cx, cy) in the 640x480 guest space: the
- * nearest vertical edge by the centre's x in thirds, the nearest horizontal edge by y in halves, the
- * vertical centre (240) when the box is on the horizontal middle (within 48 px of y 240: the crosshair,
- * a centred menu) */
-void fci_hud_anchor(float cx, float cy, float *ax, float *ay)
+/* the HUD remap (sx, sy, ax, ay) at a host aspect A between 4:3 and 16:9 (16:10): the guest's 16:9 layout
+ * fitted to the width, y scaled by A/(16/9) about the middle. One transform for every draw: a per-draw
+ * anchor split strings drawn a glyph at a time (backlog 73) */
+void fci_hud_fit(float a, float *sx, float *sy, float *ax, float *ay)
 {
-    *ax = cx < 640.0f / 3.0f ? 0.0f : cx < 2.0f * 640.0f / 3.0f ? 320.0f : 640.0f;
-    *ay = fabsf(cy - 240.0f) < 48.0f ? 240.0f : (cy < 240.0f ? 0.0f : 480.0f);
+    *sx = 1.0f;
+    *sy = a / (16.0f / 9.0f);
+    *ax = 0.0f;
+    *ay = 240.0f;
 }
 
 /* EEPROM XC_VIDEO as the dashboard stores it: video flags in the high word (0x00010000 widescreen,

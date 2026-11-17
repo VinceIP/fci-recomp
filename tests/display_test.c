@@ -60,31 +60,14 @@ int main(void)
             fails++;
         }
 
-    // fci_hud_anchor: the box centre's nearest edge (x in thirds, y in halves), the centre when around the
-    // middle (within 64 px of x 320 and 48 px of y 240)
-    struct {
-        float cx, cy, ax, ay;
-    } anchors[] = {
-            {320, 240, 320, 240},  // the middle: centred (the crosshair)
-            {300, 220, 320, 240},  // around the middle: centred
-            {320, 240 - 49, 320, 0},   // just above the middle band: top
-            {320, 240 + 49, 320, 480}, // just below the middle band: bottom
-            {320, 50, 320, 0},         // top centre: top
-            {320, 430, 320, 480},      // bottom centre: bottom
-            {50, 50, 0, 0},            // top-left corner: top-left
-            {590, 50, 640, 0},         // top-right corner: top-right
-            {50, 430, 0, 480},         // bottom-left corner: bottom-left
-            {590, 430, 640, 480},      // bottom-right corner: bottom-right
-            {100, 240, 0, 240},        // left third, middle band: left edge, vertical centre
-            {540, 240, 640, 240},      // right third, middle band: right edge, vertical centre
-            {320, 100, 320, 0},        // middle x, top half: top edge, horizontal centre
-            {320, 380, 320, 480},      // middle x, bottom half: bottom edge, horizontal centre
-    };
-    for (size_t i = 0; i < sizeof anchors / sizeof anchors[0]; i++) {
-        float ax, ay;
-        fci_hud_anchor(anchors[i].cx, anchors[i].cy, &ax, &ay);
-        expect_eq(ax, anchors[i].ax, "anchor x");
-        expect_eq(ay, anchors[i].ay, "anchor y");
+    // fci_hud_fit at 16:10: x unchanged, y scaled by 0.9 about 240; the same for every draw
+    {
+        float sx, sy, ax, ay;
+        fci_hud_fit(16.0f / 10.0f, &sx, &sy, &ax, &ay);
+        expect_eq(sx, 1.0f, "fit sx");
+        expect_eq(sy, (16.0f / 10.0f) / (16.0f / 9.0f), "fit sy");
+        expect_eq(ax, 0.0f, "fit ax");
+        expect_eq(ay, 240.0f, "fit ay");
     }
 
     // fci_display_aspect and fci_aspect_wide are cached per process: the wrapper runs one process per

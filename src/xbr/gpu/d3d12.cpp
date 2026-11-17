@@ -44,8 +44,8 @@
 #include "gpu/vertex.h"
 #include "kernel/kernel.h"
 
-// FCI: HUD box anchor (fci_display.c): the 16:10 edge pin for a draw whose pixel-box centre is (cx, cy)
-extern "C" void fci_hud_anchor(float cx, float cy, float* ax, float* ay);
+// FCI: the HUD remap at 16:10 (fci_display.c): the 16:9 layout fitted to the width
+extern "C" void fci_hud_fit(float a, float* sx, float* sy, float* ax, float* ay);
 
 using Microsoft::WRL::ComPtr;
 
@@ -2810,7 +2810,9 @@ void D3D12Backend::FillHudBox(const State& s, const DrawShaders& sh, const DrawT
         if (A > 16.0f / 9.0f) {
             c.hudbox[0] = sx;
             c.hudbox[2] = 320.0f;  // the centred 16:9 box
-        }  // else stretched to A: the identity
+        } else {  // 16:10: as the HUD, since some glyphs are quads (backlog 73)
+            fci_hud_fit(A, &c.hudbox[0], &c.hudbox[1], &c.hudbox[2], &c.hudbox[3]);
+        }
         HudLog(1, s.vs_handle);
         return;
     }
@@ -2826,13 +2828,9 @@ void D3D12Backend::FillHudBox(const State& s, const DrawShaders& sh, const DrawT
         HudLog(3, s.vs_handle);
         return;
     }
-    // 16:10: the edge pin, the box centre's nearest edge (x in thirds, y in halves)
-    float ax, ay;
-    fci_hud_anchor((minx + maxx) * 0.5f, (miny + maxy) * 0.5f, &ax, &ay);
-    c.hudbox[0] = c.hudbox[1] = A / (16.0f / 9.0f);
-    c.hudbox[2] = ax;
-    c.hudbox[3] = ay;
-    HudLog(4, s.vs_handle, ax, ay);
+    // 16:10: one transform for every draw, so a string drawn a glyph at a time stays whole
+    fci_hud_fit(A, &c.hudbox[0], &c.hudbox[1], &c.hudbox[2], &c.hudbox[3]);
+    HudLog(4, s.vs_handle, c.hudbox[2], c.hudbox[3]);
 }
 
 void D3D12Backend::UploadConstants(const State& s, const DrawShaders& sh, const PsoKey& k, const DrawTextures& stages,

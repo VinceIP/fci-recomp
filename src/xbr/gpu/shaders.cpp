@@ -37,6 +37,7 @@ struct VOut {
     float4 tc3 : TEXCOORD3;
     float fogamt : TEXCOORD4;
     float wdep : TEXCOORD6;  // FCI: w, perspective correct, for W-buffered depth
+    float4 clip : SV_ClipDistance0;  // FCI: a remapped 2D draw clipped to the guest screen
 };
 cbuffer VC : register(b0) { float4 c[192]; };
 cbuffer DC : register(b1) {
@@ -236,7 +237,10 @@ const char* kVsEpilogue = R"(
     if (abs(p.x - (surf.x - 0.5)) < 1e-3) p.x = surf.x;
     if (abs(p.y - (surf.y - 0.5)) < 1e-3) p.y = surf.y;
     // the pretransformed 2D remapped from the guest's 16:9 to the host aspect A about its anchor
-    // (the centred 16:9 box at A > 16:9, the edge pin at 16:10); (1,1,0,0) is the identity
+    // (the centred 16:9 box at A > 16:9, fitted to the width at 16:10); (1,1,0,0) is the identity
+    // what the console draws off screen stays off screen once the remap shrinks the layout into view
+    bool remap = any(hudbox != float4(1, 1, 0, 0));
+    o.clip = remap ? float4(p.x + 1, surf.x + 1 - p.x, p.y + 1, surf.y + 1 - p.y) : float4(1, 1, 1, 1);
     p.xy = (p.xy - hudbox.zw) * hudbox.xy + hudbox.zw;
     q.x = p.x * 2 / surf.x - 1;
     q.y = 1 - p.y * 2 / surf.y;
@@ -843,6 +847,7 @@ std::string FixedVertexHlsl(uint16_t regs, bool pretransformed, uint64_t decode,
     o.tc3 = oT3;
     o.fogamt = fogfactor(abs(cp.z));
     o.wdep = cp.w;
+    o.clip = float4(1, 1, 1, 1);
     return o;
 }
 )";

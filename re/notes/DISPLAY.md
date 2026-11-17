@@ -33,7 +33,11 @@ chosen aspect A, rendering the anamorphic buffer with more columns than lines (a
 renders at 3 x 2.25 of 640x480), so nothing is lost to the stretch. For A wider than 16:9 the guest
 keeps answering 16:9 to the console query (the view's pixel aspect `this+0x6AC` stays 1.333); the
 host widens the projection (the prehook scales the aspect argument by A / (16/9)) and remaps the
-pretransformed HUD draws: edge-pinned at 16:10, a centred 16:9 box at wider aspects. A first run at 16:10 and
+pretransformed HUD draws: at 16:10 the 16:9 layout fitted to the width (y scaled by 0.9 about 240, the
+same for every draw and for image quads), a centred 16:9 box at wider aspects; a remapped draw is clipped
+to the guest screen (SV_ClipDistance), so what the game parks off screen stays hidden. The earlier 16:10
+edge pin (each draw anchored by its own centre) split the menu's strings, drawn a glyph at a time, some
+glyphs as image quads (backlog 73; drives m1610-103439 before, m1610d-105528 and t1610-105607 after). A first run at 16:10 and
 wider reads the log line (`RECOMP_FCI_HUD_LOG=1`, one `[FCI] hud: ...` a second) and checks: the FVF
 marker map (which `vs_handle`s are world-derived markers, centred, not pinned), the multi-draw HUD
 elements across anchors (the radar, the weapon stats, the map: each is a separate draw with its own
