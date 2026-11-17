@@ -13,6 +13,7 @@
 #include "xdk/hle.h"
 
 extern "C" int fci_input_quicksave_supported(void);  // fci_input.c
+extern "C" int fci_input_evolution_game(void);       // fci_input.c
 extern "C" const char* fci_save_dir;                 // fci_main.c
 
 #ifdef _WIN32
@@ -22,24 +23,37 @@ extern "C" const char* fci_save_dir;                 // fci_main.c
 namespace fci_quicksave {
 namespace {
 
-// The game object the commands post to, and the command path. These are Instincts' addresses;
-// Evolution's differ (data/evolution/) and are not wired up here: the title check below refuses.
-constexpr uint32_t kObject = 0x6B3984;
-// The command path: the in-game console's post function. edx = the command text, the object pushed
-// on the stack, a ret 4 call (the callee skips the object).
-constexpr uint32_t kPost = 0x00012000;
+// Per title: the game object the commands post to, its post function, the level and mission names (guest
+// strings, set when a level starts) and the calls the refusals make (qwen/notes/q189-evo-quicksave.md).
+struct Title {
+    uint32_t object;       // the global holding the game object
+    uint32_t post;         // Instincts: edx = text, object pushed (ret 4); Evolution: (object, text) (ret 8)
+    bool post_on_stack;    // Evolution's convention
+    uint32_t level_name, mission_name;
+    uint32_t level;        // the level object LoadGame null-checks (0: no such field)
+    uint32_t net_flag, players;  // the multiplayer test: byte net_flag != 0 OR dword players > 1
+    uint32_t player, alive;  // the player-entity getter (eax object, ecx index) and IsAlive (esi entity)
+    const char* title_id;  // the UDATA folder
+};
+// Instincts: sub_00012000; names set by sub_0004D010; multiplayer as sub_00013760 (recomp_0000.c:6007)
+constexpr Title kInstincts = {0x6B3984, 0x00012000, false, 0x2A4, 0x2C0, 0x24,
+                              0x329, 0x60, 0x0004CD60, 0x00020390, "55530008"};
+// Evolution: sub_00012050 as its Resume (sub_000FCB1B) calls it; multiplayer as sub_000130A6
+constexpr Title kEvolution = {0x56B594, 0x00012050, true, 0x2BC, 0x2D8, 0,
+                              0x342, 0x64, 0x0003C6E9, 0x0001B53C, "55530060"};
 // The commands, as the game spells them: the save as a Checkpoint trigger's Game:SaveCheckpoint, named per
 // level (Quick_<level>) so a load never restores another level's state; the load as Story Resume (format
 // 0x6095A0, sub_001509A0), which restores the level, the player's place and facing from the save.
 // RestartStartLevel (0x600150) restores the state but spawns the player at the level start.
 constexpr const char* kSaveFormat = "SaveGame checkpoint=Quick_%s";
 constexpr const char* kLoadFormat = "StartLevel level=%s mission=%s checkpoint=Quick_%s";
-constexpr uint32_t kLevelName = 0x2A4;    // the game object's level and mission names (strings), as
-constexpr uint32_t kMissionName = 0x2C0;  // sub_0004D010 sets them when a level starts
-// The multiplayer test (sub_00013760, recomp_0000.c:6007): byte +0x329 != 0 OR dword +0x60 > 1.
-constexpr uint32_t kNetFlag = 0x329;
-constexpr uint32_t kPlayers = 0x60;
-constexpr uint32_t kLevel = 0x24;  // the level object (null-checked by LoadGame)
+
+// the running title's table; null for the map editors (no game command path mapped)
+const Title* RunningTitle() {
+    if (fci_input_quicksave_supported()) return &kInstincts;
+    if (fci_input_evolution_game()) return &kEvolution;
+    return nullptr;
+}
 // The notice expiry, in milliseconds.
 constexpr unsigned long long kNoticeMs = 2000;
 
@@ -133,46 +147,43 @@ std::string GuestName(uint32_t at) {
     return out;
 }
 
-// a Quick_<level>.fcs in any of the title's profile folders (UDATA\55530008\<profile>)
-bool HaveQuickSave(const std::string& level) {
+// a Quick_<level>.fcs in any of the title's profile folders (UDATA\<title id>\<profile>)
+bool HaveQuickSave(const Title& t, const std::string& level) {
     std::error_code ec;
-    std::filesystem::path udata = std::filesystem::path(fci_save_dir ? fci_save_dir : "") / "UDATA" / "55530008";
+    std::filesystem::path udata = std::filesystem::path(fci_save_dir ? fci_save_dir : "") / "UDATA" / t.title_id;
     for (const auto& e : std::filesystem::directory_iterator(udata, ec))
         if (e.is_directory(ec) && std::filesystem::exists(e.path() / ("Quick_" + level + ".fcs"), ec)) return true;
     return false;
 }
 
-// the refusal reason into the buffer, or null when the command may go
-// player 0 alive, the test a Checkpoint trigger makes before it saves (Script:IsAlive, sub_00205290): the
-// entity from sub_0004CD60 (eax the game object, ecx the player), then sub_00020390 with esi the entity
-bool PlayerAlive(X86Context& ctx, uint32_t object) {
+// player 0 alive, the test a Checkpoint trigger makes before it saves (Instincts Script:IsAlive, sub_00205290):
+// the entity from the getter (eax the game object, ecx the player), then IsAlive with esi the entity
+bool PlayerAlive(X86Context& ctx, const Title& t, uint32_t object) {
     X86Context saved = ctx;
-    uint32_t ent = hle::Call(ctx, 0x0004CD60, hle::Make({hle::eax, hle::ecx}), {object, 0});
-    bool alive = ent && (hle::Call(ctx, 0x00020390, hle::Make({hle::esi}), {ent}) & 0xFF) != 0;
+    uint32_t ent = hle::Call(ctx, t.player, hle::Make({hle::eax, hle::ecx}), {object, 0});
+    bool alive = ent && (hle::Call(ctx, t.alive, hle::Make({hle::esi}), {ent}) & 0xFF) != 0;
     ctx = saved;
     return alive;
 }
 
-const char* Refusal(X86Context& ctx, uint32_t object, int is_load, char* buf, size_t n) {
+// the refusal reason into the buffer, or null when the command may go
+const char* Refusal(X86Context& ctx, const Title* t, uint32_t object, int is_load, char* buf, size_t n) {
     const char* verb = is_load ? "quick load" : "quick save";
     const char* why = nullptr;
-    if (!fci_input_quicksave_supported())
+    if (!t)
         why = "not supported for this image";
     else if (object == 0)
         why = "no game object";
-    // sub_00013760 (recomp_0000.c:6007): the game's "network or multi-player game" test.
-    // Returns 1 when byte object+0x329 != 0 OR dword object+0x60 > 1.
-    else if (kernel::R8(object + kNetFlag) != 0 || kernel::R32(object + kPlayers) > 1)
+    else if (kernel::R8(object + t->net_flag) != 0 || kernel::R32(object + t->players) > 1)
         why = "multiplayer";
-    // the level object the game's own LoadGame null-checks (sub_0004C260 at 0004CC23); whether menus clear
-    // it is unverified, so every post logs it
-    else if (kernel::R32(object + kLevel) == 0)
+    // whether menus clear the level object is unverified, so every post logs it
+    else if (t->level && kernel::R32(object + t->level) == 0)
         why = "no level";
-    else if (GuestName(object + kLevelName).empty() || GuestName(object + kMissionName).empty())
+    else if (GuestName(object + t->level_name).empty() || GuestName(object + t->mission_name).empty())
         why = "no level name";
-    else if (!is_load && !PlayerAlive(ctx, object))
+    else if (!is_load && !PlayerAlive(ctx, *t, object))
         why = "the player is not alive";
-    else if (is_load && !HaveQuickSave(GuestName(object + kLevelName)))
+    else if (is_load && !HaveQuickSave(*t, GuestName(object + t->level_name)))
         why = "no quick save for this level";
     if (!why) return nullptr;
     std::snprintf(buf, n, "%s refused: %s", verb, why);
@@ -197,15 +208,16 @@ bool GlyphRows(char c, uint8_t rows[7]) {
     return true;
 }
 
-// posts a game command: the text 0x100 bytes below esp, the object pushed, ret 4; the context is restored
+// posts a game command: the text 0x100 bytes below esp, then the title's post; the context is restored
 // so the game's own code leaves no side effects (docs/debugging.md, "Quick save and quick load")
 bool PostText(X86Context& ctx, const char* text) {
-    if (!fci_input_quicksave_supported()) {  // kPost and kObject are Instincts' addresses
+    const Title* t = RunningTitle();
+    if (!t) {
         std::fprintf(stderr, "[FCI] post refused: not supported for this image\n");
         std::fflush(stderr);
         return false;
     }
-    uint32_t object = kernel::R32(kObject);
+    uint32_t object = kernel::R32(t->object);
     if (object == 0) {
         std::fprintf(stderr, "[FCI] post refused: no game object\n");
         std::fflush(stderr);
@@ -217,31 +229,33 @@ bool PostText(X86Context& ctx, const char* text) {
     size_t n = std::strlen(text);
     for (size_t i = 0; i <= n; i++) kernel::W8(at + i, i < n ? text[i] : 0);
 
-    // hle::Call places the text in edx and the object on the stack (a ret 4 call).
-    constexpr hle::Map map = hle::Make({hle::edx, hle::stack});
-    hle::Call(ctx, kPost, map, {at, object});
+    if (t->post_on_stack)
+        hle::Call(ctx, t->post, hle::Make({hle::stack, hle::stack}), {object, at});
+    else
+        hle::Call(ctx, t->post, hle::Make({hle::edx, hle::stack}), {at, object});
     ctx = saved;
     return true;
 }
 
 void Execute(X86Context& ctx, int is_load) {
-    uint32_t object = kernel::R32(kObject);
+    const Title* t = RunningTitle();
+    uint32_t object = t ? kernel::R32(t->object) : 0;
     char reason[96];
-    if (const char* r = Refusal(ctx, object, is_load, reason, sizeof reason)) {
+    if (const char* r = Refusal(ctx, t, object, is_load, reason, sizeof reason)) {
         std::fprintf(stderr, "[FCI] %s\n", r);
         std::fflush(stderr);
         SetNotice(is_load ? "QUICK LOAD REFUSED" : "QUICK SAVE REFUSED");
         return;
     }
 
-    std::string level = GuestName(object + kLevelName), mission = GuestName(object + kMissionName);
+    std::string level = GuestName(object + t->level_name), mission = GuestName(object + t->mission_name);
     char text[200];
     if (is_load)
         std::snprintf(text, sizeof text, kLoadFormat, level.c_str(), mission.c_str(), level.c_str());
     else
         std::snprintf(text, sizeof text, kSaveFormat, level.c_str());
     std::fprintf(stderr, "[FCI] %s: posting \"%s\" to %08X (level %08X)\n", is_load ? "quick load" : "quick save",
-                 text, object, kernel::R32(object + kLevel));
+                 text, object, t->level ? kernel::R32(object + t->level) : 0);
     std::fflush(stderr);
     PostText(ctx, text);
 

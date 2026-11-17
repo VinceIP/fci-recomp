@@ -315,10 +315,16 @@ int fci_input_take_fog_request(void)
 {
     return InterlockedExchange(&fog_request, 0) != 0;
 }
-/* the quick save addresses are the Instincts game's; the map editor and Evolution are other images */
+/* Instincts' game image (not its map editor): fci_quicksave.cpp has its addresses */
 int fci_input_quicksave_supported(void)
 {
     return !_stricmp(FCI_IMAGE_FILENAME, "default.xbe") && !strcmp(FCI_TITLE_NAME, "Far Cry Instincts");
+}
+
+/* Evolution's game image (not its map editor): fci_quicksave.cpp has its addresses too */
+int fci_input_evolution_game(void)
+{
+    return !_stricmp(FCI_IMAGE_FILENAME, "default.xbe") && !strcmp(FCI_TITLE_NAME, "Far Cry Instincts Evolution");
 }
 
 /* a key (virtual key, left/right resolved by the caller) or mouse button: the generic Shift/Ctrl/Alt follow */
