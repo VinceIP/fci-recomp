@@ -61,10 +61,27 @@ object (a light's or shadow's frustum).
 
 The title's vertex programs read the matrix it uploads as shader constants, not the device's projection
 transform, so the host's SetTransform cannot change the view. `display-fov` (RECOMP_FCI_FOV, vertical
-degrees, clamped 40-110) prehooks the builder and scales its fovy argument by target / 67.5. Only the
-argument changes, never the game's fields, so the scale cannot compound and the game's own variation
-(zoom, vehicles) keeps its ratio. The world and the view model move together; square projections are left
-alone. 67.5 is Instincts' on-foot value; Evolution's own was not measured, so there the target is
-approximate. Frames: Instincts Training tunnel at 0/60/90 (drive fov0-025127, fw60-033753, fw90-033835),
-Evolution story at 0/90 (evo drive efov0-040601, efov90-040657).
+degrees, clamped 40-110) scales by target / 67.5:
+
+- Instincts: at the camera, not the builder. `sub_002A84E0` is the camera update (ebx the camera): it
+  builds the projection (fovy = +0x38 / +0x384) and the frustum extents (+0x388..+0x3A8, from
+  tan(+0x38 * k) and tan(fovy * k)) from the FOV field +0x38, radians. Scaling only the builder's argument
+  widened the picture but left the frustum and the water at the old angle (backlog 65). The update runs
+  about ten times a frame on several cameras (logged 2026-11-17, return address: field): camera A
+  0x000A7DAA/0x000A7DC9/0x000172CC (pi/2, ratio 1, rewritten each frame by sub_000A7D70); the render
+  camera 0x000F0C55 (A's field copied, ratio 4:3); fixed cameras 0x00457223 (pi/4 and pi/2),
+  0x004588A5/0x00458B7D (explicit extents), 0x00458C66, 0x0045EA28 (ratio 1: shadow, cube-map and
+  reflection views). The prehook scales the field only when Camera_BuildViews calls (0x000F0796,
+  0x000F079B, 0x000F0C55), once per value (it remembers what it wrote), clamped to 2.97 rad. The builder
+  hook no longer scales fovy on Instincts.
+- Evolution: the builder's fovy argument is still scaled (its camera update is not mapped).
+
+Square projections are left alone. 67.5 is Instincts' on-foot value; Evolution's own was not measured.
+Frames 2026-11-17: Beach at 0/90/110 (drive beachf0-101845, beach90-100541, beachf110-101948) and Rain
+Forest at 0/90 (rain0-100805, rain90-100912): the whole frame is drawn and the water reaches the edges;
+default unchanged. Open: in the Training tunnel (an indoor sector) at 90 a strip about 70 px wide at each
+side is never redrawn (still90-100711, standing still: hard vertical edges, stale content), with or
+without scaling camera A, so indoor (portal) visibility takes its view width from somewhere not yet found;
+at 110 the game also sets a 384x384 scissor there (sub_002425F0, from a rect table at view+0x2CE0).
+At 110 on Beach a white wedge appeared at the bottom left (not checked).
 

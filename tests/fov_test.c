@@ -1,23 +1,31 @@
-/* Unit test for display-fov (Q71): the perspective-builder prehook in fci_fov.c.
+/* Unit test for display-fov (Q71): the camera-update and perspective-builder prehooks in fci_fov.c.
  *
  * Compiles the shipping source (src/fci_fov.c) against a minimal mock of recomp_types.h
- * (tests/fov_mock/recomp_types.h) and a driver that supplies the guest stack. The driver
- * sets RECOMP_FCI_FOV (the target, vertical degrees), places the fovy at g_esp + 8
- * (the second cdecl parameter of sub_005514C9), and checks the fovy after the prehook runs.
+ * (tests/fov_mock/recomp_types.h) and a driver that supplies the guest registers and memory.
  *
- * The hook scales the fovy by a fixed ratio (target / 67.5, both vertical degrees; 67.5 is
- * the game's on-foot vfov, fci_enhance.cpp:450). The fovy is a stack parameter, not a
- * persistent field, so there is no compounding: the game re-reads its field each frame
- * and passes the same fovy, which the hook scales again.
+ * Instincts scales the camera's FOV field (radians at camera+0x38; the game writes pi/2 each frame,
+ * projection fovy = field / ratio) in the camera update's prehook (fci_prehook_002A84E0), only when the
+ * return address is one of Camera_BuildViews' calls (the render camera; 0x000F0C55 here): shadow and
+ * cube-map cameras keep their FOV. The scale is target/67.5, once: the hook remembers the value it wrote,
+ * so a second call does not compound, and a new game value (a zoom) is picked up. A non-positive field,
+ * or one of 3.1 or more, is left alone; the result is clamped to 2.97 (170 degrees).
  *
- * The vectors (one process run each, because the prehook caches the target on first use):
- *   unset      RECOMP_FCI_FOV absent: the fovy is left at 1.1781 (the game's own)
- *   zero       RECOMP_FCI_FOV=0: the fovy is left at 1.1781 (the game's own)
- *   target     RECOMP_FCI_FOV=60: the fovy is 1.1781*(60/67.5)=1.047; stable across 3
- *              calls; a zoom to 2.0 is scaled: 2.0*(60/67.5)=1.778; reset to 1.1781
- *              scales back to 1.047; an aspect of 1.0 (a light's frustum) is left alone
- *   clamp-low  RECOMP_FCI_FOV=20: the fovy is 1.1781*(40/67.5)=0.698 (clamped to 40)
- *   clamp-high RECOMP_FCI_FOV=200: the fovy is 1.1781*(110/67.5)=1.911 (clamped to 110)
+ * The perspective builder (fci_prehook_005514C9) does not scale the fovy on Instincts; it scales the
+ * display aspect (g_esp+12 by A/(16/9) when A is not 16:9 or 4:3) and leaves a square projection alone.
+ *
+ * The vectors (one process run each, because the hook caches the target on first use):
+ *   cam-unset        RECOMP_FCI_FOV absent: the field stays pi/2
+ *   cam-zero         RECOMP_FCI_FOV=0: the field stays pi/2
+ *   cam-target       RECOMP_FCI_FOV=60: pi/2*(60/67.5); stable x3; no compound; zoom 1.0 -> 1.0*(60/67.5);
+ *                    reset to pi/2 scales back
+ *   cam-clamp-low    RECOMP_FCI_FOV=20: the target is clamped up to 40
+ *   cam-clamp-high   RECOMP_FCI_FOV=200: the target is clamped down to 110
+ *   cam-clamp-result RECOMP_FCI_FOV=110, field 2.0: 3.26 -> 2.97
+ *   cam-nonpos       RECOMP_FCI_FOV=60, field 0: left alone
+ *   cam-toolarge     RECOMP_FCI_FOV=60, field 3.1: left alone
+ *   cam-other        RECOMP_FCI_FOV=60, called from 0x00457223 (a shadow camera): left alone
+ *   aspect           RECOMP_FCI_TEST_ASPECT=1.6: the aspect argument is scaled by A/(16/9); the fovy
+ *                    is unchanged; a square projection (1.0) is left alone
  *
  *   pytest tests/test_fov_c.py
  */
@@ -28,107 +36,110 @@
 
 #include "recomp_types.h"
 
+void fci_prehook_002A84E0(void);
 void fci_prehook_005514C9(void);
 
 #define STACK_VA    0x00400000u
-#define FOV_SLOT    8       /* g_esp + 8 = param2 (fovy) */
-#define INITIAL     1.1781f /* the game's on-foot vfov in radians (~67.5 deg) */
-#define DEFAULT_DEG 67.5f
+#define CAM_VA      0x00410000u
+#define FOV_SLOT    8       /* g_esp + 8 = param2 (fovy) of the builder */
+#define ASP_SLOT    12      /* g_esp + 12 = param3 (aspect) of the builder */
+#define CAM_FOV     0x38    /* camera + 0x38 = the FOV field, radians */
+#define FIELD       1.5707964f /* the value the game writes each frame (pi/2) */
+#define RENDER_CALL 0x000F0C55u /* Camera_BuildViews' call of the camera update */
 
 static char guest[0x00700000];
 ptrdiff_t g_xbox_mem_offset = (ptrdiff_t)guest;
 uint32_t g_esp = STACK_VA;
+uint32_t g_ebx = CAM_VA;
 
-// mock of fci_host_aspect (fci_xbr_glue.cpp): 16:9 by default, RECOMP_FCI_TEST_ASPECT to override
+/* mock of fci_host_aspect (fci_xbr_glue.cpp): 16:9 by default, RECOMP_FCI_TEST_ASPECT to override */
 float fci_host_aspect(void)
 {
     const char *e = getenv("RECOMP_FCI_TEST_ASPECT");
     return e ? (float)atof(e) : 16.0f / 9.0f;
 }
 
+static float cam_field(void) { return *(float *)(guest + CAM_VA + CAM_FOV); }
+static void set_cam_field(float v) { *(float *)(guest + CAM_VA + CAM_FOV) = v; }
 static float fovy(void) { return *(float *)(guest + STACK_VA + FOV_SLOT); }
 static void set_fovy(float v) { *(float *)(guest + STACK_VA + FOV_SLOT) = v; }
-static float aspect(void) { return *(float *)(guest + STACK_VA + 12); }
-static void set_aspect(float v) { *(float *)(guest + STACK_VA + 12) = v; }
+static float aspect(void) { return *(float *)(guest + STACK_VA + ASP_SLOT); }
+static void set_aspect(float v) { *(float *)(guest + STACK_VA + ASP_SLOT) = v; }
+
+static int fail(const char *name, const char *what, float got, float want)
+{
+    printf("FAIL %s: %s=%g (want %g)\n", name, what, got, want);
+    return 1;
+}
 
 int main(int argc, char **argv)
 {
-    const char *name = argc > 1 ? argv[1] : "unset";
+    const char *name = argc > 1 ? argv[1] : "cam-unset";
     const char *expect = getenv("FCI_TEST_EXPECT");
+    const char *seed_e = getenv("FCI_TEST_SEED");
+    float seed = seed_e ? (float)atof(seed_e) : FIELD;
 
-    set_fovy(INITIAL);
+    MEM32(g_esp) = strcmp(name, "cam-other") ? RENDER_CALL : 0x00457223u; /* the return address */
 
-    if (strcmp(name, "target") == 0) {
-        /* simulate 3 frames: each frame the game re-reads its field (set_fovy) and passes
-         * the fovy to the hook, which scales it. The field is unchanged by the hook, so
-         * the same fovy is passed each frame and the result is stable. */
-        float want = INITIAL * 60.0f / DEFAULT_DEG;
+    if (strcmp(name, "cam-target") == 0) {
+        /* the full scenario: stable x3, two calls in a frame do not compound, a zoom is picked up,
+         * a reset scales back. RECOMP_FCI_FOV=60, so the scale is 60/67.5. */
+        float s = 60.0f / 67.5f;
+        float want = FIELD * s;
         for (int i = 0; i < 3; i++) {
-            set_fovy(INITIAL); /* the game re-reads its field */
-            fci_prehook_005514C9();
-            float f = fovy();
-            if (fabsf(f - want) > 1e-4f) {
-                printf("FAIL %s: frame %d fovy=%g (want %g)\n", name, i, f, want);
-                return 1;
-            }
+            set_cam_field(FIELD); /* the game re-reads its field each frame */
+            fci_prehook_002A84E0();
+            if (fabsf(cam_field() - want) > 1e-4f)
+                return fail(name, "frame", cam_field(), want);
         }
-        /* now the game zooms: the field changes to 2.0 and the hook scales it */
-        set_fovy(2.0f);
-        fci_prehook_005514C9();
-        float want2 = 2.0f * 60.0f / DEFAULT_DEG;
-        float f2 = fovy();
-        if (fabsf(f2 - want2) > 1e-4f) {
-            printf("FAIL %s: zoom fovy=%g (want %g)\n", name, f2, want2);
-            return 1;
-        }
-        /* the game resets the field; the hook scales the original */
-        set_fovy(INITIAL);
-        fci_prehook_005514C9();
-        float f3 = fovy();
-        if (fabsf(f3 - want) > 1e-4f) {
-            printf("FAIL %s: reset fovy=%g (want %g)\n", name, f3, want);
-            return 1;
-        }
-        /* a square projection (aspect 1.0 at g_esp + 12: a light or shadow frustum) is left alone */
-        set_fovy(INITIAL);
-        *(float *)(guest + STACK_VA + 12) = 1.0f;
-        fci_prehook_005514C9();
-        if (fabsf(fovy() - INITIAL) > 1e-6f) {
-            printf("FAIL %s: square aspect fovy=%g (want %g)\n", name, fovy(), INITIAL);
-            return 1;
-        }
-        *(float *)(guest + STACK_VA + 12) = 0.0f;
-        printf("ok %s: fovy=%g stable x3, %g after zoom, %g after reset\n", name, f2, f3, want);
+        /* two calls in a frame do not compound: the field is already scaled (=last_written), so the
+         * second call leaves it alone */
+        fci_prehook_002A84E0();
+        if (fabsf(cam_field() - want) > 1e-4f)
+            return fail(name, "two-calls", cam_field(), want);
+        /* a zoom: the game writes a new field (1.0), the hook scales it */
+        set_cam_field(1.0f);
+        fci_prehook_002A84E0();
+        if (fabsf(cam_field() - 1.0f * s) > 1e-4f)
+            return fail(name, "zoom", cam_field(), 1.0f * s);
+        /* a reset: the game writes the on-foot field again, the hook scales it back */
+        set_cam_field(FIELD);
+        fci_prehook_002A84E0();
+        if (fabsf(cam_field() - want) > 1e-4f)
+            return fail(name, "reset", cam_field(), want);
+        printf("ok %s: field=%g stable x3, no compound, %g after zoom, %g after reset\n",
+               name, want, 1.0f * s, want);
         return 0;
     }
 
     if (strcmp(name, "aspect") == 0) {
-        // the display aspect: the aspect argument (g_esp + 12) is scaled by A / (16/9) when A is not 16:9
-        // and the projection is not square; a square projection (1.0) is left alone
+        /* the display aspect: the aspect argument (g_esp+12) is scaled by A/(16/9) when A is not 16:9
+         * and the projection is not square; the fovy is unchanged (Instincts); a square projection
+         * (1.0) is left alone */
         float A = (float)atof(getenv("RECOMP_FCI_TEST_ASPECT") ? getenv("RECOMP_FCI_TEST_ASPECT") : "1");
-        set_fovy(INITIAL);
+        set_fovy(1.178f);
         set_aspect(16.0f / 9.0f);
         fci_prehook_005514C9();
         float want_a = (16.0f / 9.0f) * A / (16.0f / 9.0f);
-        if (fabsf(aspect() - want_a) > 1e-4f) {
-            printf("FAIL %s: aspect=%g (want %g)\n", name, aspect(), want_a);
-            return 1;
-        }
-        // a square projection is left alone (the aspect is not scaled)
+        if (fabsf(aspect() - want_a) > 1e-4f)
+            return fail(name, "aspect", aspect(), want_a);
+        if (fabsf(fovy() - 1.178f) > 1e-6f)
+            return fail(name, "fovy", fovy(), 1.178f);
         set_aspect(1.0f);
         fci_prehook_005514C9();
-        if (fabsf(aspect() - 1.0f) > 1e-6f) {
-            printf("FAIL %s: square aspect=%g (want 1.0)\n", name, aspect());
-            return 1;
-        }
-        printf("ok %s: aspect=%g (A=%g), square left alone\n", name, want_a, A);
+        if (fabsf(aspect() - 1.0f) > 1e-6f)
+            return fail(name, "square", aspect(), 1.0f);
+        printf("ok %s: aspect=%g (A=%g), fovy unchanged, square left alone\n", name, want_a, A);
         return 0;
     }
 
-    fci_prehook_005514C9();
-    float f = fovy();
-    float want = expect ? (float)atof(expect) : INITIAL;
-    int ok = fabsf(f - want) < 1e-4f;
-    printf("%s %s: fovy=%g (want %g)\n", ok ? "ok" : "FAIL", name, f, want);
-    return ok ? 0 : 1;
+    /* the simple camera-field vectors: seed the field, run the hook once, check the result */
+    set_cam_field(seed);
+    fci_prehook_002A84E0();
+    float got = cam_field();
+    float want = expect ? (float)atof(expect) : seed;
+    if (fabsf(got - want) > 1e-4f)
+        return fail(name, "field", got, want);
+    printf("ok %s: field=%g (seed %g)\n", name, got, seed);
+    return 0;
 }

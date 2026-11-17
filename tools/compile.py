@@ -145,11 +145,16 @@ REPLACE = {
         "Camera_BuildViews (re/symbols): counts 3D frames for RECOMP_FCI_STATUS, a line per frame for "
         "RECOMP_FCI_TRACE (fci_trace.c)",
     ),
+    "sub_002A84E0": (
+        "prehook",
+        "the camera update (ebx the camera, FOV in radians at +0x38): display-fov scales that field when "
+        "Camera_BuildViews calls it (the render camera), so projection, frustum and water agree (fci_fov.c)",
+    ),
     "sub_005514C9": (
         "prehook",
         "the shared perspective matrix builder (param2 = vertical FOV in radians, at g_esp+8): "
-        "display-fov scales the fovy so the vertical FOV is the target; world camera (camera+0x38, "
-        "~67.5 deg) and view model (view+0x698, ~45 deg) both follow (fci_fov.c)",
+        "display-aspect scales the aspect; display-fov scales the fovy only where the camera build is not "
+        "hooked (Evolution), since Instincts scales the camera's field (fci_fov.c)",
     ),
     "sub_00098AE0": (
         "prehook",

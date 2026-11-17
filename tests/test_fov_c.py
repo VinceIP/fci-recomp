@@ -1,20 +1,7 @@
-"""Unit test for display-fov (Q71): the perspective-builder prehook in fci_fov.c, run natively.
-
-Compiles the shipping source (src/fci_fov.c) against a minimal mock of recomp_types.h
-(tests/fov_mock/recomp_types.h) and the driver (tests/fov_test.c), and runs one process per
-vector. The hook scales the fovy stack parameter by a fixed ratio (target / 67.5, both
-vertical degrees; 67.5 is the game's on-foot vfov, fci_enhance.cpp:450). The driver seeds
-the fovy at 1.1781 rad (~67.5 deg) and checks it after the prehook. The 'target' vector
-also verifies stability (3 calls, no compounding) and zoom pickup (a new fovy is scaled,
-then reset scales back).
-
-Each vector is a separate run because the prehook caches the target on first use:
-  unset      RECOMP_FCI_FOV absent: the fovy is left at 1.1781 (the game's own)
-  zero       RECOMP_FCI_FOV=0: the fovy is left at 1.1781 (the game's own)
-  target     RECOMP_FCI_FOV=60: 1.1781*(60/67.5)=1.047, stable x3; zoom to 2.0
-             -> 2.0*(60/67.5)=1.778; reset to 1.1781 -> 1.047
-  clamp-low  RECOMP_FCI_FOV=20: 1.1781*(40/67.5)=0.698 (clamped up to 40)
-  clamp-high RECOMP_FCI_FOV=200: 1.1781*(110/67.5)=1.911 (clamped down to 110)
+"""Unit test for display-fov (Q71): the camera-update and perspective-builder prehooks in fci_fov.c,
+run natively. The vectors and what they check are listed in tests/fov_test.c's header: the camera's
+FOV field (radians, pi/2 by default) is scaled by target / 67.5 only on Camera_BuildViews' calls,
+once per value, clamped; the builder scales only the display aspect.
 
     pytest tests/test_fov_c.py
 """
@@ -29,20 +16,20 @@ import cc_helper
 REPO = cc_helper.REPO
 CC = cc_helper.find_cc()
 
-# name: (RECOMP_FCI_FOV, FCI_TEST_EXPECT)
-# FCI_TEST_EXPECT is the fovy value after the run. The driver seeds the fovy at 1.1781
-# (the game's on-foot vfov in radians); the hook scales it by target/67.5.
-# The 'target' vector runs a full stability+zoom scenario in the C driver.
-# name: (RECOMP_FCI_FOV, FCI_TEST_EXPECT, RECOMP_FCI_TEST_ASPECT)
+# name: (RECOMP_FCI_FOV, FCI_TEST_EXPECT, FCI_TEST_SEED, RECOMP_FCI_TEST_ASPECT)
+# FCI_TEST_EXPECT is the camera field (radians) after the run; FCI_TEST_SEED the field seeded first
+# (default pi/2). 'cam-target' and 'aspect' run a full scenario in the C driver.
 VECTORS = {
-    "unset": (None, "1.1781", None),
-    "zero": ("0", "1.1781", None),
-    "target": ("60", None, None),  # the C driver handles the full scenario
-    "clamp-low": ("20", "0.698133", None),
-    "clamp-high": ("200", "1.919867", None),
-    # the display aspect: the aspect argument (g_esp + 12) is scaled by A / (16/9) when A is not 16:9;
-    # the C driver checks the scaling (A = 16/10) and that a square projection is left alone
-    "aspect": (None, None, "1.6"),
+    "cam-unset": (None, "1.5707964", None, None),
+    "cam-zero": ("0", "1.5707964", None, None),
+    "cam-target": ("60", None, None, None),
+    "cam-clamp-low": ("20", "0.9308423", None, None),
+    "cam-clamp-high": ("200", "2.5598166", None, None),
+    "cam-clamp-result": ("110", "2.97", "2.0", None),
+    "cam-nonpos": ("60", "0", "0", None),
+    "cam-toolarge": ("60", "3.1", "3.1", None),
+    "cam-other": ("60", "1.5707964", None, None),
+    "aspect": (None, None, None, "1.6"),
 }
 
 
@@ -54,14 +41,18 @@ def test_fov_c(tmp_path: Path) -> None:
     build, _ = cc_helper.build_run(sources, exe, cc=CC, includes=includes)
     assert build.returncode == 0, "the display-fov check failed to compile:\n" + build.stderr
 
-    for name, (fov, expect, aspect) in VECTORS.items():
+    for name, (fov, expect, seed, aspect) in VECTORS.items():
         env = dict(os.environ)
         env.pop("RECOMP_FCI_FOV", None)
+        env.pop("FCI_TEST_EXPECT", None)
+        env.pop("FCI_TEST_SEED", None)
         env.pop("RECOMP_FCI_TEST_ASPECT", None)
-        if expect is not None:
-            env["FCI_TEST_EXPECT"] = expect
         if fov is not None:
             env["RECOMP_FCI_FOV"] = fov
+        if expect is not None:
+            env["FCI_TEST_EXPECT"] = expect
+        if seed is not None:
+            env["FCI_TEST_SEED"] = seed
         if aspect is not None:
             env["RECOMP_FCI_TEST_ASPECT"] = aspect
         run = __import__("subprocess").run([str(exe), name], env=env, capture_output=True, text=True)
@@ -69,7 +60,7 @@ def test_fov_c(tmp_path: Path) -> None:
         line = line[0] if line else "(no result line)\n" + run.stdout + run.stderr
         assert run.returncode == 0 and line.startswith("ok"), f"{name} failed:\n{line}"
 
-    print("6 checks, 0 failed")
+    print(f"{len(VECTORS)} checks, 0 failed")
 
 
 def test_fov_config_key() -> None:
