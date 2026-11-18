@@ -97,6 +97,29 @@ static const struct {
 };
 
 /* the runtime option for one ini line, in out; 0 when the line sets nothing (auto, an unknown key) */
+/* the runtime option an fci.ini key sets (fci_settings_menu.c applies menu changes through it); NULL if none */
+const char *fci_config_option_of(const char *key)
+{
+    for (size_t i = 0; i < sizeof keys / sizeof keys[0]; i++)
+        if (!_stricmp(key, keys[i].key))
+            return keys[i].option;
+    return NULL;
+}
+
+/* fci.ini beside the executable, where the settings menu saves */
+const char *fci_config_ini_path(void)
+{
+    static char path[MAX_PATH];
+    if (!path[0]) {
+        char *slash;
+        GetModuleFileNameA(NULL, path, sizeof path);
+        if ((slash = strrchr(path, '\\')) != NULL)
+            slash[1] = 0;
+        strncat(path, "fci.ini", sizeof path - strlen(path) - 1);
+    }
+    return path;
+}
+
 static int translate(const char *key, const char *value, char *out, size_t size)
 {
     size_t i;

@@ -206,6 +206,30 @@ REPLACE = {
         "main menu action handler: logs the action hash for RECOMP_FCI_MENU_LOG; "
         "QUIT GAME (B_Quit, 0x8bcdf569) closes the game; RECOMP_FCI_MENU_QUIT=0 leaves the item out (fci_menu.c)",
     ),
+    "sub_00182570": (
+        "gate",
+        "the Controller Options screen's fill (screen; ret 4): adds the RECOMP SETTINGS row (fci_settings_menu.c)",
+    ),
+    "sub_00152AF0": (
+        "gate",
+        "A on an option list's row (eax event, list; ret 4): RECOMP SETTINGS opens the recomp's settings; a "
+        "changed setting is applied and saved to fci.ini (fci_settings_menu.c)",
+    ),
+    "sub_00152510": (
+        "gate",
+        "an option list's rows rebuilt ((list); ret 4): a setting picked in the value popup is applied and "
+        "saved (fci_settings_menu.c)",
+    ),
+    "sub_00151AB0": (
+        "gate",
+        "an option's value index set (ecx option, index; ret 4), as the value popup does: a recomp setting "
+        "is applied, saved and its row redrawn (fci_settings_menu.c)",
+    ),
+    "sub_00151FD0": (
+        "gate",
+        "the option value popup's input (ecx handler, event; ret 8): RECOMP SETTINGS' title is put back after "
+        "the popup closes (fci_settings_menu.c)",
+    ),
     "sub_00109670": ("gate", "set the native browser title at the System Link call site (fci_lan_menu.c)"),
     "sub_001536F0": ("gate", "render host-list status on the browser page (fci_lan_menu.c)"),
     "sub_00148170": (
