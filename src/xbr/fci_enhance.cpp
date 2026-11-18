@@ -16,6 +16,7 @@
 #include "fci_glyphs.h"
 #include "fci_quicksave.h"
 #include "gpu/ext.h"
+#include "gpu/texture.h"
 
 // ---- options ---------------------------------------------------------------------------------
 namespace {
@@ -81,7 +82,7 @@ constexpr uint32_t kTsView = 2;         // D3DTS_VIEW
 constexpr uint32_t kTsProjection = 3;   // D3DTS_PROJECTION
 
 const char* kAoHlsl = R"(
-cbuffer P : register(b1) { float4 p0; float4 p1; };
+cbuffer P : register(b1) { float4 p0; float4 p1; float4 p2; };
 Texture2D src0 : register(t0);
 Texture2D src1 : register(t1);
 SamplerState ls : register(s0);
@@ -93,13 +94,15 @@ O vs(uint id : SV_VertexID) {
     o.p = float4(o.uv * float2(2, -2) + float2(-1, 1), 0, 1);
     return o;
 }
-// ao: p0 = texel size, tan of the half field of view (x, y); p1 = radius (depth units), strength, fade from, to
+// ao: p0 = texel size, tan of the half field of view (x, y); p1 = radius (depth units), strength, fade from, to;
+// p2.x = 1: the late pass, src1 the depth when the first ran (a pixel it already occluded is left alone)
 float Dep(float2 uv) { return src0.SampleLevel(ps, uv, 0).r; }
 float3 Pos(float2 uv, float d) { return float3((uv * float2(2, -2) + float2(-1, 1)) * p0.zw * d, d); }
 float2 ao(O i) : SV_Target {
     float2 uv = i.uv;
     float d = Dep(uv);
     if (d <= 0 || d >= 0.9999) return float2(1, d);
+    if (p2.x > 0.5 && src1.SampleLevel(ps, uv, 0).r == d) return float2(1, d);
     float3 P = Pos(uv, d);
     float2 px = p0.xy;
     float dl = Dep(uv - float2(px.x, 0)), dr = Dep(uv + float2(px.x, 0));
@@ -680,7 +683,6 @@ class FciExtension final : public gpu::Extension {
         ao_mode_ = int(fci_gfx::Number("RECOMP_FCI_XBR_AO", 0));
         ao_strength_ = fci_gfx::Number("RECOMP_FCI_XBR_AO_STRENGTH", 1.2f);
         ao_radius_ = fci_gfx::Number("RECOMP_FCI_XBR_AO_RADIUS", 1.5f);
-        ao_at_ = int(fci_gfx::Number("RECOMP_FCI_XBR_AO_AT", 0));
         aa_mode_ = int(fci_gfx::Number("RECOMP_FCI_XBR_AA", 0));
         fog_mode_ = int(fci_gfx::Number("RECOMP_FCI_XBR_FOG", 0));
         fog_mode_ = fog_mode_ < 0 ? 0 : (fog_mode_ > 3 ? 3 : fog_mode_);
@@ -712,6 +714,8 @@ class FciExtension final : public gpu::Extension {
     {
         for (auto& r : ao_)
             r.Reset();
+        ao_depth_.Reset();
+        ao_split_ = false;
         post_.Reset();
         notice_.Reset();
         scene_rt_ = scene_ds_ = nullptr;
@@ -779,17 +783,20 @@ class FciExtension final : public gpu::Extension {
     }
 
     // The world is the guest-size target the W-buffered draws write to; after its opaque draws the
-    // first non-world draw is the moment the passes run. The AO (ao_at_ 0) and the fog both run there,
-    // on the world scene target, the fog after the AO; ao_at_ 1's AO instead waits for the first
-    // blended surface. Each reads the scene's depth and colour; the frame's result is copied back in
-    // place with c.Feedback. The scene tracking runs for both, so the fog works with the AO off.
+    // first non-world draw is the moment the passes run: the AO and the fog, on the world scene target,
+    // the fog after the AO. The water leaves depth alone, so the AO runs before it (the one world draw
+    // that samples the scene's depth) and again at the end for what was drawn over it since. Each reads
+    // the scene's depth and colour; the result is copied back in place with c.Feedback. The scene
+    // tracking runs for both, so the fog works with the AO off.
     bool Bound(Context& c, const State& s, Target* rt, Target* ds, bool pretransformed) override
     {
         uint64_t frame = c.Presents();
         if (frame != frame_) {
             frame_ = frame;
             done_ = fog_done_ = false;
+            ao_split_ = false;
             opaque_ = 0;
+            late_ = 0;
             scene_rt_ = scene_ds_ = nullptr;
             fog_captured_ = refl_captured_ = false;
             vol_ready_ = false;
@@ -813,6 +820,7 @@ class FciExtension final : public gpu::Extension {
             bool alpha = s.simple[kMBlendEnable >> 2] && s.simple[kMSrcBlend >> 2] == kBlendSrcAlpha;
             if (zwrite) {   // opaque, alpha tested or blended foliage: all in the depth the pass reads
                 opaque_++;
+                late_ += ao_split_ ? 1 : 0;
                 scene_rt_ = rt;
                 scene_ds_ = ds;
                 // the view's projection, as the title also sets it for its fixed function draws
@@ -861,11 +869,12 @@ class FciExtension final : public gpu::Extension {
                 }
                 return false;
             }
-            // ao_at_ 1: before the first blended surface that leaves depth alone (terrain layers, water,
-            // particles)
-            if (ao_mode_ && !done_ && ao_at_ == 1 && alpha && opaque_ >= kOpaqueDraws) {
+            // the water: blended over the scene's depth, which it samples; occluded after it, seams on the
+            // bed would darken the water's own colour and reflection
+            if (ao_mode_ && !done_ && alpha && opaque_ >= kOpaqueDraws && SamplesDepth(s, *ds)) {
                 done_ = true;
-                return Occlude(c, *scene_rt_, *scene_ds_);
+                ao_split_ = SnapDepth(c, *ds);
+                return Occlude(c, *scene_rt_, *scene_ds_, false);
             }
             return false;
         }
@@ -878,12 +887,15 @@ class FciExtension final : public gpu::Extension {
                 LOGI("fci volfog: reflection %ux%u, w per metre %.0f", rt->w, rt->h, refl_wpm_);
             }
         }
-        // the world is done: the first non-main draw after the opaque world; the AO (ao_at_ 0) and the
-        // fog run here, on the world scene target, the fog after the AO
+        // the world is done: the first non-main draw after the opaque world; the AO (or its late pass for
+        // what was drawn over the water) and the fog run here, the fog after the AO
         if (opaque_ >= kOpaqueDraws && scene_rt_) {
-            if (ao_mode_ && !done_ && ao_at_ != 1) {
+            if (ao_mode_ && !done_) {
                 done_ = true;
-                Occlude(c, *scene_rt_, *scene_ds_);
+                Occlude(c, *scene_rt_, *scene_ds_, false);
+            } else if (ao_mode_ && ao_split_ && late_) {
+                ao_split_ = false;
+                Occlude(c, *scene_rt_, *scene_ds_, true);
             }
             if (fog_mode_ && !fog_done_ && fog_captured_) {
                 if (fog_mode_ == 3) {
@@ -1036,8 +1048,46 @@ class FciExtension final : public gpu::Extension {
         return h;
     }
 
-    // occlusion into ao_[0], blurred across and back, then the scene colour times it; true: rebind
-    bool Occlude(Context& c, Target& rt, Target& ds)
+    // a texture stage samples the bound depth target (the water's depth fade)
+    static bool SamplesDepth(const State& s, const Target& ds)
+    {
+        for (uint32_t t : s.textures) {
+            gpu::TextureDesc d;
+            if (t && gpu::Describe(t, d) && d.data == ds.data)
+                return true;
+        }
+        return false;
+    }
+
+    // a copy of the scene's depth as it is now, for the late pass; false when it cannot be made
+    bool SnapDepth(Context& c, Target& ds)
+    {
+        D3D12_RESOURCE_DESC want = ds.res->GetDesc();
+        if (ao_depth_) {
+            D3D12_RESOURCE_DESC have = ao_depth_->GetDesc();
+            if (have.Width != want.Width || have.Height != want.Height || have.Format != want.Format) {
+                c.Release(ao_depth_);
+                ao_depth_.Reset();
+            }
+        }
+        if (!ao_depth_) {
+            D3D12_HEAP_PROPERTIES hp{D3D12_HEAP_TYPE_DEFAULT};
+            if (FAILED(c.Device()->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &want,
+                                                           D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                           IID_PPV_ARGS(&ao_depth_))))
+                return false;
+            ao_depth_state_ = D3D12_RESOURCE_STATE_COPY_DEST;
+        }
+        c.Transition(ds.res.Get(), ds.state, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        c.Transition(ao_depth_.Get(), ao_depth_state_, D3D12_RESOURCE_STATE_COPY_DEST);
+        c.List()->CopyResource(ao_depth_.Get(), ds.res.Get());
+        c.Transition(ao_depth_.Get(), ao_depth_state_, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        return true;
+    }
+
+    // occlusion into ao_[0], blurred across and back, then the scene colour times it; late: only where the
+    // depth changed since SnapDepth (the rest was occluded before the water); true: rebind
+    bool Occlude(Context& c, Target& rt, Target& ds, bool late)
     {
         if (!EnsureAo(c, rt.w, rt.h))
             return false;
@@ -1047,18 +1097,19 @@ class FciExtension final : public gpu::Extension {
         float radius = ao_radius_ * kDepthPerMetre;
         c.Transition(ds.res.Get(), ds.state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         c.Transition(ao_[0].Get(), ao_state_[0], D3D12_RESOURCE_STATE_RENDER_TARGET);
-        ID3D12Resource* src[4] = {ds.res.Get(), nullptr, nullptr, nullptr};
-        DXGI_FORMAT fmt[4] = {kDepthRead, kBgra, kBgra, kBgra};
+        ID3D12Resource* src[4] = {ds.res.Get(), late ? ao_depth_.Get() : nullptr, nullptr, nullptr};
+        DXGI_FORMAT fmt[4] = {kDepthRead, late ? kDepthRead : kBgra, kBgra, kBgra};
         // fades out from 80 to 200 metres, into FCI's fog
-        float p[8] = {1.0f / w,
-                      1.0f / h,
-                      tan_x_,
-                      tan_y_,
-                      radius,
-                      ao_strength_,
-                      80 * kDepthPerMetre,
-                      200 * kDepthPerMetre};
-        c.Pass(kAoHlsl, "ao", kAoFormat, Rtv(0), w, h, src, fmt, p, 8, -1);
+        float p[12] = {1.0f / w,
+                       1.0f / h,
+                       tan_x_,
+                       tan_y_,
+                       radius,
+                       ao_strength_,
+                       80 * kDepthPerMetre,
+                       200 * kDepthPerMetre,
+                       late ? 1.0f : 0.0f};
+        c.Pass(kAoHlsl, "ao", kAoFormat, Rtv(0), w, h, src, fmt, p, 12, -1);
         for (int axis = 0; axis < 2; axis++) {
             int from = axis, to = 1 - axis;
             c.Transition(ao_[from].Get(), ao_state_[from], D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -1573,7 +1624,7 @@ class FciExtension final : public gpu::Extension {
     }
 
     uint32_t gen_ = 0;
-    int ao_mode_ = 0, ao_at_ = 0, aa_mode_ = 0, shadow_filter_ = 0;
+    int ao_mode_ = 0, aa_mode_ = 0, shadow_filter_ = 0;
     int fog_mode_ = 0;           // 0 off, 1 the fog, 2 the debug, 3 the volume
     float fog_floor_ = 0.35f;    // a: the density floor
     float fog_height_ = 6.0f;    // H: the height scale, metres
@@ -1597,6 +1648,11 @@ class FciExtension final : public gpu::Extension {
     UINT rtv_inc_ = 0;
     ComPtr<ID3D12Resource> ao_[2];
     D3D12_RESOURCE_STATES ao_state_[2]{};
+    // the depth when the AO ran before the water; the late pass occludes only what was drawn over it since
+    ComPtr<ID3D12Resource> ao_depth_;
+    D3D12_RESOURCE_STATES ao_depth_state_{};
+    bool ao_split_ = false;         // this frame's AO ran before the water
+    uint32_t late_ = 0;             // depth-writing world draws since
     ComPtr<ID3D12Resource> post_;   // the anti-aliased picture
     D3D12_RESOURCE_STATES post_state_{};
     ComPtr<ID3D12Resource> notice_;   // the picture with the host notice over it

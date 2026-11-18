@@ -918,10 +918,11 @@ bool D3D12Backend::Init(uint32_t width, uint32_t height) {
         } else {
             presenter_ = std::thread([this] { PresenterLoop(); });
         }
-        if (const char* d = std::getenv("RECOMP_FCI_XBR_REPLAY_DUMP")) {
-            unsigned long long from = 0, n = 0;
-            if (std::sscanf(d, "%llu,%llu", &from, &n) == 2) dump_from_ = from, dump_left_ = n;
-        }
+    }
+    // FCI: with or without replay: consecutive pictures show flicker that single captures miss
+    if (const char* d = std::getenv("RECOMP_FCI_XBR_REPLAY_DUMP")) {
+        unsigned long long from = 0, n = 0;
+        if (std::sscanf(d, "%llu,%llu", &from, &n) == 2) dump_from_ = from, dump_left_ = n;
     }
     LOGI("d3d12: %ux%u guest, %ux%u window, render scale %.3f x %.3f", width, height, bb_w_, bb_h_, scale_x_,
          scale_y_);
