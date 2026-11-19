@@ -1558,6 +1558,10 @@ class FciExtension final : public gpu::Extension {
         return true;
     }
 
+    // the sun shadow map is looked up through c161-c164, which replays leave at the game frame's value: a blended
+    // map slid away from it, and the shadows jumped back each game frame while the view turned
+    bool Interpolated(const Target*, const Target* ds) override { return !ds || ds != shadow_target_; }
+
     void Sampled(const gpu::TextureDesc& d, const Target* t, uint8_t, gpu::TexInfo&) override
     {
         if (!t)

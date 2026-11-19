@@ -74,6 +74,9 @@ public:
     virtual void MakeTarget(const Surface&, bool /*depth*/, uint32_t /*gw*/, uint32_t /*gh*/, float& /*sx*/, float& /*sy*/,
                             DXGI_FORMAT& /*fmt*/) {}
     virtual void BeginDraw(const State&) {}
+    // frame replay: false keeps a draw to these targets as the game drew it (a pass sampled through a transform
+    // the in-between frames do not blend)
+    virtual bool Interpolated(const Target* /*rt*/, const Target* /*ds*/) { return true; }
     virtual void EndDraw() {}
     // targets bound for a draw; true binds them again
     virtual bool Bound(Context&, const State&, Target* /*rt*/, Target* /*ds*/, bool /*pretransformed*/) { return false; }

@@ -3804,7 +3804,8 @@ void D3D12Backend::RecordDraw(const State& s, uint32_t prim, uint32_t count, con
     r.key = Hash(exact, sizeof(exact), r.loose);
     r.vc = last_vc_;
     if (r.vc) r.orig.assign(reinterpret_cast<const float*>(r.vc), reinterpret_cast<const float*>(r.vc) + 192 * 4);
-    if ((s.vs_handle & 1) && s.vs && !s.vs->program.empty()) {
+    bool blend = !ext_ || ext_->Interpolated(bound_rt_, bound_ds_);
+    if (blend && (s.vs_handle & 1) && s.vs && !s.vs->program.empty()) {
         auto it = pos_regs_.find(s.vs->hash);
         if (it == pos_regs_.end()) it = pos_regs_.emplace(s.vs->hash, PositionRegisters(s.vs->program)).first;
         r.pos = it->second;
