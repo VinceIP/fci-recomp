@@ -810,9 +810,10 @@ private:
         std::vector<float> orig;  // the constants as drawn (replays write blends into the ring)
         std::vector<float> from;  // milestone 3: the match's, when the draw is blended
         std::bitset<192> pos;     // the registers its position depends on
+        std::bitset<192> direct;  // those read by number, not through a0 (a bone palette is the object's)
     };
     void ApplyBlend(double alpha);
-    std::unordered_map<uint64_t, std::bitset<192>> pos_regs_;  // by vertex program hash
+    std::unordered_map<uint64_t, std::pair<std::bitset<192>, std::bitset<192>>> pos_regs_;  // by program hash
     // registers holding one value for every draw that reads them for its position (the camera: Evolution's
     // view-projection c71-c74), this frame's and the frame before's, with that value
     std::bitset<192> shared_, prev_shared_;
@@ -3699,7 +3700,8 @@ void D3D12Backend::ResetFrame() {
 
 // FCI: frame replay, milestone 3: the constant registers (hardware order) a vertex program's position depends
 // on, through its temporaries and a0. A read relative to a0 (a bone palette) takes every register from its base.
-std::bitset<192> PositionRegisters(const std::vector<uint32_t>& prog) {
+// relative false leaves out the a0-relative range.
+std::bitset<192> PositionRegisters(const std::vector<uint32_t>& prog, bool relative) {
     std::bitset<192> dep[13], a0, pos;  // R0-R11, R12 (oPos)
     auto f = [](const uint32_t* t, int sub, int bit, int len) { return (t[sub] >> bit) & ((1u << len) - 1); };
     auto src = [&](const uint32_t* t, int which, std::bitset<192>& out) {
@@ -3717,7 +3719,7 @@ std::bitset<192> PositionRegisters(const std::vector<uint32_t>& prog) {
             uint32_t cr = f(t, 1, 13, 8);
             if (f(t, 3, 1, 1)) {
                 out |= a0;
-                for (uint32_t i = cr; i < 192; i++) out.set(i);
+                for (uint32_t i = cr; i < 192 && relative; i++) out.set(i);
             } else if (cr < 192) {
                 out.set(cr);
             }
@@ -3807,8 +3809,13 @@ void D3D12Backend::RecordDraw(const State& s, uint32_t prim, uint32_t count, con
     bool blend = !ext_ || ext_->Interpolated(bound_rt_, bound_ds_);
     if (blend && (s.vs_handle & 1) && s.vs && !s.vs->program.empty()) {
         auto it = pos_regs_.find(s.vs->hash);
-        if (it == pos_regs_.end()) it = pos_regs_.emplace(s.vs->hash, PositionRegisters(s.vs->program)).first;
-        r.pos = it->second;
+        if (it == pos_regs_.end())
+            it = pos_regs_
+                     .emplace(s.vs->hash, std::make_pair(PositionRegisters(s.vs->program, true),
+                                                         PositionRegisters(s.vs->program, false)))
+                     .first;
+        r.pos = it->second.first;
+        r.direct = it->second.second;
     }
     draws_.push_back(std::move(r));
 }
@@ -3866,10 +3873,11 @@ void D3D12Backend::MatchDraws() {
     match(true);
     match(false);
     // milestone 3: the shared registers (one value across the frame's draws that read them for position)
-    std::bitset<192> seen;
+    std::bitset<192> seen, direct;
     shared_.reset();
     for (const DrawRec& d : draws_) {
         if (d.orig.empty()) continue;
+        direct |= d.direct;
         for (size_t r = 0; r < 192; r++) {
             if (!d.pos[r]) continue;
             const float* v = d.orig.data() + r * 4;
@@ -3882,7 +3890,8 @@ void D3D12Backend::MatchDraws() {
             }
         }
     }
-    std::bitset<192> camera = shared_ & prev_shared_;
+    // a register only ever read through a0 is a palette (lights, bones) whose entries can shift: not the camera
+    std::bitset<192> camera = shared_ & prev_shared_ & direct;
     std::unordered_map<uint64_t, std::vector<float>> object_from;  // by register block and its values
     // a loose key drawn once in both frames: the same mesh whatever its vertices (a weapon, a vehicle's body)
     std::unordered_map<uint64_t, int> loose_now, loose_before;
