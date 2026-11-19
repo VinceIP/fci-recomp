@@ -401,8 +401,10 @@ void fci_config_load(int *argc, char ***argv)
         for (k = 0; k < 5; k++)
             if (nets[k][0]) {
                 args[n++] = nets[k];
-                if (k < 4)
-                    cap = 1; /* online every player runs the Xbox's 30 updates: physics and AI depend on the rate */
+                /* online every player runs the Xbox's 30 updates: physics and AI depend on the rate. A list in
+                 * menu mode starts no transport at boot; the pacer locks the rate when the pick starts one */
+                if (k < 4 && !(k == 2 && menu_arg[0]))
+                    cap = 1;
             }
     }
     if (rate == 0 || rate > 30) {
