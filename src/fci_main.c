@@ -394,6 +394,10 @@ int main(int argc, char **argv)
         extern void fci_xbr_init(void);
         fci_xbr_init();
     }
+    {
+        extern void fci_saves_repair(void);
+        fci_saves_repair(); /* a profile a level start damaged before this build signs in again */
+    }
     fprintf(stderr, "[FCI] entering original entry %08X esp=%08X\n", FCI_ENTRY_VA, g_esp);
     xbox_WatchdogStart(); /* inert unless RECOMP_WATCHDOG_SECS is given */
     fci_watchdog_start(); /* inert unless RECOMP_FCI_WATCHDOG is given */

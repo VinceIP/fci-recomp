@@ -216,6 +216,11 @@ REPLACE = {
         "the profile screen's buttons (eax event, ecx screen; ret): the added GRAPHICS button opens Controller "
         "Options showing the display and graphics page (fci_settings_menu.c)",
     ),
+    "sub_00056320": (
+        "gate",
+        "the save writer's room-maker (esi profile folder, game object and new name on the stack; ret): from the "
+        "menu, keeps a level file its checkpoint needs by setting its time past the checkpoint's (fci_saves.c)",
+    ),
     "sub_0014CEB0": (
         "gate",
         "the pause menu's Options buttons (eax event, edi screen; ret): the added GRAPHICS button opens "
