@@ -216,10 +216,15 @@ REPLACE = {
         "the profile screen's buttons (eax event, ecx screen; ret): the added GRAPHICS button opens Controller "
         "Options showing the display and graphics page (fci_settings_menu.c)",
     ),
+    "sub_0014CEB0": (
+        "gate",
+        "the pause menu's Options buttons (eax event, edi screen; ret): the added GRAPHICS button opens "
+        "Controller Options showing the display and graphics page (fci_settings_menu.c)",
+    ),
     "sub_00182570": (
         "gate",
-        "the Controller Options screen's fill (screen; ret 4): adds the control settings and the DISPLAY AND "
-        "GRAPHICS row (fci_settings_menu.c)",
+        "the Controller Options screen's fill (screen; ret 4): adds the control settings, and the DISPLAY AND "
+        "GRAPHICS row where no GRAPHICS button reaches the page (fci_settings_menu.c)",
     ),
     "sub_00152AF0": (
         "gate",

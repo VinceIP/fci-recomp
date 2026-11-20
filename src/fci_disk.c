@@ -223,22 +223,30 @@ static void add_quit_item(void *buffer, uint32_t bytes)
     }
 }
 
-/* GRAPHICS on Instincts' profile screen (P_EditProfile in magma/cryprofile.mgb, common.dat): a sixth button,
- * a copy of DISPLAY's record named B_ControllerScheme (an unused string-table entry, relabelled GRAPHICS),
- * between DISPLAY and RESET DEFAULTS. The file grows, so common.fat's entry for it is lengthened and the
- * longer read of common.dat is rebuilt from the original bytes. Layout: re/notes/MENUS.md. */
-#define PROFILE_MGB_OFFSET 0x55F7FFu
-#define PROFILE_MGB_SIZE   65434u
-#define PROFILE_MGB_HASH   0x64D56760u /* common.fat's hash for the file */
-#define PROFILE_FAT_SIZE   11936u
-#define PROFILE_FAT_ENTRY  364u
-#define GFX_COPY_FROM      0x20CEu /* DISPLAY's record, from its "01 <id>" */
-#define GFX_INSERT_AT      0x21B6u /* after DISPLAY's record: its down link to RESET DEFAULTS */
-#define GFX_RECORD_BYTES   (GFX_INSERT_AT - GFX_COPY_FROM)
-#define MGB_VIDEO          0xC8040339u
-#define MGB_RESET          0x3C4AD511u
-#define MGB_MP_SETUP       0x5FC27D09u
-#define MGB_GRAPHICS       0xE87CB6E7u /* CRC-32 of "B_ControllerScheme" */
+/* GRAPHICS on Instincts' options screens (P_EditProfile: the profile's, magma/cryprofile.mgb, and the
+ * pause menu's, magma/cryingame.mgb; both in common.dat): one more button, a copy of DISPLAY's record named
+ * B_ControllerScheme (labelled GRAPHICS), after DISPLAY. The file grows, so common.fat's entry for it is
+ * lengthened and the longer read of common.dat is rebuilt from the original bytes. Layout: re/notes/MENUS.md. */
+#define MGB_VIDEO    0xC8040339u
+#define MGB_GRAPHICS 0xE87CB6E7u /* CRC-32 of "B_ControllerScheme" */
+static const struct gfx_layout {
+    const char *screen;
+    uint32_t offset, size, hash; /* the file in common.dat and its common.fat hash */
+    uint32_t count_at;           /* the screen's child count (a byte) */
+    uint8_t count;
+    uint32_t copy_from, insert_at; /* DISPLAY's record from the "01 <id>" before it to its up link's end */
+    uint32_t up_link;              /* the copy's up link (last 4 bytes) as found: the button above DISPLAY */
+    uint32_t link_site;            /* the link that pointed back to DISPLAY and now points to GRAPHICS */
+    uint16_t y_old, y_new;         /* the copy's position */
+    uint32_t below_to;             /* the record after it, moved down one step up to here (0: none) */
+    uint16_t below_old, below_new;
+} gfx_layouts[] = {
+        {"profile", 0x55F7FF, 65434, 0x64D56760, 0x1B90, 10, 0x20CE, 0x21B6, 0x5FC27D09, 0x22AE, 0xF5, 0x118,
+         0x22B7, 0x118, 0x13B},
+        {"pause options", 0x4B8647, 30236, 0x14653EE6, 0x54E3, 6, 0x57B4, 0x58AE, 0x7765E2D2, 0x57B0, 0xAF, 0xD2, 0,
+         0, 0},
+};
+#define N_GFX_LAYOUTS (sizeof gfx_layouts / sizeof *gfx_layouts)
 
 static uint32_t get32(const uint8_t *p)
 {
@@ -248,12 +256,12 @@ static uint32_t get32(const uint8_t *p)
 }
 static void put32(uint8_t *p, uint32_t v) { memcpy(p, &v, 4); }
 
-/* the four (x 0x3C, y) position pairs of the record in [from, to): y old -> y new; how many were changed */
+/* the (x, y old, float 1.0) position sub-records in [from, to): y -> y_new; how many were changed */
 static int move_record(uint8_t *b, uint32_t from, uint32_t to, uint16_t y_old, uint16_t y_new)
 {
     int n = 0;
     for (uint32_t i = from; i + 8 <= to; i++)
-        if (b[i] == 0x3C && b[i + 1] == 0 && b[i + 2] == (y_old & 0xFF) && b[i + 3] == (y_old >> 8)
+        if ((b[i] == 0x3C || b[i] == 0x3E) && b[i + 1] == 0 && b[i + 2] == (y_old & 0xFF) && b[i + 3] == (y_old >> 8)
             && get32(b + i + 4) == 0x3F800000u) {
             b[i + 2] = (uint8_t)(y_new & 0xFF);
             b[i + 3] = (uint8_t)(y_new >> 8);
@@ -265,33 +273,67 @@ static int move_record(uint8_t *b, uint32_t from, uint32_t to, uint16_t y_old, u
 static void add_graphics_button(void *buffer, uint32_t bytes)
 {
     uint8_t *b = buffer;
-    const uint32_t grown = PROFILE_MGB_SIZE + GFX_RECORD_BYTES;
-    /* common.fat: the game reads the header, then each 12-byte entry (offset, size, hash) on its own; the
-     * file's entry gets the longer size */
-    if (bytes == 12) {
-        if (get32(b) == PROFILE_MGB_OFFSET && get32(b + 4) == PROFILE_MGB_SIZE && get32(b + 8) == PROFILE_MGB_HASH) {
-            put32(b + 4, grown);
-            fprintf(stderr, "[FCI] menu: profile screen file lengthened for GRAPHICS\n");
+    for (size_t l = 0; l < N_GFX_LAYOUTS; l++) {
+        const struct gfx_layout *g = &gfx_layouts[l];
+        const uint32_t rec = g->insert_at - g->copy_from, grown = g->size + rec;
+        /* common.fat: the game reads the header, then each 12-byte entry (offset, size, hash) on its own */
+        if (bytes == 12) {
+            if (get32(b) == g->offset && get32(b + 4) == g->size && get32(b + 8) == g->hash) {
+                put32(b + 4, grown);
+                fprintf(stderr, "[FCI] menu: %s screen file lengthened for GRAPHICS\n", g->screen);
+                return;
+            }
+            continue;
         }
+        /* common.dat: the longer read holds the original file and the next file's first bytes */
+        if (bytes != grown || memcmp(b, "MAGMA", 5) || b[g->count_at] != g->count || b[g->copy_from] != 1
+            || get32(b + g->copy_from + 1) != MGB_VIDEO || get32(b + g->insert_at - 4) != g->up_link
+            || b[g->insert_at] != 1 || get32(b + g->link_site) != MGB_VIDEO)
+            continue;
+        memmove(b + g->insert_at + rec, b + g->insert_at, g->size - g->insert_at);
+        memcpy(b + g->insert_at, b + g->copy_from, rec);
+        uint8_t *c = b + g->insert_at;
+        put32(c + 1, MGB_GRAPHICS);         /* DISPLAY's down link, and the record's id */
+        put32(c + 0x10, MGB_GRAPHICS);      /* the record's id again */
+        put32(c + rec - 4, MGB_VIDEO);      /* its up link: DISPLAY */
+        put32(b + g->link_site + (g->link_site > g->insert_at ? rec : 0), MGB_GRAPHICS);
+        b[g->count_at] = (uint8_t)(g->count + 1);
+        int moved = move_record(b, g->insert_at, g->insert_at + rec, g->y_old, g->y_new);
+        if (g->below_to)
+            moved += move_record(b, g->insert_at + rec, g->below_to + rec, g->below_old, g->below_new);
+        fprintf(stderr, "[FCI] menu: GRAPHICS added to the %s screen (%d positions)\n", g->screen, moved);
+        fflush(stderr);
         return;
     }
-    /* common.dat: the longer read holds the original file and the next file's first bytes */
-    if (bytes != grown || memcmp(b, "MAGMA", 5) || b[0x1B90] != 10 || get32(b + GFX_COPY_FROM + 1) != MGB_VIDEO
-        || get32(b + GFX_INSERT_AT + 1) != MGB_RESET || get32(b + GFX_INSERT_AT - 4) != MGB_MP_SETUP
-        || get32(b + 0x22AE) != MGB_VIDEO)
+}
+
+/* the pause menu's string table has no spare row for GRAPHICS: the unused CHEATS (DEBUG) row (same length)
+ * moves into the P_EditProfile section after DISPLAY's, the rows between shifting up */
+static void label_pause_graphics(void *buffer, uint32_t bytes)
+{
+    static const char cheat[] = "<string enum=\"B_CheatDebug\" value=\"CHEATS (DEBUG)\"/>";
+    static const char gfx[] = "<string enum=\"B_ControllerScheme\" value=\"GRAPHICS\"/>";
+    static const char video[] = "<string enum=\"B_Video\" value=\"DISPLAY\"/>";
+    _Static_assert(sizeof cheat == sizeof gfx, "Menu XML row size changed");
+    char *b = buffer, *end = b + bytes, *row = NULL, *section = NULL, *after = NULL;
+    if (bytes > 4096 || bytes < sizeof cheat || memcmp(b, "<stringtable", 12))
         return;
-    memmove(b + GFX_INSERT_AT + GFX_RECORD_BYTES, b + GFX_INSERT_AT, PROFILE_MGB_SIZE - GFX_INSERT_AT);
-    memcpy(b + GFX_INSERT_AT, b + GFX_COPY_FROM, GFX_RECORD_BYTES);
-    uint8_t *g = b + GFX_INSERT_AT;
-    put32(g + 1, MGB_GRAPHICS);                        /* DISPLAY's down link, and the record's id */
-    put32(g + 0x10, MGB_GRAPHICS);                     /* the record's id again */
-    put32(g + GFX_RECORD_BYTES - 4, MGB_VIDEO);        /* its up link: DISPLAY */
-    put32(b + 0x22AE + GFX_RECORD_BYTES, MGB_GRAPHICS); /* RESET DEFAULTS' up link */
-    b[0x1B90] = 11;                                    /* P_EditProfile's children */
-    int moved = move_record(b, GFX_INSERT_AT, GFX_INSERT_AT + GFX_RECORD_BYTES, 0xF5, 0x118);
-    moved += move_record(b, GFX_INSERT_AT + GFX_RECORD_BYTES, 0x22B7 + GFX_RECORD_BYTES, 0x118, 0x13B);
-    fprintf(stderr, "[FCI] menu: GRAPHICS added to the profile screen (%d positions)\n", moved);
-    fflush(stderr);
+    for (char *p = b; p + sizeof video <= end; p++) {
+        if (!row && !memcmp(p, cheat, sizeof cheat - 1))
+            row = p;
+        else if (row && !section && !memcmp(p, "<section name=\"P_EditProfile\">", 30))
+            section = p;
+        else if (section && !memcmp(p, video, sizeof video - 1)) {
+            after = p + sizeof video - 1;
+            break;
+        } else if (section && !memcmp(p, "</section>", 10))
+            break;
+    }
+    if (!after)
+        return;
+    memmove(row, row + sizeof cheat - 1, (size_t)(after - row) - (sizeof cheat - 1));
+    memcpy(after - (sizeof gfx - 1), gfx, sizeof gfx - 1);
+    fprintf(stderr, "[FCI] menu: GRAPHICS label added to the pause menu's strings\n");
 }
 
 /* Patch the copied XML before the UI caches its glyphs. Keep archive offsets and lengths intact.
@@ -387,8 +429,10 @@ uint32_t fci_partition_read_fill(HANDLE h, void *buf, uint32_t length, const LAR
         if (mp || quit || gfx)
             relabel_xml(h, buf, *got, mp, quit, gfx);
         add_quit_item(buf, *got);
-        if (gfx)
+        if (gfx) {
             add_graphics_button(buf, *got);
+            label_pause_graphics(buf, *got);
+        }
     }
     fci_pak_log_read(h, off, length, status, *got); /* inert unless RECOMP_FCI_PAK_LOG */
     if (*got >= length || (status != 0 && status != 0xC0000011u /* END_OF_FILE */) || !off)

@@ -1,6 +1,7 @@
 /* fci.ini's player settings inside the game's own Controller Options screen (both the profile's Options and
- * the pause menu's). The screen's option list gets the control settings after the game's rows, then a
- * DISPLAY AND GRAPHICS row; A on it fills the same list with the display and graphics settings, under a
+ * the pause menu's). The screen's option list gets the control settings after the game's rows. Where the
+ * profile and pause screens have the added GRAPHICS button (Instincts), it opens the same screen showing
+ * the display and graphics settings instead; elsewhere a DISPLAY AND GRAPHICS row at the end does, under a
  * header row each. All are the game's own option objects (COption), so the game draws the rows, the help
  * line, the A toggle and the value popup. A change applies at once where the
  * runtime can (graphics options, console variables) and is saved to fci.ini. Evidence and addresses:
@@ -547,7 +548,10 @@ static int on_fill(void (*body)(void))
     static const char *const more[] = {">"};
     forget_rows(list);
     const int n = add_section(list, SEC_CONTROLS, NULL, NULL);
-    if ((s_entry = make_option("DISPLAY AND GRAPHICS", "Window, frame rate, field of view and graphics quality.",
+    /* the GRAPHICS buttons reach the page; without them this row does */
+    s_entry = 0;
+    if (!fci_settings_profile_button() &&
+        (s_entry = make_option("DISPLAY AND GRAPHICS", "Window, frame rate, field of view and graphics quality.",
                                1, more, 0)) != 0)
         list_add(list, s_entry);
     list_show(list);
@@ -611,27 +615,31 @@ static int on_popup(void (*body)(void))
     return 1;
 }
 
-/* the profile screen's buttons (eax = event, ecx = screen; ret): GRAPHICS opens Controller Options as
- * CONTROLLER OPTIONS does, flagged so its fill shows our page */
-__attribute__((weak)) void sub_001937B0_fci_body(void);
+/* a screen's buttons (eax = event): GRAPHICS opens Controller Options as CONTROLLER OPTIONS does, flagged
+ * so its fill shows our page */
 #define ACTION_GRAPHICS     0xE87CB6E7u /* CRC-32 of "B_ControllerScheme", the button fci_disk.c adds */
 #define ACTION_CONTROLSETUP 0x7765E2D2u /* CRC-32 of "B_ControlSetup" */
-int fci_gate_001937B0(void)
+static int on_buttons(void (*body)(void), const char *where)
 {
-    if (!sub_001937B0_fci_body || !fci_settings_profile_button())
+    if (!body || !fci_settings_profile_button())
         return 0;
     const uint32_t event = g_eax;
     if (MEM32(event + 4) != ACTION_GRAPHICS) {
-        sub_001937B0_fci_body();
+        body();
         return 1;
     }
     s_open_page = 1;
     MEM32(event + 4) = ACTION_CONTROLSETUP;
-    sub_001937B0_fci_body();
+    body();
     MEM32(event + 4) = ACTION_GRAPHICS;
-    fprintf(stderr, "[FCI] settings menu: GRAPHICS chosen on the profile screen\n");
+    fprintf(stderr, "[FCI] settings menu: GRAPHICS chosen on the %s screen\n", where);
     return 1;
 }
+__attribute__((weak)) void sub_001937B0_fci_body(void);
+__attribute__((weak)) void sub_0014CEB0_fci_body(void);
+/* the profile screen (ecx = screen; ret) and the pause menu's Options (edi = screen; ret) */
+int fci_gate_001937B0(void) { return on_buttons(sub_001937B0_fci_body, "profile"); }
+int fci_gate_0014CEB0(void) { return on_buttons(sub_0014CEB0_fci_body, "pause options"); }
 
 /* Controller Options' show (ecx = screen, 1 argument; ret 4): it fills, then labels the screen from the
  * string table, so our page's title and help line are set after it */

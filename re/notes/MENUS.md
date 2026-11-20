@@ -103,5 +103,15 @@ so the game opens Controller Options, and flags our page; Controller Options' sh
 after it. B returns to the profile screen. Run b90gfx-104111 (frames: the button between DISPLAY and RESET
 DEFAULTS, the page titled GRAPHICS, back on the profile screen). Known: on the profile screen GRAPHICS shows
 the help line of the button the cursor came from (the help handler sub_00193B40 has no entry for it).
-Evolution keeps the DISPLAY AND GRAPHICS row only (its CHARACTER SETUP is in use and no spare entry was
-looked for). The DISPLAY AND GRAPHICS row stays in Controller Options on both titles (the pause menu reaches it).
+The pause menu's Options (Instincts, same screen id P_EditProfile in cryingame.mgb: common.dat 0x4B8647,
+30,236 bytes, entry 67, hash 0x14653EE6; buttons CONTROLLER OPTIONS and DISPLAY, count byte 0x54E3 = 6) gets
+the same button: DISPLAY's record (0x57B4-0x58AE) copied with the GRAPHICS id, CONTROLLER OPTIONS' up link
+(0x57B0) GRAPHICS, y 0xAF -> 0xD2; fci_disk.c's gfx_layouts table holds both screens. Its string table (in-game
+strings, entry 395) has only TitleButton, ControlSetup and Video in P_EditProfile, so the unused
+`B_CheatDebug` row of P_StartMenu (CHEATS (DEBUG); the element exists hidden in cryingame) moves there as
+`B_ControllerScheme` GRAPHICS, the same 52 bytes, the rows between shifting up. The pause Options handler
+sub_0014CEB0 (eax event, edi screen; B_ControlSetup -> [edi+0x64] vt+0x24(1)) gets the same action swap.
+With both buttons in place the DISPLAY AND GRAPHICS row is left out of Controller Options. Runs b90gfx2-113242
+(profile) and b90pause3-113425 and b90pause4-113549 (pause: OPTIONS with GRAPHICS, Controller Options ending at the
+game's CONTROLLER SETUP button, the page titled GRAPHICS, back on OPTIONS). The pause GRAPHICS help line is
+DISPLAY's (the copied record's). Evolution keeps the DISPLAY AND GRAPHICS row (not yet mirrored).
