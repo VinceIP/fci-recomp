@@ -223,8 +223,8 @@ static void add_quit_item(void *buffer, uint32_t bytes)
     }
 }
 
-/* GRAPHICS on Instincts' options screens (P_EditProfile: the profile's, magma/cryprofile.mgb, and the
- * pause menu's, magma/cryingame.mgb; both in common.dat): one more button, a copy of DISPLAY's record named
+/* GRAPHICS on the options screens (P_EditProfile: the profile's, magma/cryprofile.mgb, and the pause
+ * menu's, magma/cryingame.mgb; all in common.dat, both titles): one more button, a copy of DISPLAY's record named
  * B_ControllerScheme (labelled GRAPHICS), after DISPLAY. The file grows, so common.fat's entry for it is
  * lengthened and the longer read of common.dat is rebuilt from the original bytes. Layout: re/notes/MENUS.md. */
 #define MGB_VIDEO    0xC8040339u
@@ -237,14 +237,19 @@ static const struct gfx_layout {
     uint32_t copy_from, insert_at; /* DISPLAY's record from the "01 <id>" before it to its up link's end */
     uint32_t up_link;              /* the copy's up link (last 4 bytes) as found: the button above DISPLAY */
     uint32_t link_site;            /* the link that pointed back to DISPLAY and now points to GRAPHICS */
-    uint16_t y_old, y_new;         /* the copy's position */
-    uint32_t below_to;             /* the record after it, moved down one step up to here (0: none) */
-    uint16_t below_old, below_new;
+    uint8_t x;                     /* the buttons' x */
+    uint16_t y_old, y_new;         /* the copy's position; the step to the next button is y_new - y_old */
+    uint32_t below_to;             /* the records after it, moved down one step, end here (0: none) */
 } gfx_layouts[] = {
-        {"profile", 0x55F7FF, 65434, 0x64D56760, 0x1B90, 10, 0x20CE, 0x21B6, 0x5FC27D09, 0x22AE, 0xF5, 0x118,
-         0x22B7, 0x118, 0x13B},
-        {"pause options", 0x4B8647, 30236, 0x14653EE6, 0x54E3, 6, 0x57B4, 0x58AE, 0x7765E2D2, 0x57B0, 0xAF, 0xD2, 0,
-         0, 0},
+        {"Instincts profile", 0x55F7FF, 65434, 0x64D56760, 0x1B90, 10, 0x20CE, 0x21B6, 0x5FC27D09, 0x22AE, 0x3C,
+         0xF5, 0x118, 0x22B7},
+        {"Instincts pause options", 0x4B8647, 30236, 0x14653EE6, 0x54E3, 6, 0x57B4, 0x58AE, 0x7765E2D2, 0x57B0, 0x3E,
+         0xAF, 0xD2, 0},
+        /* Evolution's DISPLAY is GAME OPTIONS, with MULTIPLAYER OPTIONS and RESET DEFAULTS below it */
+        {"Evolution profile", 0x6E93BC, 75837, 0x64D56760, 0x1FF0, 10, 0x242A, 0x251B, 0x7765E2D2, 0x2610, 0x30,
+         0xC3, 0xE6, 0x2744},
+        {"Evolution pause options", 0x63061E, 34349, 0x14653EE6, 0x571B, 7, 0x5B00, 0x5C29, 0x7765E2D2, 0x5AFC, 0x30,
+         0xAF, 0xD2, 0},
 };
 #define N_GFX_LAYOUTS (sizeof gfx_layouts / sizeof *gfx_layouts)
 
@@ -256,17 +261,19 @@ static uint32_t get32(const uint8_t *p)
 }
 static void put32(uint8_t *p, uint32_t v) { memcpy(p, &v, 4); }
 
-/* the (x, y old, float 1.0) position sub-records in [from, to): y -> y_new; how many were changed */
-static int move_record(uint8_t *b, uint32_t from, uint32_t to, uint16_t y_old, uint16_t y_new)
+/* the (x, y, float 1.0) position sub-records in [from, to) with y >= y_min move down by step; how many */
+static int move_records(uint8_t *b, uint32_t from, uint32_t to, uint8_t x, uint16_t y_min, uint16_t step)
 {
     int n = 0;
-    for (uint32_t i = from; i + 8 <= to; i++)
-        if ((b[i] == 0x3C || b[i] == 0x3E) && b[i + 1] == 0 && b[i + 2] == (y_old & 0xFF) && b[i + 3] == (y_old >> 8)
-            && get32(b + i + 4) == 0x3F800000u) {
-            b[i + 2] = (uint8_t)(y_new & 0xFF);
-            b[i + 3] = (uint8_t)(y_new >> 8);
+    for (uint32_t i = from; i + 8 <= to; i++) {
+        const uint16_t y = (uint16_t)(b[i + 2] | b[i + 3] << 8);
+        if (b[i] == x && b[i + 1] == 0 && y >= y_min && y < 0x200 && get32(b + i + 4) == 0x3F800000u) {
+            b[i + 2] = (uint8_t)((y + step) & 0xFF);
+            b[i + 3] = (uint8_t)((y + step) >> 8);
             n++;
+            i += 7;
         }
+    }
     return n;
 }
 
@@ -298,9 +305,10 @@ static void add_graphics_button(void *buffer, uint32_t bytes)
         put32(c + rec - 4, MGB_VIDEO);      /* its up link: DISPLAY */
         put32(b + g->link_site + (g->link_site > g->insert_at ? rec : 0), MGB_GRAPHICS);
         b[g->count_at] = (uint8_t)(g->count + 1);
-        int moved = move_record(b, g->insert_at, g->insert_at + rec, g->y_old, g->y_new);
+        const uint16_t step = (uint16_t)(g->y_new - g->y_old);
+        int moved = move_records(b, g->insert_at, g->insert_at + rec, g->x, g->y_old, step);
         if (g->below_to)
-            moved += move_record(b, g->insert_at + rec, g->below_to + rec, g->below_old, g->below_new);
+            moved += move_records(b, g->insert_at + rec, g->below_to + rec, g->x, g->y_new, step);
         fprintf(stderr, "[FCI] menu: GRAPHICS added to the %s screen (%d positions)\n", g->screen, moved);
         fflush(stderr);
         return;
@@ -313,21 +321,23 @@ static void label_pause_graphics(void *buffer, uint32_t bytes)
 {
     static const char cheat[] = "<string enum=\"B_CheatDebug\" value=\"CHEATS (DEBUG)\"/>";
     static const char gfx[] = "<string enum=\"B_ControllerScheme\" value=\"GRAPHICS\"/>";
-    static const char video[] = "<string enum=\"B_Video\" value=\"DISPLAY\"/>";
+    static const char *const videos[] = {"<string enum=\"B_Video\" value=\"DISPLAY\"/>",
+                                         "<string enum=\"B_Video\" value=\"GAME OPTIONS\"/>"};
     _Static_assert(sizeof cheat == sizeof gfx, "Menu XML row size changed");
     char *b = buffer, *end = b + bytes, *row = NULL, *section = NULL, *after = NULL;
     if (bytes > 4096 || bytes < sizeof cheat || memcmp(b, "<stringtable", 12))
         return;
-    for (char *p = b; p + sizeof video <= end; p++) {
+    for (char *p = b; !after && p + sizeof cheat <= end; p++) {
         if (!row && !memcmp(p, cheat, sizeof cheat - 1))
             row = p;
         else if (row && !section && !memcmp(p, "<section name=\"P_EditProfile\">", 30))
             section = p;
-        else if (section && !memcmp(p, video, sizeof video - 1)) {
-            after = p + sizeof video - 1;
+        else if (section && !memcmp(p, "</section>", 10))
             break;
-        } else if (section && !memcmp(p, "</section>", 10))
-            break;
+        else if (section)
+            for (int v = 0; v < 2; v++)
+                if ((size_t)(end - p) >= strlen(videos[v]) && !memcmp(p, videos[v], strlen(videos[v])))
+                    after = p + strlen(videos[v]);
     }
     if (!after)
         return;

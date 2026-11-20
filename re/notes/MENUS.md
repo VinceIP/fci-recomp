@@ -83,7 +83,7 @@ restores it, not found). Layout of 2026-11-20 (runs b90layout-082916, Evolution 
 rows, 20 display and graphics rows on both titles): the header rows are plain rows with one empty value;
 the cursor stops on them (the disabled field +7C changes neither look nor cursor).
 
-### GRAPHICS on Instincts' profile screen (2026-11-20)
+### GRAPHICS on the profile and pause options screens (2026-11-20)
 
 The profile screen (P_EditProfile, magma/cryprofile.mgb: common.dat 0x55F7FF, 65,434 bytes, common.fat
 entry 364, hash 0x64D56760) has no spare button: CHARACTER SETUP is in use (frame b90prof-091001). Its
@@ -114,4 +114,18 @@ sub_0014CEB0 (eax event, edi screen; B_ControlSetup -> [edi+0x64] vt+0x24(1)) ge
 With both buttons in place the DISPLAY AND GRAPHICS row is left out of Controller Options. Runs b90gfx2-113242
 (profile) and b90pause3-113425 and b90pause4-113549 (pause: OPTIONS with GRAPHICS, Controller Options ending at the
 game's CONTROLLER SETUP button, the page titled GRAPHICS, back on OPTIONS). The pause GRAPHICS help line is
-DISPLAY's (the copied record's). Evolution keeps the DISPLAY AND GRAPHICS row (not yet mirrored).
+DISPLAY's (the copied record's).
+
+Evolution has the same pieces: the profile strings keep the unused `B_ControllerScheme` row, B_Video reads
+GAME OPTIONS. Its profile screen (cryprofile.mgb: common.dat 0x6E93BC, 75,837 bytes, entry 421, same hash;
+count byte 0x1FF0 = 10) orders CHARACTER SETUP, CONTROLLER OPTIONS, GAME OPTIONS, MULTIPLAYER OPTIONS, RESET
+DEFAULTS at x 0x30, y 0x7D + 0x23 steps, records in the CryCommon tail form; GRAPHICS goes after GAME OPTIONS
+(record 0x242A-0x251B, MULTIPLAYER's up link 0x2610), and MULTIPLAYER and RESET DEFAULTS move down a step.
+The pause Options (cryingame.mgb: 0x63061E, 34,349 bytes, entry 76; count byte 0x571B = 7) is Instincts'
+layout at x 0x30 (Video 0x5B00-0x5C29, CONTROLLER OPTIONS' up link 0x5AFC). Handlers, all by the button-name
+strings at 0x4BEB5C (B_ControlSetup) and 0x4BEB6C (B_Video): profile dispatcher sub_00123C3D (eax event,
+screen on the stack; CONTROLLER OPTIONS -> sub_00122DBA), pause Options sub_000F9C7C (eax event, ecx screen;
+[ecx+0x64] / +0x68 as Instincts), Controller Options' show sub_00118B88 (ecx screen; fill sub_00119C3D, then
+labels; ret 4). Runs evogfx-114747 (profile with GRAPHICS, Controller Options without the row), evogfx2-114901
+(the page from the profile, back), evopause4-115439 (pause OPTIONS with GRAPHICS, the page, back). The pause
+menu needs one Start some 16 s into the first level; earlier presses are dropped during the opening.

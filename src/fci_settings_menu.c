@@ -1,8 +1,7 @@
 /* fci.ini's player settings inside the game's own Controller Options screen (both the profile's Options and
- * the pause menu's). The screen's option list gets the control settings after the game's rows. Where the
- * profile and pause screens have the added GRAPHICS button (Instincts), it opens the same screen showing
- * the display and graphics settings instead; elsewhere a DISPLAY AND GRAPHICS row at the end does, under a
- * header row each. All are the game's own option objects (COption), so the game draws the rows, the help
+ * the pause menu's). The screen's option list gets the control settings after the game's rows. A GRAPHICS
+ * button added to the profile and pause options screens opens the same screen showing the display and
+ * graphics settings instead, under a header row each (with the buttons off, a DISPLAY AND GRAPHICS row). All are the game's own option objects (COption), so the game draws the rows, the help
  * line, the A toggle and the value popup. A change applies at once where the
  * runtime can (graphics options, console variables) and is saved to fci.ini. Evidence and addresses:
  * re/notes/MENUS.md (Settings menu). RECOMP_FCI_SETTINGS_MENU=0: off. */
@@ -239,8 +238,8 @@ static int enabled(void)
     return on;
 }
 
-/* Instincts' profile screen gets a GRAPHICS button that opens our page (fci_disk.c adds it) */
-int fci_settings_profile_button(void) { return enabled() && !addrs()->evo; }
+/* the profile and pause options screens get a GRAPHICS button that opens our page (fci_disk.c adds it) */
+int fci_settings_profile_button(void) { return enabled(); }
 static int s_open_page; /* GRAPHICS was chosen: the Controller Options about to open shows our page */
 static int s_shown_page; /* our page was filled while the screen opened: its show sets the title after */
 
@@ -637,26 +636,33 @@ static int on_buttons(void (*body)(void), const char *where)
 }
 __attribute__((weak)) void sub_001937B0_fci_body(void);
 __attribute__((weak)) void sub_0014CEB0_fci_body(void);
-/* the profile screen (ecx = screen; ret) and the pause menu's Options (edi = screen; ret) */
+__attribute__((weak)) void sub_00123C3D_fci_body(void);
+__attribute__((weak)) void sub_000F9C7C_fci_body(void);
+/* the profile screen and the pause menu's Options: Instincts, then Evolution */
 int fci_gate_001937B0(void) { return on_buttons(sub_001937B0_fci_body, "profile"); }
 int fci_gate_0014CEB0(void) { return on_buttons(sub_0014CEB0_fci_body, "pause options"); }
+int fci_gate_00123C3D(void) { return on_buttons(sub_00123C3D_fci_body, "profile"); }
+int fci_gate_000F9C7C(void) { return on_buttons(sub_000F9C7C_fci_body, "pause options"); }
 
 /* Controller Options' show (ecx = screen, 1 argument; ret 4): it fills, then labels the screen from the
  * string table, so our page's title and help line are set after it */
-__attribute__((weak)) void sub_00181F70_fci_body(void);
-int fci_gate_00181F70(void)
+static int on_show(void (*body)(void))
 {
-    if (!sub_00181F70_fci_body || !enabled())
+    if (!body || !enabled())
         return 0;
-    const uint32_t screen = g_ecx;
-    sub_00181F70_fci_body();
+    const uint32_t screen = g_ecx, list = screen + addrs()->list_offset;
+    body();
     if (s_shown_page) {
         s_shown_page = 0;
         set_title(screen, "CONTROLLER OPTIONS", PAGE_TITLE);
-        gcall(addrs()->list_help, (struct regs){.ecx = screen + addrs()->list_offset}, 0, NULL);
+        gcall(addrs()->list_help, addrs()->evo ? (struct regs){.edi = list} : (struct regs){.ecx = list}, 0, NULL);
     }
     return 1;
 }
+__attribute__((weak)) void sub_00181F70_fci_body(void);
+__attribute__((weak)) void sub_00118B88_fci_body(void);
+int fci_gate_00181F70(void) { return on_show(sub_00181F70_fci_body); }
+int fci_gate_00118B88(void) { return on_show(sub_00118B88_fci_body); }
 
 /* ---- the gates: Instincts, then Evolution ---------------------------------------------------------- */
 
