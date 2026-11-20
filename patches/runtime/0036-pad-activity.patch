@@ -1,6 +1,6 @@
 Subject: The real pad's state to the project, before the keyboard is merged over it
 
-fci-recomp turns the game's aim assist off in multiplayer while the player uses mouse and keyboard and
+fci-recomp turns the game's aim assist off while the player uses mouse and keyboard and
 back on when they pick up the pad (src/fci_input.c, src/fci_aim.c). After the merge the game's state
 cannot tell the two apart, so port 0's real pad state is handed to fci_input_pad first.
 

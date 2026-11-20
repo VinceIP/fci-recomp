@@ -82,7 +82,7 @@ Checks (tools/game_driver.py `mouse:dx:dy`, which writes "mouse dx dy" to RECOMP
 ## Aim assist (cl_aimingHelper)
 
 The game's aim helper is one console variable, read every frame by the look code; fci_aim.c turns it off
-in multiplayer while mouse and keyboard are in use (2026-11-12, read in the lifts).
+while mouse and keyboard are in use (2026-11-12, read in the lifts; single player too since 2026-11-19).
 
 | | Instincts | Evolution |
 |---|---|---|

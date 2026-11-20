@@ -128,7 +128,7 @@ static int parse_input(const char *s)
 static int binds[C_COUNT][MAX_BINDS];
 static struct {
     double sens, degrees, y_scale, curve, deadzone, walk;
-    int aim, invert_y, window_ms, capture, wheel_ms, log, kbm, mp_assist;
+    int aim, invert_y, window_ms, capture, wheel_ms, log, kbm, assist;
     int quicksave_key, quickload_key, fog_key; /* virtual key codes, -1 when unset */
 } opt;
 
@@ -188,7 +188,7 @@ static BOOL CALLBACK load_config(PINIT_ONCE once, PVOID param, PVOID *ctx)
     opt.wheel_ms = (int)opt_num("RECOMP_WHEEL_HOLD_MS", 80);
     opt.log = opt_num("RECOMP_INPUT_LOG", 0) != 0;
     opt.kbm = opt_num("RECOMP_KEYBOARD", 0) != 0;
-    opt.mp_assist = opt_num("RECOMP_MOUSE_AIM_ASSIST", 0) != 0;
+    opt.assist = opt_num("RECOMP_MOUSE_AIM_ASSIST", 0) != 0;
     opt.quicksave_key = parse_input(getenv("RECOMP_QUICKSAVE_KEY") && *getenv("RECOMP_QUICKSAVE_KEY")
                                             ? getenv("RECOMP_QUICKSAVE_KEY")
                                             : "F5");
@@ -237,7 +237,7 @@ static struct {
 static unsigned motion_head;
 static SRWLOCK motion_lock = SRWLOCK_INIT;
 
-/* The device in use, for the multiplayer aim assist (fci_aim.c):
+/* The device in use, for the aim assist (fci_aim.c):
  * the one with input now while the other has been idle a moment; both at once keep the last choice. */
 #define DEVICE_IDLE_MS   250
 #define MOUSE_DELIBERATE 4 /* mouse counts within 100 ms */
@@ -288,11 +288,11 @@ int fci_input_binding(const char *control)
     return -1;
 }
 
-/* RECOMP_MOUSE_AIM_ASSIST=1 keeps the game's aim assist with mouse and keyboard in multiplayer */
-int fci_input_mp_assist_kept(void)
+/* RECOMP_MOUSE_AIM_ASSIST=1 keeps the game's aim assist with mouse and keyboard */
+int fci_input_assist_kept(void)
 {
     config();
-    return opt.mp_assist;
+    return opt.assist;
 }
 
 /* a key the on-screen keyboard took for typing (fci_vkb.c): the keyboard is in use all the same */

@@ -23,31 +23,28 @@
 
 uint32_t fci_game_view(void);                 /* fci_threads.c: Camera_BuildViews' view */
 int fci_input_on_kbm(void);                   /* fci_input.c: the player uses mouse and keyboard */
-int fci_input_mp_assist_kept(void);           /* fci_input.c: RECOMP_MOUSE_AIM_ASSIST=1 */
-int fci_net_in_session(void);                 /* fci_net_worker.c: in a System Link match */
+int fci_input_assist_kept(void);              /* fci_input.c: RECOMP_MOUSE_AIM_ASSIST=1 */
 int fci_input_aim(float *yaw, float *pitch);  /* fci_input.c: degrees since last frame */
 void fci_trace_actor(uint32_t actor);         /* fci_trace.c */
 int fci_record_aim(float *yaw, float *pitch); /* fci_record.c */
 
-/* In multiplayer the game's aim assist is off while the player uses mouse and keyboard, and the player's
- * own value is back when they pick up the pad. Each player's game applies its own assist. */
+/* The game's aim assist is off while the player uses mouse and keyboard, single player and multiplayer, and
+ * the player's own value is back when they pick up the pad. Each player's game applies its own assist. */
 static void aim_assist(void)
 {
     static int forced;
     static uint32_t saved;
     uint32_t settings, cvar, value;
     int off;
-    if (!forced && !fci_net_in_session())
-        return; /* single-player: untouched */
     settings = MEM32(FCI_AIM_SETTINGS);
     cvar = settings ? MEM32(settings + FCI_AIM_HELPER_SLOT) : 0;
     value = cvar ? MEM32(cvar + 0x10) : 0;
     if (!value)
         return;
-    off = fci_net_in_session() && !fci_input_mp_assist_kept() && fci_input_on_kbm();
+    off = !fci_input_assist_kept() && fci_input_on_kbm();
     if (off && MEM32(value)) { /* forcing it now, or the game set it again (a level load) */
         if (!forced)
-            fprintf(stderr, "[FCI] input: aim assist off (mouse and keyboard in multiplayer)\n");
+            fprintf(stderr, "[FCI] input: aim assist off (mouse and keyboard)\n");
         saved = MEM32(value);
         MEM32(value) = 0;
         forced = 1;
