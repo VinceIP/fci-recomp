@@ -44,7 +44,7 @@ static const struct setting settings[] = {
         {"gfx-shadow-scale", "SHADOW DETAIL", "Sun shadow resolution, a multiple of the original.", 0,
          {"auto|AUTO", "1", "2", "3", "4", "6", "8"}},
         {"gfx-shadow-filter", "SOFT SHADOWS", "Softer shadow edges.", 0, {"1|ON", "0|OFF"}},
-        {"gfx-fog", "FOG", "The original fog, or volumetric fog with light shafts and haze.", 0,
+        {"gfx-fog", "FOG", "Volumetric fog is experimental: light shafts and haze, thicker.", 0,
          {"0|ORIGINAL", "3|VOLUMETRIC"}},
         {"gfx-bloom", "BLOOM", "The game's glow around bright light and sky.", 1, {"1|ON", "0|OFF"}},
         {"gfx-object-draw-distance", "DRAW DISTANCE", "How far away objects are still drawn (original 48).", 0,

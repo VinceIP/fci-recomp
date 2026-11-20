@@ -662,16 +662,20 @@ const LABELS = {
   "network-list": "Internet match list",
   "log-dir": "Log folder", "log-input": "Log controller input", "display-borderless": "Borderless fullscreen",
   "display-dimensions": "Window size", "display-aspect": "Aspect ratio", "display-frame-rate": "Frame rate",
+  "display-fov": "Field of view", "display-vsync": "V-sync", "display-show-fps": "Show frame rate", "gfx-fog": "Fog",
+  "gfx-bloom": "Bloom", "quicksave-key": "Quick save key", "quickload-key": "Quick load key", "fog-toggle-key": "Fog toggle key",
   "engine-update-cap": "Engine update cap", "skip-intro-movies": "Skip intro movies", "gfx-res-scale": "Resolution scale",
   "gfx-anisotropic-filtering": "Anisotropic filtering", "gfx-ssao": "Ambient occlusion", "gfx-ssao-strength": "Ambient occlusion strength",
   "gfx-ssao-radius": "Ambient occlusion radius", "gfx-aa": "Anti-aliasing", "gfx-shadow-scale": "Shadow detail",
   "gfx-shadow-filter": "Soft shadows", "gfx-object-draw-distance": "Object draw distance", "gfx-object-lod-distance": "Object detail distance",
-  "gfx-foliage-lod": "Foliage detail distance", "controls-mouse-keyboard": "Mouse and keyboard", "controls-vibration": "Controller vibration", "controls-mouse-aim": "Direct mouse aim", "controls-mouse-aim-assist": "Aim assist with the mouse (multiplayer)",
+  "gfx-foliage-lod": "Foliage detail distance", "controls-mouse-keyboard": "Mouse and keyboard", "controls-vibration": "Controller vibration", "controls-mouse-aim": "Direct mouse aim", "controls-mouse-aim-assist": "Aim assist with the mouse",
   "controls-mouse-y-scale": "Vertical sensitivity", "controls-mouse-invert-y": "Invert vertical look", "controls-mouse-capture": "Capture the mouse",
 };
 // shorter names for choices the ini explains at length
 const CHOICES = {
-  "engine-update-cap": { 1: "On (as on the Xbox)", 0: "Off (smoother, may break AI)" },
+  "engine-update-cap": { 1: "On (as on the Xbox)", 0: "Off (smoother, may break AI; multiplayer stays on)" },
+  "gfx-fog": { 0: "Original", 3: "Volumetric (experimental)" },
+  "gfx-shadow-scale": { auto: "Auto", 1: "Original", 2: "2x", 4: "4x", 8: "8x" },
 };
 const BUTTONS = { rt: "RT", lt: "LT", rs: "Right stick click", ls: "Left stick click", a: "A", b: "B", x: "X", y: "Y", black: "Black", white: "White", start: "Start", back: "Back" };
 

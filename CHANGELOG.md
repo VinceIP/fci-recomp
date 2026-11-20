@@ -1,54 +1,53 @@
 # Changelog
 
-## [0.3.0-beta.2] - unreleased
-
-An update to the online multiplayer beta. Draft: edited as the beta goes.
+## [0.3.0] - unreleased
 
 ### Added
 
-- The online server can now ask players on an older build to update, and pause online play for maintenance. The match browser shows UPDATE REQUIRED or SERVER PAUSED when this happens.
-- FCI Launcher on a beta now offers the next beta as an update. Players on a regular release are never offered a beta.
-- Added typing with your keyboard in the map editor's on-screen keyboard (Save Map name and description), in both games.
-
-### Fixed
-
-- Fixed a host dropping off the match list, or being listed twice, when the next map in its rotation loaded.
-- Fixed a Steam Deck host missing players' connections.
-- Fixed switching between LAN and INTERNET in the multiplayer menu without restarting the game.
-- Fixed two copies of the game on one PC showing up as one player online.
-- Fixed a blurry game window on displays scaled above 100% (#4).
-- FCI Launcher now says when a release needs a newer launcher, instead of saying the release is too old.
-
-## [0.3.0-beta.1] - 2026-11-12
-
-Private beta of online multiplayer.
-
-### Added
-
-- Added experimental online multiplayer for both Instincts and Evolution.
+- Added experimental online multiplayer for both Instincts and Evolution. Matches are found through the match list in Multiplayer.
 - Added experimental LAN multiplayer for both Instincts and Evolution.
+- The match browser says when the online server needs a newer build (UPDATE REQUIRED) or is paused for maintenance (SERVER PAUSED).
+- Multiplayer always runs the game engine at the original 30 updates a second, whatever the frame rate settings, so physics and AI stay in step between players.
+- Added quick save (F5) and quick load (F9) in Story Mode, in both games. A quick save is the level's checkpoint: Story Mode's Resume continues from it, and the game's next checkpoint replaces it. The keys can be changed in fci.ini.
+- Added an in-game settings screen: Controller Options holds the control settings, and a new GRAPHICS button (on the profile screen and in the pause menu's Options) opens the display and graphics settings.
+- Added a field of view setting (`display-fov`).
+- Added 16:10, 21:9, 32:9 and auto aspect ratios (`display-aspect`). The 3D view uses the true aspect; the HUD is repositioned at 16:10 and kept in a centred 16:9 box at wider ratios.
+- Added experimental volumetric fog, with light shafts, a ground layer and haze (`gfx-fog = 3`, off by default). F8 switches between it and the original fog while playing. It is thicker than the original fog for now.
+- Added a bloom setting (`gfx-bloom`).
+- Added V-sync and frame rate display settings (`display-vsync`, `display-show-fps`). F11 now also toggles fullscreen.
 - Added a "Quit Game" main menu option.
-- Added support for typing with your keyboard for on-screen input prompts (cheat codes, profile names, etc). This feature for the map editor TBD.
-- Added contextual button glyphs for on-screen input labels - changes depending on user keybinds, and whether or not you're using a gamepad or mouse & keyboard.
-- Added controller rumble support.
-- Aim assist is now off for mouse & keyboard in multiplayer and stays on for gamepads. An option turns it back on for mouse & keyboard.
-- Debug logs are now kept by default, even if the game exits successfully. Up to 3 logs are saved at a time before pruning the oldest one. This behavior can be changed in settings.
+- Added typing with your keyboard in on-screen keyboards (cheat codes, profile names, and the map editor's Save Map name and description).
+- Added button prompts that follow your key bindings and whether you're playing with a gamepad or mouse and keyboard.
+- Added controller vibration.
+- Aim assist is now off for mouse and keyboard, and stays on for gamepads. An option turns it back on for mouse and keyboard.
+- Debug logs are now kept by default, even when the game exits normally. The last 3 sessions are kept (`log-limit`), and a fixed `log =` path keeps earlier sessions too.
+- FCI Launcher's Settings tab includes the new settings.
 
 ### Fixed
 
+- Fixed profiles reported as "damaged and cannot be used" after starting a level from Load a Map following a checkpoint, in both games. Profiles already affected are repaired at startup; the removed checkpoint is kept in the `save-backups` folder.
 - Fixed saves being reported as damaged after closing the game while it was saving (#59). Closing the game now waits for a save in progress to finish.
+- Fixed a crash when renaming a profile, which also broke its saves.
+- Fixed bump-mapped surfaces drawn far too dark (the Training tunnel's walls, the player's hands). They now show their lighting and detail.
+- Fixed models drawn inside out or with missing faces.
+- Fixed shadow acne and striping, and shadow edges crawling, on the sun's shadows (#50).
+- Fixed geometry vanishing and coming back as the player moved, such as the wooden beams in the Rain Forest mines (#31).
+- Fixed shadows flickering and jumping, and one-frame black flashes, above 30 fps.
+- Fixed ambient occlusion drawing over water, grass and distant fog.
+- Fixed objects disappearing at the edges of a wide field of view in Evolution.
 - Fixed Evolution loads hanging for good after installing into a new folder (on Start, or loading a System Link map).
-
-- Fixed the match browser showing only every second match, and a host missing a second player's connection when two arrived together.
-- A player behind a relay can now see and join several matches at once (before, only the first match they reached would work).
-- A player hosting a match no longer reads the match list or contacts other matches, which saves requests and relay use.
+- Fixed a blurry game window on displays scaled above 100% (#4).
 
 ### Known issues
 
+- At a wide field of view, the screen edges can show stale image strips indoors and a dark band in some places.
 - Players are named after their game profile.
 - Instincts online play has had less testing than Evolution.
 - Joining by IP address isn't available yet; matches are found through the match list or on the local network.
-- Typing in the map editor's on-screen keyboard isn't supported yet.
+
+Built against xboxrecomp 193e2995 and Xbox XBE Recomp 65e959d4, with llvm-mingw 20261006 (LLVM 23.1.3).
+Supported discs: Far Cry Instincts title 55530008, version 1 (`data/disc.json`); Far Cry Instincts
+Evolution title 55530060, version 3 (`data/evolution/disc.json`).
 
 ## [0.2.4] - 2026-11-07
 

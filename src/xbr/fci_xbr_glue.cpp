@@ -786,20 +786,21 @@ void Pace()
         fps = f ? std::atof(f) : 0.0;
         QueryPerformanceFrequency(&freq);
     }
-    // a transport engages the Xbox's 30 updates the moment it is up: physics and AI depend on the rate
-    // (multiplayer.md); checked every frame, so a transport started later (the menu) catches the player
-    if (fci_nic_transport_active() && (unlock || fps > 0)) {
-        if (!linked_logged) {
-            std::fprintf(stderr, "[FCI] network: the game keeps its own 30 frames a second while linked; "
-                                 "RECOMP_FCI_XBR_REPLAY still shows more\n");
-            linked_logged = 1;
-        }
-        unlock = 0, fps = 0.0;
+    // multiplayer runs the Xbox's 30 updates while a transport is up (physics and AI depend on the rate);
+    // checked every frame, so a link started from the menu catches it and leaving it gives the rate back
+    const bool linked = fci_nic_transport_active() && (unlock || fps > 0);
+    if (linked != (linked_logged == 1)) {
+        std::fprintf(stderr, linked ? "[FCI] network: the game keeps its own 30 frames a second while linked; "
+                                      "RECOMP_FCI_XBR_REPLAY still shows more\n"
+                                    : "[FCI] network: link down; the frame rate setting applies again\n");
+        linked_logged = linked ? 1 : 2;
     }
+    const int unlock_now = linked ? 0 : unlock;
+    const double fps_now = linked ? 0.0 : fps;
     uint32_t blanks = g_interval & 0xF;
-    if (unlock || (fps <= 0 && blanks < 2))
+    if (unlock_now || (fps_now <= 0 && blanks < 2))
         return;   // 0 and 1 blanks: the display's own refresh paces it
-    LONGLONG period = fps > 0 ? LONGLONG(double(freq.QuadPart) / fps)
+    LONGLONG period = fps_now > 0 ? LONGLONG(double(freq.QuadPart) / fps_now)
                               : freq.QuadPart * blanks * 1001 / 60000;   // NTSC blanks
     LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
