@@ -85,6 +85,7 @@ const char* kAoHlsl = R"(
 cbuffer P : register(b1) { float4 p0; float4 p1; float4 p2; };
 Texture2D src0 : register(t0);
 Texture2D src1 : register(t1);
+Texture2D src2 : register(t2);
 SamplerState ls : register(s0);
 SamplerState ps : register(s1);
 struct O { float4 p : SV_Position; float2 uv : TEXCOORD0; };
@@ -143,13 +144,18 @@ float2 blur(O i) : SV_Target {
     }
     return float2(sum / sw, c.g);
 }
-// apply: p0.x = 2 shows the occlusion alone, 3 only on the right half (a same frame comparison)
+// apply: p0.x = 2 shows the occlusion alone, 3 only on the right half (a same frame comparison);
+// p1 = the game's fog: end (depth units), thickness; p2.rgb its colour. The surface's colour already holds
+// the game's per-vertex fog, (1 - f) * C + f * fog: occlude only the surface's share, so fog stays over it
 float4 apply(O i) : SV_Target {
     float4 c = src0.SampleLevel(ps, i.uv, 0);
     float a = src1.SampleLevel(ps, i.uv, 0).r;
-    if (p0.x > 2.5) return i.uv.x < 0.5 ? c : abs(i.uv.x - 0.5) < 0.001 ? float4(1, 0, 0, c.a) : float4(c.rgb * a, c.a);
-    if (p0.x > 1.5) return float4(a, a, a, c.a);
-    return float4(c.rgb * a, c.a);
+    if (p0.x > 1.5 && p0.x < 2.5) return float4(a, a, a, c.a);
+    if (p0.x > 2.5 && i.uv.x < 0.5) return c;
+    if (p0.x > 2.5 && abs(i.uv.x - 0.5) < 0.001) return float4(1, 0, 0, c.a);
+    float d = src2.SampleLevel(ps, i.uv, 0).r;
+    float3 S = p2.rgb * (p1.y * saturate(d / max(p1.x, 1e-6)));
+    return float4(S + (c.rgb - S) * a, c.a);
 }
 )";
 
@@ -721,7 +727,7 @@ class FciExtension final : public gpu::Extension {
         scene_rt_ = scene_ds_ = nullptr;
         refl_rt_ = nullptr;
         done_ = fog_done_ = false;
-        fog_captured_ = refl_captured_ = false;
+        fog_captured_ = refl_captured_ = game_fog_ = false;
         fog_gate_ = 0;
     }
 
@@ -798,7 +804,7 @@ class FciExtension final : public gpu::Extension {
             opaque_ = 0;
             late_ = 0;
             scene_rt_ = scene_ds_ = nullptr;
-            fog_captured_ = refl_captured_ = false;
+            fog_captured_ = refl_captured_ = game_fog_ = false;
             vol_ready_ = false;
             vol_splitscreen_ = false;
         }
@@ -831,6 +837,8 @@ class FciExtension final : public gpu::Extension {
                 }
                 if (fog_mode_ && s.rs[kRsFogEnable] != 0 && !fog_captured_)
                     CaptureFog(s);
+                else if (!fog_mode_ && ao_mode_ && s.rs[kRsFogEnable] != 0 && !game_fog_)
+                    GameFog(s);
                 if (fog_mode_) {
                     CaptureSun(s);
                     // the shadow matrix (c161-c164), world to shadow clip
@@ -1136,19 +1144,20 @@ class FciExtension final : public gpu::Extension {
             c.Unbind();
             return true;
         }
-        ID3D12Resource* as[4] = {fb, ao_[0].Get(), nullptr, nullptr};
-        DXGI_FORMAT af[4] = {rt.fmt, kAoFormat, kBgra, kBgra};
-        float ap[8] = {float(ao_mode_)};
-        c.Pass(kAoHlsl, "apply", rt.fmt, c.View(rt), w, h, as, af, ap, 8, -1);
+        ID3D12Resource* as[4] = {fb, ao_[0].Get(), ds.res.Get(), nullptr};
+        DXGI_FORMAT af[4] = {rt.fmt, kAoFormat, kDepthRead, kBgra};
+        bool fogged = !fog_mode_ && game_fog_;   // the game's own fog, in the surfaces' colour
+        float ap[12] = {float(ao_mode_), 0, 0, 0, fog_end_w_ / 16777215.0f, fogged ? fog_thick_ : 0.0f, 0, 0,
+                        fog_col_[0], fog_col_[1], fog_col_[2], 0};
+        c.Pass(kAoHlsl, "apply", rt.fmt, c.View(rt), w, h, as, af, ap, 12, -1);
         c.Unbind();
         return true;
     }
 
-    // the fog register, the colour and the main view, from the first gated (main, fogged) draw. The
-    // register is the c[k] with {x < 0, y = 1, z > 0, w = 1}: the end in w-units is z, the thickness
-    // -x * z
-    void CaptureFog(const State& s)
+    // the fog register and colour; false without the register
+    bool GameFog(const State& s)
     {
+        fog_end_w_ = 0;
         for (const auto& v : s.vsc)
             if (v[0] < -1e-9f && std::abs(v[1] - 1.0f) < 1e-5f && v[2] > 1000.0f
                 && std::abs(v[3] - 1.0f) < 1e-5f) {
@@ -1157,11 +1166,22 @@ class FciExtension final : public gpu::Extension {
                 break;
             }
         if (fog_end_w_ <= 0)
-            return;   // no register: the pass does nothing this frame
+            return false;
         uint32_t argb = s.rs[kRsFogColor];
         fog_col_[0] = ((argb >> 16) & 255) / 255.0f;
         fog_col_[1] = ((argb >> 8) & 255) / 255.0f;
         fog_col_[2] = (argb & 255) / 255.0f;
+        game_fog_ = true;
+        return true;
+    }
+
+    // the fog register, the colour and the main view, from the first gated (main, fogged) draw. The
+    // register is the c[k] with {x < 0, y = 1, z > 0, w = 1}: the end in w-units is z, the thickness
+    // -x * z
+    void CaptureFog(const State& s)
+    {
+        if (!GameFog(s))
+            return;   // no register: the pass does nothing this frame
         const float* vm = s.transforms[kTsView].data();
         // D3D's row vectors: rows 0..2 rotate, row 3 translates; the shader takes the rows with T in .w
         for (int r = 0; r < 3; r++) {
@@ -1663,6 +1683,7 @@ class FciExtension final : public gpu::Extension {
     bool fog_done_ = false;        // the fog ran this frame
     bool fog_logged_ = false;
     float fog_end_w_ = 0;             // the fog register's end, w-units
+    bool game_fog_ = false;           // fog_end_w_, fog_thick_, fog_col_ are this frame's
     float fog_thick_ = 0;             // the fog register's thickness
     float fog_col_[3] = {0, 0, 0};    // the game's fog colour
     float view_[12] = {};             // the main view rows 0..2 (world to view, metres)
