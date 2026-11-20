@@ -78,7 +78,13 @@ degrees, clamped 40-110) scales by target / 67.5:
   reflection views). The prehook scales the field only when Camera_BuildViews calls (0x000F0796,
   0x000F079B, 0x000F0C55), once per value (it remembers what it wrote), clamped to 2.97 rad. The builder
   hook no longer scales fovy on Instincts.
-- Evolution: the builder's fovy argument is still scaled (its camera update is not mapped).
+- Evolution (2026-11-20): the same camera update is `sub_001F1DA9` (the camera in edi; the same fields +0x38,
+  +0x384, +0x388..+0x3A8; it calls the builder 004048C9 at 0x001F1EFF), called by Camera_BuildViews
+  `sub_000B8CF5` from 0x000B8F70, 0x000B8F75 and 0x000B93BA (`recomp_0017.c:34129`, `:34134`, `:34671`).
+  The same prehook scales the field there; the builder no longer scales fovy in either game. Before, only the
+  picture widened and objects at the edges were culled (backlog 80). First level's jeep at 0 and 90 (evo
+  drive evofov0-004541, evofov90-004639): 402-412 draws at 0, 449-451 at 90, edges drawn. The editors keep
+  the builder scaling (their camera updates are not mapped).
 
 Square projections are left alone. 67.5 is Instincts' on-foot value; Evolution's own was not measured.
 Frames 2026-11-17: Beach at 0/90/110 (drive beachf0-101845, beach90-100541, beachf110-101948) and Rain

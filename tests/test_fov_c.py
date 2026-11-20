@@ -38,9 +38,16 @@ def test_fov_c(tmp_path: Path) -> None:
     exe = tmp_path / "fov_test.exe"
     sources = [REPO / "src" / "fci_fov.c", REPO / "tests" / "fov_test.c"]
     includes = [REPO / "tests" / "fov_mock", REPO / "src"]
-    build, _ = cc_helper.build_run(sources, exe, cc=CC, includes=includes)
-    assert build.returncode == 0, "the display-fov check failed to compile:\n" + build.stderr
+    evo = ["-DFCI_TEST_EVO", '-DFCI_TITLE_NAME="Far Cry Instincts Evolution"']
+    for title, extra in (("instincts", []), ("evolution", evo)):
+        build, _ = cc_helper.build_run(sources, exe, cc=CC, includes=includes, flags=cc_helper.FLAGS + extra)
+        assert build.returncode == 0, f"the display-fov check failed to compile ({title}):\n" + build.stderr
+        run_vectors(exe, title)
 
+    print(f"{len(VECTORS)} checks per title, 0 failed")
+
+
+def run_vectors(exe: Path, title: str) -> None:
     for name, (fov, expect, seed, aspect) in VECTORS.items():
         env = dict(os.environ)
         env.pop("RECOMP_FCI_FOV", None)
@@ -58,9 +65,7 @@ def test_fov_c(tmp_path: Path) -> None:
         run = __import__("subprocess").run([str(exe), name], env=env, capture_output=True, text=True)
         line = [ln for ln in run.stdout.splitlines() if ln.startswith(("ok ", "FAIL "))]
         line = line[0] if line else "(no result line)\n" + run.stdout + run.stderr
-        assert run.returncode == 0 and line.startswith("ok"), f"{name} failed:\n{line}"
-
-    print(f"{len(VECTORS)} checks, 0 failed")
+        assert run.returncode == 0 and line.startswith("ok"), f"{title} {name} failed:\n{line}"
 
 
 def test_fov_config_key() -> None:

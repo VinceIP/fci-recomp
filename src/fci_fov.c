@@ -29,27 +29,31 @@ static float fov_scale(void)
     return fov_target > 0.0f ? fov_target / FCI_FOV_DEFAULT_DEG : 1.0f;
 }
 
-/* Instincts scales the FOV at the camera (fci_prehook_002A84E0); Evolution's camera build is not mapped
- * yet, so there the builder's argument is still scaled */
+static int fov_evolution(void) { return strstr(FCI_TITLE_NAME, "Evolution") != NULL; }
+
+/* both titles' games scale the FOV at the camera (fci_prehook_002A84E0); the editors' camera builds are not
+ * mapped, so there the builder's argument is still scaled */
 static int fov_at_camera(void)
 {
-    return !_stricmp(FCI_IMAGE_FILENAME, "default.xbe") && !strcmp(FCI_TITLE_NAME, "Far Cry Instincts");
+    return !_stricmp(FCI_IMAGE_FILENAME, "default.xbe");
 }
 
-/* prehook on the camera update (ebx the camera; FOV in radians at +0x38, projection fovy = +0x38 / ratio
- * +0x384, frustum extents from both). It updates every camera, shadow and cube faces too, so only the calls
- * from Camera_BuildViews (the render camera) are scaled. A value this hook wrote is not scaled again. */
+/* prehook on the camera update (Instincts 002A84E0, ebx the camera; Evolution 001F1DA9, edi): FOV in radians
+ * at +0x38, projection fovy = +0x38 / ratio +0x384, frustum extents from both. It updates every camera, shadow
+ * and cube faces too, so only the calls from Camera_BuildViews (Instincts 000F0500, Evolution 000B8CF5: the
+ * render camera) are scaled. A value this hook wrote is not scaled again. */
 void fci_prehook_002A84E0(void)
 {
     static uint32_t last_written;
     float s = fov_scale(), fov;
-    uint32_t bits, from;
-    if (s == 1.0f || !g_ebx)
+    uint32_t bits, from, cam = fov_evolution() ? g_edi : g_ebx;
+    if (s == 1.0f || !cam || !fov_at_camera())
         return;
     from = MEM32(g_esp); /* the return address */
-    if (from != 0x000F0796u && from != 0x000F079Bu && from != 0x000F0C55u)
+    if (fov_evolution() ? from != 0x000B8F70u && from != 0x000B8F75u && from != 0x000B93BAu
+                        : from != 0x000F0796u && from != 0x000F079Bu && from != 0x000F0C55u)
         return;
-    bits = MEM32(g_ebx + 0x38);
+    bits = MEM32(cam + 0x38);
     if (bits == last_written)
         return;
     memcpy(&fov, &bits, 4);
@@ -59,7 +63,7 @@ void fci_prehook_002A84E0(void)
     if (fov > 2.97f)
         fov = 2.97f;
     memcpy(&last_written, &fov, 4);
-    MEM32(g_ebx + 0x38) = last_written;
+    MEM32(cam + 0x38) = last_written;
 }
 
 /* prehook on the perspective builder (Evolution sub_004048C9 too): its fovy argument is at g_esp + 8 */

@@ -45,12 +45,22 @@ void fci_prehook_005514C9(void);
 #define ASP_SLOT    12      /* g_esp + 12 = param3 (aspect) of the builder */
 #define CAM_FOV     0x38    /* camera + 0x38 = the FOV field, radians */
 #define FIELD       1.5707964f /* the value the game writes each frame (pi/2) */
+#ifdef FCI_TEST_EVO /* Evolution: the camera in edi, Camera_BuildViews 000B8CF5 */
+#define RENDER_CALL 0x000B93BAu
+#else
 #define RENDER_CALL 0x000F0C55u /* Camera_BuildViews' call of the camera update */
+#endif
 
 static char guest[0x00700000];
 ptrdiff_t g_xbox_mem_offset = (ptrdiff_t)guest;
 uint32_t g_esp = STACK_VA;
+#ifdef FCI_TEST_EVO
+uint32_t g_ebx = 0;
+uint32_t g_edi = CAM_VA;
+#else
 uint32_t g_ebx = CAM_VA;
+uint32_t g_edi = 0;
+#endif
 
 /* mock of fci_host_aspect (fci_xbr_glue.cpp): 16:9 by default, RECOMP_FCI_TEST_ASPECT to override */
 float fci_host_aspect(void)
