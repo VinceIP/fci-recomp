@@ -45,9 +45,11 @@ and quit-rt-evo-133204: "QUIT GAME added", "QUIT GAME chosen, closing", exit cod
 ## Recomp settings (Controller Options)
 
 Found 2026-11-18 from the lifted Options screens (both titles) and checked with driver runs (frames and
-stderr). The runtime's `fci_settings_menu.c` adds a RECOMP SETTINGS row to Controller Options (Options →
-profile → Controller Options, and the pause menu's Options); A on it fills the same list with the fci.ini
-settings.
+stderr). The runtime's `fci_settings_menu.c` adds the control settings (mouse and keyboard) after the
+game's rows in Controller Options (Options → profile → Controller Options, and the pause menu's Options),
+then a DISPLAY AND GRAPHICS row; A on it fills the same list with the display and graphics settings, each
+group under a header row (DISPLAY, GRAPHICS), and the title reads GRAPHICS. fci.ini's controls-vibration
+is left out: the game's own CONTROLLER VIBRATION row sits in the same list.
 
 The screen is an option-list controller at screen+0x60: the options (COption pointers) at +0x18..+0x1C,
 the list widget at +4 (selected row s16 at +0xC4), the help widget at +8. A COption is 0x80 bytes: help
@@ -67,14 +69,16 @@ own apply visitor leaves them alone.
 | operator new | `0033CA60` (eax size) | `001FEACC` (cdecl size, 0) |
 | title: child by name, wstring assign | `000665A0`, `00068750` | `0004F7FC`, `00050EC4` |
 
-Gates: the fill adds our entry row after the game's; A on the entry clears the list and adds one COption
-per setting (the game's handler is skipped); after the game's own toggle, rows rebuild and set-index, a
+Gates: the fill adds our control rows and the entry row after the game's; A on the entry clears the list
+and adds the header rows and one COption per setting (the game's handler is skipped); after the game's own toggle, rows rebuild and set-index, a
 changed index is applied live (graphics options and engine variables) and written to fci.ini, or saved
-for the next start. The title element `B_TitleButton` reads RECOMP SETTINGS while ours are shown, and is
+for the next start. The title element `B_TitleButton` reads GRAPHICS while that page is shown, and is
 put back after the value popup closes. Leaving with B returns to the profile screen; the next visit shows
 the game's own options again.
 
 Runs: Instincts q75-set1-090436 (pause menu) and q75main1-084226 (main menu); Evolution q75-evoset-085704 and -090042
 (the second read the first's fci.ini: anti-aliasing OFF, toggled back ON). Known: on opening, the help
 box keeps the entry's text until the cursor moves (the help call runs with row 0; something later
-restores it, not found).
+restores it, not found). Layout of 2026-11-20 (runs b90layout-082916, Evolution b90evo-084109: 5 control
+rows, 20 display and graphics rows on both titles): the header rows are plain rows with one empty value;
+the cursor stops on them (the disabled field +7C changes neither look nor cursor).

@@ -1,7 +1,8 @@
-/* RECOMP SETTINGS: fci.ini's player settings inside the game's own Controller Options screen (both the
- * profile's Options and the pause menu's). The screen's option list gets one more row, RECOMP SETTINGS;
- * A on it fills the same list with our settings as the game's own option objects (COption), so the game
- * draws the rows, the help line, the A toggle and the value popup. A change applies at once where the
+/* fci.ini's player settings inside the game's own Controller Options screen (both the profile's Options and
+ * the pause menu's). The screen's option list gets the control settings after the game's rows, then a
+ * DISPLAY AND GRAPHICS row; A on it fills the same list with the display and graphics settings, under a
+ * header row each. All are the game's own option objects (COption), so the game draws the rows, the help
+ * line, the A toggle and the value popup. A change applies at once where the
  * runtime can (graphics options, console variables) and is saved to fci.ini. Evidence and addresses:
  * re/notes/MENUS.md (Settings menu). RECOMP_FCI_SETTINGS_MENU=0: off. */
 #include <windows.h>
@@ -28,6 +29,7 @@ struct setting {
     const char *values[MAX_VALUES]; /* "ini value|LABEL" (LABEL defaults to the value), the default first */
 };
 
+/* not here: controls-vibration, the master switch behind the game's own CONTROLLER VIBRATION row */
 static const struct setting settings[] = {
         {"gfx-res-scale", "RESOLUTION SCALE", "Internal resolution as a multiple of 640x480.", 1,
          {"auto|AUTO", "1", "1.5", "2", "2.5", "3", "4"}},
@@ -68,12 +70,21 @@ static const struct setting settings[] = {
         {"controls-mouse-invert-y", "INVERT MOUSE", "Invert vertical mouse look.", 1, {"0|NO", "1|YES"}},
         {"controls-mouse-aim", "DIRECT MOUSE AIM", "On foot, the mouse turns the view by an exact angle.", 1,
          {"1|ON", "0|OFF"}},
-        {"controls-mouse-aim-assist", "MOUSE AIM ASSIST", "Multiplayer aim assist with mouse and keyboard.", 1,
+        {"controls-mouse-aim-assist", "MOUSE AIM ASSIST", "Aim assist with mouse and keyboard, as with a gamepad.", 1,
          {"0|OFF", "1|ON"}},
         {"controls-mouse-keyboard", "MOUSE AND KEYBOARD", "Off: controllers only.", 1, {"1|ON", "0|OFF"}},
-        {"controls-vibration", "VIBRATION", "Controller vibration.", 1, {"1|ON", "0|OFF"}},
 };
 #define N_SETTINGS (sizeof settings / sizeof *settings)
+
+/* the controls go in Controller Options; display and graphics on our page, each under its header */
+enum { SEC_CONTROLS, SEC_DISPLAY, SEC_GRAPHICS };
+static int section_of(const struct setting *s)
+{
+    if (!strncmp(s->key, "controls-", 9))
+        return SEC_CONTROLS;
+    return strncmp(s->key, "gfx-", 4) ? SEC_DISPLAY : SEC_GRAPHICS;
+}
+#define PAGE_TITLE "GRAPHICS"
 
 /* ini keys the runtime reads itself, not through an environment option (fci_config.c) */
 static const char *setting_env(const char *key)
@@ -282,7 +293,8 @@ static void wstr_set(uint32_t p, const char *text)
 
 static uint32_t s_vtable;              /* our COption vtable: the base's methods, a no-op visit */
 static uint32_t s_list;                /* the list our objects are in */
-static uint32_t s_entry;               /* the RECOMP SETTINGS row */
+static uint32_t s_entry;               /* the DISPLAY AND GRAPHICS row */
+static uint32_t s_heads[2];            /* the page's DISPLAY and GRAPHICS header rows */
 static uint32_t s_opts[N_SETTINGS];    /* our rows, while the list holds them */
 static int s_index[N_SETTINGS];        /* the value each showed */
 static int s_chosen[N_SETTINGS];       /* 1 + the value picked this session (saved, maybe not yet in use) */
@@ -358,6 +370,9 @@ static void list_show(uint32_t list)
     gcall(addrs()->list_rows, (struct regs){0}, 1, &arg);
     if (s_entry)
         row_value(list, s_entry);
+    for (int k = 0; k < 2; k++)
+        if (s_heads[k])
+            row_value(list, s_heads[k]);
     for (int i = 0; i < (int)N_SETTINGS; i++)
         if (s_opts[i])
             row_value(list, s_opts[i]);
@@ -407,21 +422,6 @@ static void set_title(uint32_t screen, const char *expect, const char *title)
     fprintf(stderr, "[FCI] settings menu: title not found\n");
 }
 
-/* the list now shows our settings instead of the controller's */
-static void fill_settings(uint32_t list)
-{
-    set_title(list - addrs()->list_offset, "CONTROLLER OPTIONS", "RECOMP SETTINGS");
-    gcall(addrs()->list_clear, (struct regs){.eax = list}, 0, NULL);
-    memset(s_opts, 0, sizeof s_opts);
-    s_entry = 0;
-    for (int i = 0; i < (int)N_SETTINGS; i++)
-        if ((s_opts[i] = make_setting(i)) != 0)
-            list_add(list, s_opts[i]);
-    s_list = list;
-    list_show(list);
-    fprintf(stderr, "[FCI] settings menu: %d settings shown\n", (int)N_SETTINGS);
-}
-
 /* a value picked: apply it where the runtime reads it live, and save it */
 static void changed(int i, int index)
 {
@@ -453,6 +453,44 @@ static int in_list(uint32_t list, uint32_t option)
         if (MEM32(p) == option)
             return MEM32(option) == s_vtable;
     return 0;
+}
+
+/* the section's settings onto the list, after a header row (one empty value) when it has a name */
+static int add_section(uint32_t list, int section, const char *head)
+{
+    static const char *const blank[] = {""};
+    int n = 0;
+    if (head && (s_heads[section - SEC_DISPLAY] = make_option(head, "", 1, blank, 0)) != 0)
+        list_add(list, s_heads[section - SEC_DISPLAY]);
+    for (int i = 0; i < (int)N_SETTINGS; i++)
+        if (section_of(&settings[i]) == section && (s_opts[i] = make_setting(i)) != 0) {
+            list_add(list, s_opts[i]);
+            n++;
+        }
+    return n;
+}
+
+static void forget_rows(uint32_t list)
+{
+    memset(s_opts, 0, sizeof s_opts);
+    memset(s_heads, 0, sizeof s_heads);
+    s_entry = 0;
+    s_list = list;
+}
+
+/* our page is in the list (its header rows exist only there) */
+static int page_shown(void) { return s_list && s_heads[0] && in_list(s_list, s_heads[0]); }
+
+/* the list now shows the display and graphics settings instead of the controller's */
+static void fill_settings(uint32_t list)
+{
+    set_title(list - addrs()->list_offset, "CONTROLLER OPTIONS", PAGE_TITLE);
+    gcall(addrs()->list_clear, (struct regs){.eax = list}, 0, NULL);
+    forget_rows(list);
+    int n = add_section(list, SEC_DISPLAY, "DISPLAY");
+    n += add_section(list, SEC_GRAPHICS, "GRAPHICS");
+    list_show(list);
+    fprintf(stderr, "[FCI] settings menu: %d display and graphics settings shown\n", n);
 }
 
 static void check_changes(uint32_t list)
@@ -494,13 +532,13 @@ static int on_fill(void (*body)(void))
     const uint32_t screen = MEM32(g_esp + 4), list = screen + m->list_offset;
     body();
     static const char *const more[] = {">"};
-    memset(s_opts, 0, sizeof s_opts);
-    s_list = list;
-    if ((s_entry = make_option("RECOMP SETTINGS", "fci-recomp's own settings: graphics, display and controls.",
-                               1, more, 0)) != 0) {
+    forget_rows(list);
+    const int n = add_section(list, SEC_CONTROLS, NULL);
+    if ((s_entry = make_option("DISPLAY AND GRAPHICS", "Window, frame rate, field of view and graphics quality.",
+                               1, more, 0)) != 0)
         list_add(list, s_entry);
-        list_show(list);
-    }
+    list_show(list);
+    fprintf(stderr, "[FCI] settings menu: %d control settings added\n", n);
     return 1;
 }
 
@@ -553,10 +591,10 @@ static int on_set_index(void (*body)(void))
  * again, so ours is put back */
 static int on_popup(void (*body)(void))
 {
-    if (!enabled() || !body || !s_list || !s_opts[0] || !in_list(s_list, s_opts[0]))
+    if (!enabled() || !body || !page_shown())
         return 0;
     body();
-    set_title(s_list - addrs()->list_offset, "CONTROLLER OPTIONS", "RECOMP SETTINGS");
+    set_title(s_list - addrs()->list_offset, "CONTROLLER OPTIONS", PAGE_TITLE);
     return 1;
 }
 

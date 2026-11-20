@@ -208,11 +208,12 @@ REPLACE = {
     ),
     "sub_00182570": (
         "gate",
-        "the Controller Options screen's fill (screen; ret 4): adds the RECOMP SETTINGS row (fci_settings_menu.c)",
+        "the Controller Options screen's fill (screen; ret 4): adds the control settings and the DISPLAY AND "
+        "GRAPHICS row (fci_settings_menu.c)",
     ),
     "sub_00152AF0": (
         "gate",
-        "A on an option list's row (eax event, list; ret 4): RECOMP SETTINGS opens the recomp's settings; a "
+        "A on an option list's row (eax event, list; ret 4): DISPLAY AND GRAPHICS opens that page; a "
         "changed setting is applied and saved to fci.ini (fci_settings_menu.c)",
     ),
     "sub_00152510": (
@@ -227,7 +228,7 @@ REPLACE = {
     ),
     "sub_00151FD0": (
         "gate",
-        "the option value popup's input (ecx handler, event; ret 8): RECOMP SETTINGS' title is put back after "
+        "the option value popup's input (ecx handler, event; ret 8): the GRAPHICS title is put back after "
         "the popup closes (fci_settings_menu.c)",
     ),
     "sub_00109670": ("gate", "set the native browser title at the System Link call site (fci_lan_menu.c)"),
