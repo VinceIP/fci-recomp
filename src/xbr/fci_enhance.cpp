@@ -462,7 +462,7 @@ float4 fog(O i) : SV_Target {
 // Volume fog (RECOMP_FCI_XBR_FOG=3): a 128x72x64 froxel volume. "inject" writes one slice's (L, sigma)
 // with temporal accumulation; "integ" integrates the accumulated volume; "volfog" composites it.
 // Cbuffer layout (register b1, float4 p[24]):
-//   inject:  p[0]=(tx,ty,tanx,tany) p[1..3]=view rows p[4]=(s0,thick,wpm,zsign) p[5]=(sdir,sstr)
+//   inject:  p[0]=(tx,ty,tanx,tany) p[1..3]=view rows p[4]=(end_m,thick,wpm,zsign) p[5]=(sdir,sstr)
 //            p[6]=(scol,tint) p[7]=(dk,dxk,volw,volh) p[8]=(vold,time,near,far)
 //            p[9]=(sh_gw,sh_gh,sh_hw,sh_hh) p[10..13]=shadow mtx p[14..17]=last view rows
 //            p[18]=(last_tanx,last_tany,last_zsign,have_hist) p[19]=(h0,H,floor,ceiling)
@@ -515,6 +515,13 @@ float GL(float z) {
     float b = p[20].y - p[20].z, a = clamp(z - b, 0.0, p[20].z);
     return min(z, b) + a - a * a / (2.0 * p[20].z);
 }
+// The game's fog along the view depth d: opacity thick * min(d, end) / end, so optical depth
+// -ln(1 - thick * min(d, end) / end); the mean density of the slice d0..d1 (none beyond the end)
+float GameSigma(float d0, float d1) {
+    float E = max(p[4].x, 1e-3), t = p[4].y;
+    float T0 = max(1.0 - t * min(d0, E) / E, 1e-3), T1 = max(1.0 - t * min(d1, E) / E, 1e-3);
+    return (log(T0) - log(T1)) / max(d1 - d0, 1e-4);
+}
 // The slice's mean density between a and b in closed form, so a thick far slice is not one noisy point
 // sample; the layer's noise at q (a jittered point) only modulates it, less where the slice is thick
 float Sigma(float3 a, float3 b, float3 q, float len) {
@@ -525,13 +532,15 @@ float Sigma(float3 a, float3 b, float3 q, float len) {
     // the floor (distance fog) ends at the ceiling p[19].w, so a sky ray leaves it: the sky above stays clear
     float lo = min(a.z, b.z), hi = max(a.z, b.z);
     float below = hi - lo < 1e-3 ? (lo < p[19].w ? 1.0 : 0.0) : saturate((p[19].w - lo) / (hi - lo));
-    float s = p[4].x * (fl * below + (1.0 - fl) * e);
+    // the game's distance curve at the height h0, thinning above it as before
+    float s = GameSigma(p[7].x, p[7].x + p[7].y) * (fl * below + (1.0 - fl) * e);
+    float ls = 0.0;
     if (p[20].x > 0.0) {
         float lz = b.z - a.z;
         float lay = abs(lz) < 1e-3 ? saturate((p[20].y - a.z) / p[20].z) : (GL(b.z) - GL(a.z)) / lz;
-        s += p[20].x * lay * lerp(1.0, Mist(q), saturate(p[21].x / (2.0 * len)));
+        ls = p[20].x * lay * lerp(1.0, Mist(q), saturate(p[21].x / (2.0 * len)));
     }
-    return p[4].y * s;
+    return s + p[4].y * ls;
 }
 // the sun's forward lobe, as the post pass's glow, so modes 1 and 3 agree where nothing is shadowed
 float Lobe(float mu) { mu = saturate(mu); return 0.6 * pow(mu, 8.0) + 0.4 * pow(mu, 64.0); }
@@ -618,6 +627,11 @@ float4 integ(O i) : SV_Target {
         float t = exp(-sig * dx);
         S += (sig > 1e-8 ? v.rgb / sig * (1.0 - t) : v.rgb * dx) * T;   // the second: the limit as sigma -> 0
         T *= t;
+    }
+    // the level's thickness caps the opacity, as the game's fog never passes it (p[0].w; 0: no cap)
+    if (p[0].w > 0.0 && 1.0 - T > p[0].w) {
+        S *= p[0].w / (1.0 - T);
+        T = 1.0 - p[0].w;
     }
     return float4(S, T);
 }
@@ -707,6 +721,7 @@ class FciExtension final : public gpu::Extension {
         fog_steps_ = std::clamp(std::floor(fci_gfx::Number("RECOMP_FCI_XBR_FOG_STEPS", 16)), 0.0f, 64.0f);
         fog_march_ = std::max(1.0f, fci_gfx::Number("RECOMP_FCI_XBR_FOG_MARCH", 150));
         fog_cap_ = fci_gfx::Number("RECOMP_FCI_XBR_FOG_CAP", 0) > 0.5f ? 1.0f : 0.0f;
+        fog_vol_cap_ = fci_gfx::Number("RECOMP_FCI_XBR_FOG_VOL_CAP", 1) > 0.5f;
         fog_glow_ = fci_gfx::Number("RECOMP_FCI_XBR_FOG_GLOW", 0.5f);
         fog_wisp_ = fci_gfx::Number("RECOMP_FCI_XBR_FOG_WISPS", 0.6f);
         fog_wisp_size_ = std::max(0.5f, fci_gfx::Number("RECOMP_FCI_XBR_FOG_WISP_SIZE", 4.0f));
@@ -775,7 +790,7 @@ class FciExtension final : public gpu::Extension {
             }
         } else if (fog_mode_ == 3 && rt && rt == refl_rt_ && fog_end_w_ > 0) {
             // the reflection: a uniform fog at the density near the water, the sky taken as kFarM away
-            float s0 = 3.0f * fog_wpm_frame_ / fog_end_w_;
+            float s0 = VolDensity() * fog_wpm_frame_ / fog_end_w_;
             float layer = fog_layer_ > 0 && fog_layer_vis_ > 0 ? 3.0f / fog_layer_vis_ : 0.0f;
             ext[1] = 1.0f;   // the game's own fog off: this replaces it
             ext[2] = dst == kBlendOne ? 7.0f : 6.0f;
@@ -1082,6 +1097,15 @@ class FciExtension final : public gpu::Extension {
         c.Transition(ao_depth_.Get(), ao_depth_state_, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         return true;
     }
+
+    // Mode 3 follows the level's fog (GameSigma: thickness * distance / end, flat beyond the end). The
+    // reflection's uniform fog matches it at half the end: times thickness, -2 ln(1 - thickness / 2).
+    float VolDensity() const
+    {
+        float t = std::clamp(fog_thick_, 0.01f, 1.0f);
+        return -2.0f * std::log(1.0f - 0.5f * t) / t;
+    }
+    float VolCap() const { return fog_vol_cap_ ? std::clamp(fog_thick_, 0.0f, 1.0f) : 0.0f; }
 
     // occlusion into ao_[0], blurred across and back, then the scene colour times it; late: only where the
     // depth changed since SnapDepth (the rest was occluded before the water); true: rebind
@@ -1450,8 +1474,7 @@ class FciExtension final : public gpu::Extension {
             p[4 + i] = view_[i];
         // p[4]: s0, thick, wpm, zsign
         float end_m = fog_end_w_ / fog_wpm_frame_;
-        float s0 = end_m > 0 ? 3.0f / end_m : 0.0f;
-        p[16] = s0;
+        p[16] = end_m;
         p[17] = fog_thick_;
         p[18] = fog_wpm_frame_;
         p[19] = fog_zsign_;
@@ -1554,7 +1577,7 @@ class FciExtension final : public gpu::Extension {
             c.Transition(cur.Get(), cur_st, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
             // integrate this slice: read from the current volume (just written), write to vol_int_
             c.Transition(vol_int_.Get(), vol_int_state_, D3D12_RESOURCE_STATE_RENDER_TARGET);
-            float ip[4] = {float(k), kNearM, step, 0};
+            float ip[4] = {float(k), kNearM, step, VolCap()};
             ID3D12Resource* its[4] = {nullptr, cur.Get(), nullptr, nullptr};
             DXGI_FORMAT itfm[4] = {DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_UNKNOWN,
                                    DXGI_FORMAT_UNKNOWN};
@@ -1687,6 +1710,7 @@ class FciExtension final : public gpu::Extension {
     float fog_sun_ = 0.6f, fog_tint_ = 1.0f;   // the glow's strength; how much the fog takes the sky's colour
     float fog_steps_ = 16, fog_march_ = 150;   // the layer's march: steps and metres (0 steps: closed form)
     float fog_cap_ = 0;                        // 1: thickness caps the opacity, as the game
+    bool fog_vol_cap_ = true;                  // mode 3: the same cap (RECOMP_FCI_XBR_FOG_VOL_CAP=0: none)
     ComPtr<ID3D12Resource> ring_;              // the horizon colour per azimuth, 64 x 1, kept across frames
     D3D12_RESOURCE_STATES ring_state_ = D3D12_RESOURCE_STATE_RENDER_TARGET;
     ComPtr<ID3D12Resource> glow_[2];   // the scene's bright parts, blurred: the light in the fog
