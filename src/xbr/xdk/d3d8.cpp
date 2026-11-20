@@ -601,6 +601,15 @@ HLE_STDCALL(D3DDevice_SetRenderTarget, 2) {
     return 0;
 }
 
+// FCI: the titles restore their targets through it; unseen, the renderer kept the previous depth (none, after a
+// pass into a texture) and the world drew without it. Its body keeps the reference counts, outside g_lock: the
+// releases can free through the title's allocator, whose lock another thread may hold while it waits for g_lock
+HLE_WRAP(D3DDevice_SetRenderTargetFast, 3) {
+    GuestLock lock(g_lock);
+    g_state.rt = SurfaceOf(a[0] ? a[0] : Dev(kDevRenderTarget));
+    g_state.zs = SurfaceOf(a[1]);
+}
+
 HLE_STDCALL(D3DDevice_GetBackBuffer2, 1) {
     int32_t i = int32_t(a[0]);
     uint32_t s = i < 0 ? g_buffers[0] : g_buffers[std::min<uint32_t>(uint32_t(i) + 1, g_buffer_count - 1)];

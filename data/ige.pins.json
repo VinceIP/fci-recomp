@@ -24,6 +24,10 @@
     "D3DDevice_SetPalette": {
       "va": "0x004F1600",
       "evidence": "Instincts map editor: stdcall (stage, palette), ret 8, 141 bytes; writes CDevice Palettes + stage * 4 (0xF98) with the AddRef/Release pair and pushes the stage's palette methods. The 5849 signature misses it. The same body as the game's 005070E0."
+    },
+    "D3DDevice_SetRenderTargetFast": {
+      "va": "0x004F0D40",
+      "evidence": "Instincts' editor: stdcall (render target, depth stencil, flags), ret 12, 288 bytes; like SetRenderTarget (0x004F0AC0) it AddRefs the new surfaces, Releases the old and writes CDevice RenderTarget (0x1A04) and Depth (0x1A08), then pushes the surface methods (0x40210 colour, 0x40214 zeta, 0x4030C/0x4032C), without the viewport reset; 4 callers. The 5849 signatures miss it."
     }
   }
 }
