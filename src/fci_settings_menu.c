@@ -46,6 +46,7 @@ static const struct setting settings[] = {
         {"gfx-shadow-filter", "SOFT SHADOWS", "Softer shadow edges.", 0, {"1|ON", "0|OFF"}},
         {"gfx-fog", "FOG", "The original fog, or volumetric fog with light shafts and haze.", 0,
          {"0|ORIGINAL", "3|VOLUMETRIC"}},
+        {"gfx-bloom", "BLOOM", "The game's glow around bright light and sky.", 1, {"1|ON", "0|OFF"}},
         {"gfx-object-draw-distance", "DRAW DISTANCE", "How far away objects are still drawn (original 48).", 0,
          {"64", "48", "96", "128"}},
         {"gfx-object-lod-distance", "OBJECT DETAIL", "How far objects keep their detailed models (original 8).", 0,

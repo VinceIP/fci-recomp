@@ -43,6 +43,7 @@ static const struct {
         {"gfx-shadow-scale", "RECOMP_FCI_XBR_SHADOW_SCALE"},
         {"gfx-shadow-filter", "RECOMP_FCI_XBR_SHADOW_FILTER"},
         {"gfx-fog", "RECOMP_FCI_XBR_FOG"},
+        {"gfx-bloom", "RECOMP_CVAR_r_glow"},
         {"gfx-object-draw-distance", "RECOMP_CVAR_e_obj_view_dist_ratio"},
         {"gfx-object-lod-distance", "RECOMP_CVAR_e_obj_lod_ratio"},
         {"gfx-foliage-lod", "RECOMP_CVAR_e_obj_sprite_switch_dist_ratio"},
