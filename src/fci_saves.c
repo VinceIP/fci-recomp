@@ -84,13 +84,28 @@ static int list_fcs(const WCHAR *dir, struct fcs *out, int max)
 
 static int is_level_file(const struct fcs *e) { return e->level[0] && !strcmp(e->stem, e->level); }
 
-/* The save writer's room-maker sub_00056320 (esi = the profile folder, [esp+4] the game object, [esp+8] the
- * new file's name; ret): when the new file is not there yet and two .fcs are, it deletes the older, unless that
- * one is named as the object's string at +0x2A4 (the level being played; read in the lift). From the menu no
- * level is loaded, so after a checkpoint the older file is the level file and its checkpoint is orphaned.
- * When the two are a level file and its own checkpoint and the level file is older and unprotected, the level
- * file's time is set just past the checkpoint's, so the game's rule deletes the checkpoint. */
+/* The save writer's room-maker: when the new file is not there yet and two .fcs are, it deletes the older,
+ * unless that one is named as the game object's level string (the level being played; read in the lift). From
+ * the menu no level is loaded, so after a checkpoint the older file is the level file and its checkpoint is
+ * orphaned. When the two are a level file and its own checkpoint and the level file is older and unprotected,
+ * the level file's time is set just past the checkpoint's, so the game's rule deletes the checkpoint.
+ * Instincts sub_00056320: esi the profile folder, [esp+4] the object, [esp+8] the name; level string +0x2A4.
+ * Evolution sub_00042BA9: [esp+4] the object, [esp+8] the folder, [esp+0xC] the name; level string +0x2BC. */
 __attribute__((weak)) void sub_00056320_fci_body(void);
+__attribute__((weak)) void sub_00042BA9_fci_body(void);
+static int keep_level_file(uint32_t folder_va, uint32_t object, uint32_t name_va, uint32_t level_at);
+int fci_gate_00056320(void)
+{
+    if (!sub_00056320_fci_body)
+        return 0;
+    return keep_level_file(g_esi, MEM32(g_esp + 4), MEM32(g_esp + 8), 0x2A4);
+}
+int fci_gate_00042BA9(void)
+{
+    if (!sub_00042BA9_fci_body)
+        return 0;
+    return keep_level_file(MEM32(g_esp + 8), MEM32(g_esp + 4), MEM32(g_esp + 0xC), 0x2BC);
+}
 static int guest_string(uint32_t va, char *out, size_t cap)
 {
     size_t i = 0;
@@ -105,17 +120,16 @@ static int guest_string(uint32_t va, char *out, size_t cap)
     out[i] = 0;
     return i > 0 && i + 1 < cap;
 }
-int fci_gate_00056320(void)
+static int keep_level_file(uint32_t folder_va, uint32_t object, uint32_t name_va, uint32_t level_at)
 {
-    if (!sub_00056320_fci_body || !fci_save_dir)
+    if (!fci_save_dir)
         return 0;
     char folder[MAX_PATH], name[64], protect[64] = "";
-    const uint32_t object = MEM32(g_esp + 4);
-    if (!guest_string(g_esi, folder, sizeof folder) || !guest_string(MEM32(g_esp + 8), name, sizeof name))
+    if (!guest_string(folder_va, folder, sizeof folder) || !guest_string(name_va, name, sizeof name))
         return 0;
-    if (object && MEM32(object + 0x2A4 + 0x14) < sizeof protect) /* the protected name, a std::string */
-        guest_string(MEM32(object + 0x2A4 + 0x18) >= 16 ? MEM32(object + 0x2A4 + 4) : object + 0x2A4 + 4, protect,
-                     sizeof protect);
+    if (object && MEM32(object + level_at + 0x14) < sizeof protect) /* the protected name, a std::string */
+        guest_string(MEM32(object + level_at + 0x18) >= 16 ? MEM32(object + level_at + 4) : object + level_at + 4,
+                     protect, sizeof protect);
     /* the profile: the folder's last part, under UDATA\<title> */
     size_t n = strlen(folder);
     while (n && (folder[n - 1] == '\\' || folder[n - 1] == '/'))
