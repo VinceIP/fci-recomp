@@ -877,9 +877,10 @@ class FciExtension final : public gpu::Extension {
                 }
                 return false;
             }
-            // the water: blended over the scene's depth, which it samples; occluded after it, seams on the
-            // bed would darken the water's own colour and reflection
-            if (ao_mode_ && !done_ && alpha && opaque_ >= kOpaqueDraws && SamplesDepth(s, *ds)) {
+            // the first see-through surface that leaves depth alone (the water, the 2D grass): occluded after
+            // it, the ground's occlusion behind it would darken its own colour (seams under the water, the
+            // grass flickering with the ground's AO)
+            if (ao_mode_ && !done_ && alpha && opaque_ >= kOpaqueDraws) {
                 done_ = true;
                 ao_split_ = SnapDepth(c, *ds);
                 return Occlude(c, *scene_rt_, *scene_ds_, false);
@@ -1054,17 +1055,6 @@ class FciExtension final : public gpu::Extension {
         D3D12_CPU_DESCRIPTOR_HANDLE h = rtv_heap_->GetCPUDescriptorHandleForHeapStart();
         h.ptr += size_t(i) * rtv_inc_;
         return h;
-    }
-
-    // a texture stage samples the bound depth target (the water's depth fade)
-    static bool SamplesDepth(const State& s, const Target& ds)
-    {
-        for (uint32_t t : s.textures) {
-            gpu::TextureDesc d;
-            if (t && gpu::Describe(t, d) && d.data == ds.data)
-                return true;
-        }
-        return false;
     }
 
     // a copy of the scene's depth as it is now, for the late pass; false when it cannot be made
