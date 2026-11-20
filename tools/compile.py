@@ -206,6 +206,16 @@ REPLACE = {
         "main menu action handler: logs the action hash for RECOMP_FCI_MENU_LOG; "
         "QUIT GAME (B_Quit, 0x8bcdf569) closes the game; RECOMP_FCI_MENU_QUIT=0 leaves the item out (fci_menu.c)",
     ),
+    "sub_00181F70": (
+        "gate",
+        "Controller Options' show (ecx screen, 1 argument; ret 4): the display and graphics page opened from the "
+        "profile screen gets its title and help line after the screen's labels (fci_settings_menu.c)",
+    ),
+    "sub_001937B0": (
+        "gate",
+        "the profile screen's buttons (eax event, ecx screen; ret): the added GRAPHICS button opens Controller "
+        "Options showing the display and graphics page (fci_settings_menu.c)",
+    ),
     "sub_00182570": (
         "gate",
         "the Controller Options screen's fill (screen; ret 4): adds the control settings and the DISPLAY AND "

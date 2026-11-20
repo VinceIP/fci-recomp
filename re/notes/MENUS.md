@@ -82,3 +82,26 @@ box keeps the entry's text until the cursor moves (the help call runs with row 0
 restores it, not found). Layout of 2026-11-20 (runs b90layout-082916, Evolution b90evo-084109: 5 control
 rows, 20 display and graphics rows on both titles): the header rows are plain rows with one empty value;
 the cursor stops on them (the disabled field +7C changes neither look nor cursor).
+
+### GRAPHICS on Instincts' profile screen (2026-11-20)
+
+The profile screen (P_EditProfile, magma/cryprofile.mgb: common.dat 0x55F7FF, 65,434 bytes, common.fat
+entry 364, hash 0x64D56760) has no spare button: CHARACTER SETUP is in use (frame b90prof-091001). Its
+button records each hold the id, four (x 0x3C, y u16, float 1.0) position sub-records, a UTF-16 placeholder
+text and the tail `01 27 5A 4D 03 00 01 <up id>`; the next `01 <id>` is both the down link and the next
+record's id. Focus is that explicit cycle; the screen's child count is the byte at 0x1B90 (10).
+
+fci_disk.c adds a sixth button in the read hook: common.fat is read as an 8-byte header and then one
+12-byte entry per read (probed), so the entry (0x55F7FF, 65434, hash) gets 65434 + 232; the 65,666-byte read
+of common.dat is then rebuilt: DISPLAY's record (0x20CE-0x21B6) copied after itself with id 0xE87CB6E7
+(CRC-32 of B_ControllerScheme, an unused P_EditProfile string-table entry relabelled GRAPHICS), its up link
+DISPLAY, RESET DEFAULTS' up link (0x22AE) GRAPHICS, count 11, y 0xF5 -> 0x118 for GRAPHICS and 0x118 ->
+0x13B for RESET DEFAULTS. Each step checks the original bytes first. A on it reaches the screen's
+dispatcher sub_001937B0 (eax event, ecx screen): the gate swaps the action to B_ControlSetup's (0x7765E2D2),
+so the game opens Controller Options, and flags our page; Controller Options' show sub_00181F70 fills
+(our page instead of the controls) and relabels the screen, so the title GRAPHICS and the help line are set
+after it. B returns to the profile screen. Run b90gfx-104111 (frames: the button between DISPLAY and RESET
+DEFAULTS, the page titled GRAPHICS, back on the profile screen). Known: on the profile screen GRAPHICS shows
+the help line of the button the cursor came from (the help handler sub_00193B40 has no entry for it).
+Evolution keeps the DISPLAY AND GRAPHICS row only (its CHARACTER SETUP is in use and no spare entry was
+looked for). The DISPLAY AND GRAPHICS row stays in Controller Options on both titles (the pause menu reaches it).

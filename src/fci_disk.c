@@ -223,9 +223,80 @@ static void add_quit_item(void *buffer, uint32_t bytes)
     }
 }
 
+/* GRAPHICS on Instincts' profile screen (P_EditProfile in magma/cryprofile.mgb, common.dat): a sixth button,
+ * a copy of DISPLAY's record named B_ControllerScheme (an unused string-table entry, relabelled GRAPHICS),
+ * between DISPLAY and RESET DEFAULTS. The file grows, so common.fat's entry for it is lengthened and the
+ * longer read of common.dat is rebuilt from the original bytes. Layout: re/notes/MENUS.md. */
+#define PROFILE_MGB_OFFSET 0x55F7FFu
+#define PROFILE_MGB_SIZE   65434u
+#define PROFILE_MGB_HASH   0x64D56760u /* common.fat's hash for the file */
+#define PROFILE_FAT_SIZE   11936u
+#define PROFILE_FAT_ENTRY  364u
+#define GFX_COPY_FROM      0x20CEu /* DISPLAY's record, from its "01 <id>" */
+#define GFX_INSERT_AT      0x21B6u /* after DISPLAY's record: its down link to RESET DEFAULTS */
+#define GFX_RECORD_BYTES   (GFX_INSERT_AT - GFX_COPY_FROM)
+#define MGB_VIDEO          0xC8040339u
+#define MGB_RESET          0x3C4AD511u
+#define MGB_MP_SETUP       0x5FC27D09u
+#define MGB_GRAPHICS       0xE87CB6E7u /* CRC-32 of "B_ControllerScheme" */
+
+static uint32_t get32(const uint8_t *p)
+{
+    uint32_t v;
+    memcpy(&v, p, 4);
+    return v;
+}
+static void put32(uint8_t *p, uint32_t v) { memcpy(p, &v, 4); }
+
+/* the four (x 0x3C, y) position pairs of the record in [from, to): y old -> y new; how many were changed */
+static int move_record(uint8_t *b, uint32_t from, uint32_t to, uint16_t y_old, uint16_t y_new)
+{
+    int n = 0;
+    for (uint32_t i = from; i + 8 <= to; i++)
+        if (b[i] == 0x3C && b[i + 1] == 0 && b[i + 2] == (y_old & 0xFF) && b[i + 3] == (y_old >> 8)
+            && get32(b + i + 4) == 0x3F800000u) {
+            b[i + 2] = (uint8_t)(y_new & 0xFF);
+            b[i + 3] = (uint8_t)(y_new >> 8);
+            n++;
+        }
+    return n;
+}
+
+static void add_graphics_button(void *buffer, uint32_t bytes)
+{
+    uint8_t *b = buffer;
+    const uint32_t grown = PROFILE_MGB_SIZE + GFX_RECORD_BYTES;
+    /* common.fat: the game reads the header, then each 12-byte entry (offset, size, hash) on its own; the
+     * file's entry gets the longer size */
+    if (bytes == 12) {
+        if (get32(b) == PROFILE_MGB_OFFSET && get32(b + 4) == PROFILE_MGB_SIZE && get32(b + 8) == PROFILE_MGB_HASH) {
+            put32(b + 4, grown);
+            fprintf(stderr, "[FCI] menu: profile screen file lengthened for GRAPHICS\n");
+        }
+        return;
+    }
+    /* common.dat: the longer read holds the original file and the next file's first bytes */
+    if (bytes != grown || memcmp(b, "MAGMA", 5) || b[0x1B90] != 10 || get32(b + GFX_COPY_FROM + 1) != MGB_VIDEO
+        || get32(b + GFX_INSERT_AT + 1) != MGB_RESET || get32(b + GFX_INSERT_AT - 4) != MGB_MP_SETUP
+        || get32(b + 0x22AE) != MGB_VIDEO)
+        return;
+    memmove(b + GFX_INSERT_AT + GFX_RECORD_BYTES, b + GFX_INSERT_AT, PROFILE_MGB_SIZE - GFX_INSERT_AT);
+    memcpy(b + GFX_INSERT_AT, b + GFX_COPY_FROM, GFX_RECORD_BYTES);
+    uint8_t *g = b + GFX_INSERT_AT;
+    put32(g + 1, MGB_GRAPHICS);                        /* DISPLAY's down link, and the record's id */
+    put32(g + 0x10, MGB_GRAPHICS);                     /* the record's id again */
+    put32(g + GFX_RECORD_BYTES - 4, MGB_VIDEO);        /* its up link: DISPLAY */
+    put32(b + 0x22AE + GFX_RECORD_BYTES, MGB_GRAPHICS); /* RESET DEFAULTS' up link */
+    b[0x1B90] = 11;                                    /* P_EditProfile's children */
+    int moved = move_record(b, GFX_INSERT_AT, GFX_INSERT_AT + GFX_RECORD_BYTES, 0xF5, 0x118);
+    moved += move_record(b, GFX_INSERT_AT + GFX_RECORD_BYTES, 0x22B7 + GFX_RECORD_BYTES, 0x118, 0x13B);
+    fprintf(stderr, "[FCI] menu: GRAPHICS added to the profile screen (%d positions)\n", moved);
+    fflush(stderr);
+}
+
 /* Patch the copied XML before the UI caches its glyphs. Keep archive offsets and lengths intact.
  * mp: the multiplayer rows (menu mode); quit: QUIT GAME's label and tooltip. */
-static void relabel_xml(HANDLE h, void *buffer, uint32_t bytes, int mp, int quit)
+static void relabel_xml(HANDLE h, void *buffer, uint32_t bytes, int mp, int quit, int gfx)
 {
     static const char live[] = "<string enum=\"B_Live\" value=\"XBOX LIVE\"/>";
     static const char internet[] = "<string enum=\"B_Live\" value=\"INTERNET\" />";
@@ -251,10 +322,13 @@ static void relabel_xml(HANDLE h, void *buffer, uint32_t bytes, int mp, int quit
     static const char quit_desc_new[] = "<string enum=\"B_Quit\" value=\"Exit the game\"                  />";
     _Static_assert(sizeof quit_old == sizeof quit_new, "Menu XML row size changed");
     _Static_assert(sizeof quit_desc_old == sizeof quit_desc_new, "Menu XML row size changed");
+    static const char gfx_old[] = "<string enum=\"B_ControllerScheme\" value=\"CONTROLLER SCHEME\"/>";
+    static const char gfx_new[] = "<string enum=\"B_ControllerScheme\" value=\"GRAPHICS\"         />";
+    _Static_assert(sizeof gfx_old == sizeof gfx_new, "Menu XML row size changed");
     static const struct {
         const char *old, *replacement;
         size_t bytes;
-        int quit; /* 1: a QUIT GAME row, 0: a multiplayer row */
+        int kind; /* 0: a multiplayer row, 1: QUIT GAME, 2: the profile screen's GRAPHICS button */
     } rows[] = {
             {live, internet, sizeof live - 1, 0},
             {system_link, lan, sizeof system_link - 1, 0},
@@ -264,6 +338,7 @@ static void relabel_xml(HANDLE h, void *buffer, uint32_t bytes, int mp, int quit
             {lan_alt_desc_old, lan_alt_desc_new, sizeof lan_alt_desc_old - 1, 0},
             {quit_old, quit_new, sizeof quit_old - 1, 1},
             {quit_desc_old, quit_desc_new, sizeof quit_desc_old - 1, 1},
+            {gfx_old, gfx_new, sizeof gfx_old - 1, 2},
     };
     char *cursor = buffer;
     const char *end = cursor + bytes;
@@ -275,7 +350,7 @@ static void relabel_xml(HANDLE h, void *buffer, uint32_t bytes, int mp, int quit
         const char *replacement = NULL;
         size_t row_size = 0;
         for (size_t i = 0; i < sizeof rows / sizeof *rows; i++) {
-            if (!(rows[i].quit ? quit : mp))
+            if (!(rows[i].kind == 2 ? gfx : rows[i].kind ? quit : mp))
                 continue;
             if ((size_t)(end - cursor) >= rows[i].bytes && !memcmp(cursor, rows[i].old, rows[i].bytes)) {
                 replacement = rows[i].replacement;
@@ -307,10 +382,13 @@ uint32_t fci_partition_read_fill(HANDLE h, void *buf, uint32_t length, const LAR
     extern int fci_nic_menu_mode(void);
     extern int fci_menu_quit_enabled(void);
     if (status == 0 && *got) {
-        int mp = fci_nic_menu_mode(), quit = fci_menu_quit_enabled();
-        if (mp || quit)
-            relabel_xml(h, buf, *got, mp, quit);
+        extern int fci_settings_profile_button(void);
+        int mp = fci_nic_menu_mode(), quit = fci_menu_quit_enabled(), gfx = fci_settings_profile_button();
+        if (mp || quit || gfx)
+            relabel_xml(h, buf, *got, mp, quit, gfx);
         add_quit_item(buf, *got);
+        if (gfx)
+            add_graphics_button(buf, *got);
     }
     fci_pak_log_read(h, off, length, status, *got); /* inert unless RECOMP_FCI_PAK_LOG */
     if (*got >= length || (status != 0 && status != 0xC0000011u /* END_OF_FILE */) || !off)

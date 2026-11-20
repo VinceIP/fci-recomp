@@ -238,6 +238,11 @@ static int enabled(void)
     return on;
 }
 
+/* Instincts' profile screen gets a GRAPHICS button that opens our page (fci_disk.c adds it) */
+int fci_settings_profile_button(void) { return enabled() && !addrs()->evo; }
+static int s_open_page; /* GRAPHICS was chosen: the Controller Options about to open shows our page */
+static int s_shown_page; /* our page was filled while the screen opened: its show sets the title after */
+
 struct regs {
     uint32_t eax, ecx, ebx, esi, edi;
 };
@@ -457,11 +462,11 @@ static int in_list(uint32_t list, uint32_t option)
 }
 
 /* the section's settings onto the list, after a header row (one empty value) when it has a name */
-static int add_section(uint32_t list, int section, const char *head)
+static int add_section(uint32_t list, int section, const char *head, const char *help)
 {
     static const char *const blank[] = {""};
     int n = 0;
-    if (head && (s_heads[section - SEC_DISPLAY] = make_option(head, "", 1, blank, 0)) != 0)
+    if (head && (s_heads[section - SEC_DISPLAY] = make_option(head, help, 1, blank, 0)) != 0)
         list_add(list, s_heads[section - SEC_DISPLAY]);
     for (int i = 0; i < (int)N_SETTINGS; i++)
         if (section_of(&settings[i]) == section && (s_opts[i] = make_setting(i)) != 0) {
@@ -488,8 +493,9 @@ static void fill_settings(uint32_t list)
     set_title(list - addrs()->list_offset, "CONTROLLER OPTIONS", PAGE_TITLE);
     gcall(addrs()->list_clear, (struct regs){.eax = list}, 0, NULL);
     forget_rows(list);
-    int n = add_section(list, SEC_DISPLAY, "DISPLAY");
-    n += add_section(list, SEC_GRAPHICS, "GRAPHICS");
+    int n = add_section(list, SEC_DISPLAY, "DISPLAY", "The window, frame rate and field of view.");
+    n += add_section(list, SEC_GRAPHICS, "GRAPHICS",
+                     "Picture quality: resolution, lighting, shadows, fog and detail.");
     list_show(list);
     fprintf(stderr, "[FCI] settings menu: %d display and graphics settings shown\n", n);
 }
@@ -532,9 +538,15 @@ static int on_fill(void (*body)(void))
         return 0;
     const uint32_t screen = MEM32(g_esp + 4), list = screen + m->list_offset;
     body();
+    if (s_open_page) {
+        s_open_page = 0;
+        s_shown_page = 1;
+        fill_settings(list);
+        return 1;
+    }
     static const char *const more[] = {">"};
     forget_rows(list);
-    const int n = add_section(list, SEC_CONTROLS, NULL);
+    const int n = add_section(list, SEC_CONTROLS, NULL, NULL);
     if ((s_entry = make_option("DISPLAY AND GRAPHICS", "Window, frame rate, field of view and graphics quality.",
                                1, more, 0)) != 0)
         list_add(list, s_entry);
@@ -596,6 +608,45 @@ static int on_popup(void (*body)(void))
         return 0;
     body();
     set_title(s_list - addrs()->list_offset, "CONTROLLER OPTIONS", PAGE_TITLE);
+    return 1;
+}
+
+/* the profile screen's buttons (eax = event, ecx = screen; ret): GRAPHICS opens Controller Options as
+ * CONTROLLER OPTIONS does, flagged so its fill shows our page */
+__attribute__((weak)) void sub_001937B0_fci_body(void);
+#define ACTION_GRAPHICS     0xE87CB6E7u /* CRC-32 of "B_ControllerScheme", the button fci_disk.c adds */
+#define ACTION_CONTROLSETUP 0x7765E2D2u /* CRC-32 of "B_ControlSetup" */
+int fci_gate_001937B0(void)
+{
+    if (!sub_001937B0_fci_body || !fci_settings_profile_button())
+        return 0;
+    const uint32_t event = g_eax;
+    if (MEM32(event + 4) != ACTION_GRAPHICS) {
+        sub_001937B0_fci_body();
+        return 1;
+    }
+    s_open_page = 1;
+    MEM32(event + 4) = ACTION_CONTROLSETUP;
+    sub_001937B0_fci_body();
+    MEM32(event + 4) = ACTION_GRAPHICS;
+    fprintf(stderr, "[FCI] settings menu: GRAPHICS chosen on the profile screen\n");
+    return 1;
+}
+
+/* Controller Options' show (ecx = screen, 1 argument; ret 4): it fills, then labels the screen from the
+ * string table, so our page's title and help line are set after it */
+__attribute__((weak)) void sub_00181F70_fci_body(void);
+int fci_gate_00181F70(void)
+{
+    if (!sub_00181F70_fci_body || !enabled())
+        return 0;
+    const uint32_t screen = g_ecx;
+    sub_00181F70_fci_body();
+    if (s_shown_page) {
+        s_shown_page = 0;
+        set_title(screen, "CONTROLLER OPTIONS", PAGE_TITLE);
+        gcall(addrs()->list_help, (struct regs){.ecx = screen + addrs()->list_offset}, 0, NULL);
+    }
     return 1;
 }
 
