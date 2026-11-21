@@ -169,8 +169,14 @@ async function hostAndConn(lobby, { nonce, gToken, ip = "93.184.100.9", endpoint
 }
 
 async function r(lobby, request) {
-  const response = await lobby.fetch(request);
-  return [response.status, await response.json().catch(() => null)];
+  // The Workers runtime holds an open request; in Node the long-poll timer is unref'd, so keep the loop alive.
+  const alive = setInterval(() => {}, 1000);
+  try {
+    const response = await lobby.fetch(request);
+    return [response.status, await response.json().catch(() => null)];
+  } finally {
+    clearInterval(alive);
+  }
 }
 
 test("net protocol: a registration with the old proto is refused, and a proto-1 host is hidden", async () => {
