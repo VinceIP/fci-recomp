@@ -12,10 +12,12 @@
 
 /* Instincts; Evolution's are in its profile's constants */
 #ifndef FCI_VKB_OBJECT
-#define FCI_VKB_OBJECT 0x006B3250u /* the keyboard object's pointer: every open call (sub_0010B500) passes it */
+#define FCI_VKB_OBJECT                                                                                       \
+    0x006B3250u /* the keyboard object's pointer: every open call (sub_0010B500) passes it */
 #endif
 #ifndef FCI_VKB_INSERT
-#define FCI_VKB_INSERT 0x0010BFF0u /* insert a string at the cursor: eax keyboard, edi the string (X's space) */
+#define FCI_VKB_INSERT                                                                                       \
+    0x0010BFF0u /* insert a string at the cursor: eax keyboard, edi the string (X's space) */
 #endif
 #ifndef FCI_VKB_CHAR
 #define FCI_VKB_CHAR 0u /* insert a string at the cursor: eax keyboard, the string on the stack (Evolution) */
@@ -35,7 +37,8 @@
 #endif
 
 #ifndef FCI_VKB_MODAL
-#define FCI_VKB_MODAL 0x20u /* in the UI input manager: a popup's input root, which then takes all pad input */
+#define FCI_VKB_MODAL                                                                                        \
+    0x20u /* in the UI input manager: a popup's input root, which then takes all pad input */
 #endif
 
 /* the keyboard object: the callback set while it is open, the letter wheel (its slot is +0x18 / +0x1C) */
@@ -46,8 +49,8 @@
 #define FCI_VKB_WHEEL 0xACu
 #endif
 #define VKB_CALLBACK FCI_VKB_CALLBACK
-#define VKB_WHEEL FCI_VKB_WHEEL
-#define VKB_SIZE 0x104u /* the smaller object: the game's is 0x114, the Instincts editor's 0x104 */
+#define VKB_WHEEL    FCI_VKB_WHEEL
+#define VKB_SIZE     0x104u /* the smaller object: the game's is 0x114, the Instincts editor's 0x104 */
 
 enum { EV_DELETE = 0x10000, EV_ACCEPT, EV_BACK };
 
@@ -56,7 +59,8 @@ extern recomp_func_t recomp_lookup(uint32_t va);
 int guest_ok(uint32_t va, uint32_t len); /* fci_menu.c */
 void fci_input_typed(void);              /* fci_input.c */
 
-static volatile LONG s_open;   /* the keyboard is open and has focus (game thread writes, window thread reads) */
+static volatile LONG
+        s_open; /* the keyboard is open and has focus (game thread writes, window thread reads) */
 static volatile LONG s_opened; /* between the keyboard's open and close calls */
 static uint32_t s_ui;          /* the UI input manager, as its router last ran */
 static SRWLOCK s_lock = SRWLOCK_INIT;
@@ -96,8 +100,8 @@ static int pop(uint32_t *ev)
 /* the characters the on-screen keyboard's own pages offer (its font has them) */
 static int typable(unsigned c)
 {
-    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
-           (c && c < 128 && strchr(" @/*-+#_()!?;,:.$", (int)c));
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+           || (c && c < 128 && strchr(" @/*-+#_()!?;,:.$", (int)c));
 }
 
 /* window thread: a key down. 1 when the keyboard is open and the key is ours (it presses no pad button);
@@ -117,10 +121,7 @@ int fci_vkb_key(int vk)
 }
 
 /* the keyboard takes typing now (the button prompts show the keys that press its buttons) */
-int fci_vkb_typing(void)
-{
-    return s_open != 0;
-}
+int fci_vkb_typing(void) { return s_open != 0; }
 
 /* window thread: a typed character (WM_CHAR) */
 void fci_vkb_char(unsigned c)
@@ -131,17 +132,15 @@ void fci_vkb_char(unsigned c)
 
 /* the call frame, below the caller's stack: [return address][argument], then room for a string at +0x10;
  * the callee's own stack grows down from it */
-static uint32_t frame_at(void)
-{
-    return (g_esp - 64) & ~3u;
-}
+static uint32_t frame_at(void) { return (g_esp - 64) & ~3u; }
 
 /* call a lifted function with the keyboard in a register and one stack argument; the caller's
  * registers are kept */
 static void call(uint32_t va, uint32_t k, int reg_esi, uint32_t arg, uint32_t edi)
 {
     recomp_func_t fn = va ? recomp_lookup(va) : NULL;
-    uint32_t eax = g_eax, ecx = g_ecx, edx = g_edx, ebx = g_ebx, esi = g_esi, sedi = g_edi, ebp = g_ebp, sp = g_esp;
+    uint32_t eax = g_eax, ecx = g_ecx, edx = g_edx, ebx = g_ebx, esi = g_esi, sedi = g_edi, ebp = g_ebp,
+             sp = g_esp;
     uint32_t frame = frame_at();
     if (!fn) {
         fprintf(stderr, "[FCI] keyboard: no function at %08X\n", va);
@@ -193,22 +192,13 @@ static void accept(uint32_t k)
 
 /* the keyboard's open and close (Evolution's alias these): before its first open the object holds
  * leftovers, so its callback alone does not say it is open */
-void fci_prehook_0010B500(void)
-{
-    s_opened = 1;
-}
+void fci_prehook_0010B500(void) { s_opened = 1; }
 
-void fci_prehook_0010B5E0(void)
-{
-    s_opened = 0;
-}
+void fci_prehook_0010B5E0(void) { s_opened = 0; }
 
 /* the UI input manager's router, once a frame (ecx the manager; Evolution's aliases it): with a popup's root
  * set it gives the pad input to the popup alone */
-void fci_prehook_000675B0(void)
-{
-    s_ui = g_ecx;
-}
+void fci_prehook_000675B0(void) { s_ui = g_ecx; }
 
 /* open, and no popup (the empty-name warning) over it */
 static int has_focus(uint32_t k)

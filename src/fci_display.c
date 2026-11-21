@@ -68,7 +68,8 @@ int fci_normalize_aspect(const char *value, char *out, size_t size)
         snprintf(out, size, "%s", v[0] == '1' ? "16:9" : "4:3");
         return 1;
     }
-    if ((v[0] | 0x20) == 'a' && (v[1] | 0x20) == 'u' && (v[2] | 0x20) == 't' && (v[3] | 0x20) == 'o' && !v[4]) {
+    if ((v[0] | 0x20) == 'a' && (v[1] | 0x20) == 'u' && (v[2] | 0x20) == 't' && (v[3] | 0x20) == 'o'
+        && !v[4]) {
         snprintf(out, size, "auto");
         return 1;
     }

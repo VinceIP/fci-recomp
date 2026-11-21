@@ -33,10 +33,7 @@ static int fov_evolution(void) { return strstr(FCI_TITLE_NAME, "Evolution") != N
 
 /* both titles' games scale the FOV at the camera (fci_prehook_002A84E0); the editors' camera builds are not
  * mapped, so there the builder's argument is still scaled */
-static int fov_at_camera(void)
-{
-    return !_stricmp(FCI_IMAGE_FILENAME, "default.xbe");
-}
+static int fov_at_camera(void) { return !_stricmp(FCI_IMAGE_FILENAME, "default.xbe"); }
 
 /* prehook on the camera update (Instincts 002A84E0, ebx the camera; Evolution 001F1DA9, edi): FOV in radians
  * at +0x38, projection fovy = +0x38 / ratio +0x384, frustum extents from both. It updates every camera, shadow

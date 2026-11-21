@@ -55,8 +55,8 @@ static void pak_log_line(const char *ev, const char *extra)
     if (!pak_log)
         return;
     AcquireSRWLockExclusive(&pak_lock);
-    fprintf(pak_log, "{\"seq\": %ld, \"tid\": %lu, \"ev\": \"%s\"%s}\n",
-            (long)InterlockedIncrement(&pak_seq), (unsigned long)GetCurrentThreadId(), ev, extra);
+    fprintf(pak_log, "{\"seq\": %ld, \"tid\": %lu, \"ev\": \"%s\"%s}\n", (long)InterlockedIncrement(&pak_seq),
+            (unsigned long)GetCurrentThreadId(), ev, extra);
     fflush(pak_log);
     ReleaseSRWLockExclusive(&pak_lock);
 }
@@ -241,15 +241,15 @@ static const struct gfx_layout {
     uint16_t y_old, y_new;         /* the copy's position; the step to the next button is y_new - y_old */
     uint32_t below_to;             /* the records after it, moved down one step, end here (0: none) */
 } gfx_layouts[] = {
-        {"Instincts profile", 0x55F7FF, 65434, 0x64D56760, 0x1B90, 10, 0x20CE, 0x21B6, 0x5FC27D09, 0x22AE, 0x3C,
-         0xF5, 0x118, 0x22B7},
-        {"Instincts pause options", 0x4B8647, 30236, 0x14653EE6, 0x54E3, 6, 0x57B4, 0x58AE, 0x7765E2D2, 0x57B0, 0x3E,
-         0xAF, 0xD2, 0},
+        {"Instincts profile", 0x55F7FF, 65434, 0x64D56760, 0x1B90, 10, 0x20CE, 0x21B6, 0x5FC27D09, 0x22AE,
+         0x3C, 0xF5, 0x118, 0x22B7},
+        {"Instincts pause options", 0x4B8647, 30236, 0x14653EE6, 0x54E3, 6, 0x57B4, 0x58AE, 0x7765E2D2,
+         0x57B0, 0x3E, 0xAF, 0xD2, 0},
         /* Evolution's DISPLAY is GAME OPTIONS, with MULTIPLAYER OPTIONS and RESET DEFAULTS below it */
-        {"Evolution profile", 0x6E93BC, 75837, 0x64D56760, 0x1FF0, 10, 0x242A, 0x251B, 0x7765E2D2, 0x2610, 0x30,
-         0xC3, 0xE6, 0x2744},
-        {"Evolution pause options", 0x63061E, 34349, 0x14653EE6, 0x571B, 7, 0x5B00, 0x5C29, 0x7765E2D2, 0x5AFC, 0x30,
-         0xAF, 0xD2, 0},
+        {"Evolution profile", 0x6E93BC, 75837, 0x64D56760, 0x1FF0, 10, 0x242A, 0x251B, 0x7765E2D2, 0x2610,
+         0x30, 0xC3, 0xE6, 0x2744},
+        {"Evolution pause options", 0x63061E, 34349, 0x14653EE6, 0x571B, 7, 0x5B00, 0x5C29, 0x7765E2D2,
+         0x5AFC, 0x30, 0xAF, 0xD2, 0},
 };
 #define N_GFX_LAYOUTS (sizeof gfx_layouts / sizeof *gfx_layouts)
 
@@ -300,9 +300,9 @@ static void add_graphics_button(void *buffer, uint32_t bytes)
         memmove(b + g->insert_at + rec, b + g->insert_at, g->size - g->insert_at);
         memcpy(b + g->insert_at, b + g->copy_from, rec);
         uint8_t *c = b + g->insert_at;
-        put32(c + 1, MGB_GRAPHICS);         /* DISPLAY's down link, and the record's id */
-        put32(c + 0x10, MGB_GRAPHICS);      /* the record's id again */
-        put32(c + rec - 4, MGB_VIDEO);      /* its up link: DISPLAY */
+        put32(c + 1, MGB_GRAPHICS);    /* DISPLAY's down link, and the record's id */
+        put32(c + 0x10, MGB_GRAPHICS); /* the record's id again */
+        put32(c + rec - 4, MGB_VIDEO); /* its up link: DISPLAY */
         put32(b + g->link_site + (g->link_site > g->insert_at ? rec : 0), MGB_GRAPHICS);
         b[g->count_at] = (uint8_t)(g->count + 1);
         const uint16_t step = (uint16_t)(g->y_new - g->y_old);
@@ -350,6 +350,7 @@ static void label_pause_graphics(void *buffer, uint32_t bytes)
  * mp: the multiplayer rows (menu mode); quit: QUIT GAME's label and tooltip. */
 static void relabel_xml(HANDLE h, void *buffer, uint32_t bytes, int mp, int quit, int gfx)
 {
+    // clang-format off: the menu rows stay one per line (tests/test_lan_menu.py reads them).
     static const char live[] = "<string enum=\"B_Live\" value=\"XBOX LIVE\"/>";
     static const char internet[] = "<string enum=\"B_Live\" value=\"INTERNET\" />";
     static const char system_link[] = "<string enum=\"B_SystemLink\" value=\"SYSTEM LINK\"/>";
@@ -377,6 +378,7 @@ static void relabel_xml(HANDLE h, void *buffer, uint32_t bytes, int mp, int quit
     static const char gfx_old[] = "<string enum=\"B_ControllerScheme\" value=\"CONTROLLER SCHEME\"/>";
     static const char gfx_new[] = "<string enum=\"B_ControllerScheme\" value=\"GRAPHICS\"         />";
     _Static_assert(sizeof gfx_old == sizeof gfx_new, "Menu XML row size changed");
+    // clang-format on
     static const struct {
         const char *old, *replacement;
         size_t bytes;

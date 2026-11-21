@@ -298,7 +298,8 @@ HWND g_frame = nullptr;    // this instance's frame
 
 // the window's client aspect for auto, updated on WM_SIZE and at creation; 0 before the window exists
 static std::atomic<float> g_window_aspect{0.0f};
-static void UpdateWindowAspect(HWND w) {
+static void UpdateWindowAspect(HWND w)
+{
     RECT c;
     if (w && GetClientRect(w, &c) && c.right > 0 && c.bottom > 0)
         g_window_aspect.store(float(c.right) / float(c.bottom), std::memory_order_relaxed);
@@ -391,7 +392,7 @@ LRESULT CALLBACK FrameProc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
         ToggleFullscreen(w);
         return 0;
     case WM_DPICHANGED: {   // moved to a monitor with other scaling: take the size Windows suggests for it
-        const RECT *r = reinterpret_cast<const RECT *>(lp);
+        const RECT* r = reinterpret_cast<const RECT*>(lp);
         if (GetWindowLongW(w, GWL_STYLE) & WS_POPUP)
             return 0;   // fullscreen: ToggleFullscreen sizes it to the monitor
         SetWindowPos(w, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top,
@@ -464,7 +465,8 @@ LRESULT CALLBACK WindowProc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
     switch (msg) {
     case WM_KEYDOWN:
     case WM_KEYUP:
-        if (msg == WM_KEYDOWN && fci_vkb_key(int(wp))) return 0;  // typing into the on-screen keyboard
+        if (msg == WM_KEYDOWN && fci_vkb_key(int(wp)))
+            return 0;                                             // typing into the on-screen keyboard
         if (msg == WM_KEYDOWN && wp == VK_F11 && g_alt_enter) {   // F11 toggles fullscreen, as Alt+Enter
             PostMessageW(g_frame, kMsgToggle, 0, 0);
             return 0;
@@ -610,7 +612,7 @@ extern "C" float fci_host_aspect(void)
         return a;
     a = g_window_aspect.load(std::memory_order_relaxed);
     if (a <= 0.0f)
-        a = 16.0f / 9.0f;  // no window yet
+        a = 16.0f / 9.0f;   // no window yet
     return a < 4.0f / 3.0f ? 4.0f / 3.0f : a;
 }
 
@@ -790,9 +792,10 @@ void Pace()
     // checked every frame, so a link started from the menu catches it and leaving it gives the rate back
     const bool linked = fci_nic_transport_active() && (unlock || fps > 0);
     if (linked != (linked_logged == 1)) {
-        std::fprintf(stderr, linked ? "[FCI] network: the game keeps its own 30 frames a second while linked; "
-                                      "RECOMP_FCI_XBR_REPLAY still shows more\n"
-                                    : "[FCI] network: link down; the frame rate setting applies again\n");
+        std::fprintf(stderr,
+                     linked ? "[FCI] network: the game keeps its own 30 frames a second while linked; "
+                              "RECOMP_FCI_XBR_REPLAY still shows more\n"
+                            : "[FCI] network: link down; the frame rate setting applies again\n");
         linked_logged = linked ? 1 : 2;
     }
     const int unlock_now = linked ? 0 : unlock;
@@ -801,7 +804,7 @@ void Pace()
     if (unlock_now || (fps_now <= 0 && blanks < 2))
         return;   // 0 and 1 blanks: the display's own refresh paces it
     LONGLONG period = fps_now > 0 ? LONGLONG(double(freq.QuadPart) / fps_now)
-                              : freq.QuadPart * blanks * 1001 / 60000;   // NTSC blanks
+                                  : freq.QuadPart * blanks * 1001 / 60000;   // NTSC blanks
     LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
     if (!next.QuadPart || now.QuadPart > next.QuadPart + period) {

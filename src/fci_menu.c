@@ -77,8 +77,7 @@ void menu_log_line(const char *handler, const char *ev, const char *extra)
         return;
     AcquireSRWLockExclusive(&menu_lock);
     fprintf(menu_log, "{\"seq\": %ld, \"tid\": %lu, \"h\": \"%s\", \"ev\": \"%s\"%s}\n",
-            (long)InterlockedIncrement(&menu_seq), (unsigned long)GetCurrentThreadId(),
-            handler, ev, extra);
+            (long)InterlockedIncrement(&menu_seq), (unsigned long)GetCurrentThreadId(), handler, ev, extra);
     fflush(menu_log);
     ReleaseSRWLockExclusive(&menu_lock);
 }

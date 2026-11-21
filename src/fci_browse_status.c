@@ -19,9 +19,8 @@
  */
 #include "fci_browse_status.h"
 
-int fci_browse_status(int in_list, int fetch_state, int n_hosts,
-                      int n_pending, int n_dropped, int relay_refused,
-                      int list_refused)
+int fci_browse_status(int in_list, int fetch_state, int n_hosts, int n_pending, int n_dropped,
+                      int relay_refused, int list_refused)
 {
     if (!in_list)
         return BROWSE_NONE;

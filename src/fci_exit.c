@@ -12,7 +12,7 @@
 extern uint64_t savelog_busy_ms(uint64_t now_ms, uint64_t quiet_ms); /* kernel_file.c */
 
 #define FCI_EXIT_QUIET_MS 250  /* no save log line within this window: the save is done */
-#define FCI_EXIT_MAX_MS 3000   /* never wait longer than this */
+#define FCI_EXIT_MAX_MS   3000 /* never wait longer than this */
 
 static uint64_t s_begin; /* the exit wait's start tick; 0: none running */
 static int s_busy_seen;  /* the save log was busy since the wait began */
@@ -42,8 +42,8 @@ int fci_exit_ready(void)
         return 0;
     s_begin = 0;
     if (s_busy_seen)
-        fprintf(stderr, "[FCI] exit waited %llu ms for a save to finish%s\n",
-                (unsigned long long)waited, busy ? "; giving up: a save may be unfinished" : "");
+        fprintf(stderr, "[FCI] exit waited %llu ms for a save to finish%s\n", (unsigned long long)waited,
+                busy ? "; giving up: a save may be unfinished" : "");
     fflush(stderr);
     s_busy_seen = 0;
     return 1;

@@ -29,7 +29,8 @@ static int fcs_level(const WCHAR *path, char *level, size_t cap)
         return 0;
     for (size_t i = 0; i < n; i++) {
         const char c = (char)head[6 + i];
-        if (!(c == '_' || c == '-' || (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')))
+        if (!(c == '_' || c == '-' || (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z')
+              || (c >= 'A' && c <= 'Z')))
             return 0;
         level[i] = (char)(c >= 'A' && c <= 'Z' ? c + 32 : c);
     }
@@ -128,7 +129,8 @@ static int keep_level_file(uint32_t folder_va, uint32_t object, uint32_t name_va
     if (!guest_string(folder_va, folder, sizeof folder) || !guest_string(name_va, name, sizeof name))
         return 0;
     if (object && MEM32(object + level_at + 0x14) < sizeof protect) /* the protected name, a std::string */
-        guest_string(MEM32(object + level_at + 0x18) >= 16 ? MEM32(object + level_at + 4) : object + level_at + 4,
+        guest_string(MEM32(object + level_at + 0x18) >= 16 ? MEM32(object + level_at + 4)
+                                                           : object + level_at + 4,
                      protect, sizeof protect);
     /* the profile: the folder's last part, under UDATA\<title> */
     size_t n = strlen(folder);
@@ -163,24 +165,29 @@ static int keep_level_file(uint32_t folder_va, uint32_t object, uint32_t name_va
         if (!strcmp(f[i].stem, name))
             return 0; /* rewritten in place: nothing is deleted */
     const int l = is_level_file(&f[0]) ? 0 : is_level_file(&f[1]) ? 1 : -1;
-    if (l < 0 || is_level_file(&f[1 - l]) || strcmp(f[1 - l].level, f[l].level) || !strcmp(f[l].stem, protect))
+    if (l < 0 || is_level_file(&f[1 - l]) || strcmp(f[1 - l].level, f[l].level)
+        || !strcmp(f[l].stem, protect))
         return 0;
     if (CompareFileTime(&f[l].written, &f[1 - l].written) > 0)
         return 0; /* the checkpoint is older already: the game deletes it */
-    ULARGE_INTEGER later = {.LowPart = f[1 - l].written.dwLowDateTime, .HighPart = f[1 - l].written.dwHighDateTime};
+    ULARGE_INTEGER later
+            = {.LowPart = f[1 - l].written.dwLowDateTime, .HighPart = f[1 - l].written.dwHighDateTime};
     later.QuadPart += 10000000ull; /* a second past the checkpoint */
     const FILETIME ft2 = {later.LowPart, later.HighPart};
-    HANDLE h = CreateFileW(f[l].path, FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
-                           0, NULL);
+    HANDLE h = CreateFileW(f[l].path, FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                           OPEN_EXISTING, 0, NULL);
     if (h == INVALID_HANDLE_VALUE || !SetFileTime(h, NULL, NULL, &ft2)) {
-        fprintf(stderr, "[FCI] saves: could not keep %ls before saving %s (%lu); its checkpoint %ls may be left "
-                        "without it\n", f[l].name, name, GetLastError(), f[1 - l].name);
+        fprintf(stderr,
+                "[FCI] saves: could not keep %ls before saving %s (%lu); its checkpoint %ls may be left "
+                "without it\n",
+                f[l].name, name, GetLastError(), f[1 - l].name);
         if (h != INVALID_HANDLE_VALUE)
             CloseHandle(h);
         return 0;
     }
     CloseHandle(h);
-    fprintf(stderr, "[FCI] saves: saving %s with no level loaded: %ls kept, its checkpoint %ls goes instead\n", name,
+    fprintf(stderr,
+            "[FCI] saves: saving %s with no level loaded: %ls kept, its checkpoint %ls goes instead\n", name,
             f[l].name, f[1 - l].name);
     return 0;
 }
@@ -206,24 +213,28 @@ static void repair_profile(const WCHAR *dir, const WCHAR *title, const WCHAR *pr
         SYSTEMTIME now;
         GetLocalTime(&now);
         WCHAR backup[MAX_PATH], moved[MAX_PATH], copy[MAX_PATH];
-        _snwprintf(backup, MAX_PATH, L"%hs\\save-backups\\%ls-%ls-%04u%02u%02u-%02u%02u%02u", fci_save_dir, title,
-                   profile, now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond);
+        _snwprintf(backup, MAX_PATH, L"%hs\\save-backups\\%ls-%ls-%04u%02u%02u-%02u%02u%02u", fci_save_dir,
+                   title, profile, now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond);
         _snwprintf(moved, MAX_PATH, L"%ls\\%ls", backup, orphan->name);
         _snwprintf(copy, MAX_PATH, L"%ls\\Backup_%hs.fcs", dir, level->level);
         WCHAR parent[MAX_PATH];
         _snwprintf(parent, MAX_PATH, L"%hs\\save-backups", fci_save_dir);
         CreateDirectoryW(parent, NULL);
         if (!CreateDirectoryW(backup, NULL) || !MoveFileW(orphan->path, moved)) {
-            fprintf(stderr, "[FCI] saves: profile %ls is damaged (checkpoint %ls without %hs.fcs); the repair "
-                            "could not move it aside (%lu)\n", profile, orphan->name, orphan->level, GetLastError());
+            fprintf(stderr,
+                    "[FCI] saves: profile %ls is damaged (checkpoint %ls without %hs.fcs); the repair "
+                    "could not move it aside (%lu)\n",
+                    profile, orphan->name, orphan->level, GetLastError());
             return;
         }
         if (!CopyFileW(level->path, copy, TRUE)) {
-            fprintf(stderr, "[FCI] saves: profile %ls: moved %ls to %ls but could not copy the level file (%lu)\n",
+            fprintf(stderr,
+                    "[FCI] saves: profile %ls: moved %ls to %ls but could not copy the level file (%lu)\n",
                     profile, orphan->name, backup, GetLastError());
             return;
         }
-        ULARGE_INTEGER t = {.LowPart = level->written.dwLowDateTime, .HighPart = level->written.dwHighDateTime};
+        ULARGE_INTEGER t
+                = {.LowPart = level->written.dwLowDateTime, .HighPart = level->written.dwHighDateTime};
         t.QuadPart -= 10000000ull * 60; /* a minute older than the level file */
         const FILETIME older = {t.LowPart, t.HighPart};
         HANDLE h = CreateFileW(copy, FILE_WRITE_ATTRIBUTES, 0, NULL, OPEN_EXISTING, 0, NULL);
@@ -231,8 +242,10 @@ static void repair_profile(const WCHAR *dir, const WCHAR *title, const WCHAR *pr
             SetFileTime(h, NULL, NULL, &older);
             CloseHandle(h);
         }
-        fprintf(stderr, "[FCI] saves: profile %ls repaired: its checkpoint %ls had lost %hs.fcs; moved to %ls, "
-                        "%ls kept with a copy beside it\n", profile, orphan->name, orphan->level, backup, level->name);
+        fprintf(stderr,
+                "[FCI] saves: profile %ls repaired: its checkpoint %ls had lost %hs.fcs; moved to %ls, "
+                "%ls kept with a copy beside it\n",
+                profile, orphan->name, orphan->level, backup, level->name);
         return;
     }
 }
@@ -267,4 +280,3 @@ void fci_saves_repair(void)
     } while (FindNextFileW(ft, &t));
     FindClose(ft);
 }
-

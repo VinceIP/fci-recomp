@@ -96,8 +96,7 @@ static int local_addr_ok(const char *s)
         return 0;
     if (port == 0 || port > 65535)
         return 0;
-    return (a == 10) || (a == 172 && b >= 16 && b <= 31) ||
-           (a == 192 && b == 168);
+    return (a == 10) || (a == 172 && b >= 16 && b <= 31) || (a == 192 && b == 168);
 }
 
 static void local_addr_detect(void)
@@ -165,14 +164,13 @@ static void local_addr_detect(void)
     }
     struct sockaddr_in local;
     int len = sizeof local;
-    if (connect(s, ai->ai_addr, (int)ai->ai_addrlen) == 0 &&
-        !getsockname(s, (struct sockaddr *)&local, &len)) {
+    if (connect(s, ai->ai_addr, (int)ai->ai_addrlen) == 0
+        && !getsockname(s, (struct sockaddr *)&local, &len)) {
         unsigned a, b, c, d;
         char ip[32];
         snprintf(ip, sizeof ip, "%s", inet_ntoa(local.sin_addr));
         if (sscanf(ip, "%u.%u.%u.%u", &a, &b, &c, &d) == 4) {
-            int is_private = (a == 10) || (a == 172 && b >= 16 && b <= 31) ||
-                             (a == 192 && b == 168);
+            int is_private = (a == 10) || (a == 172 && b >= 16 && b <= 31) || (a == 192 && b == 168);
             if (is_private) {
                 snprintf(s_local_addr, sizeof s_local_addr, "%s:%u", ip, (unsigned)port);
                 log_line("local address detected: %s", s_local_addr);
@@ -186,17 +184,17 @@ static void local_addr_detect(void)
 
 static char s_host_id[64];
 static int s_registered;
-static unsigned long long s_conn_seq; /* the last connect handled (the list's seq): sent back as ack */
-static ULONGLONG s_last_fetch_attempt;    /* last /v1/hosts attempt (GetTickCount64) */
-static ULONGLONG s_host_start_ms; /* when "host started" was set (for the endpoint-wait log) */
-static ULONGLONG s_reg_fail_ms;   /* last failed register (back off 5 s; a banned id gets 403 forever) */
-static int s_endpoint_warned;     /* logged once if the endpoint is not known 5 s after host start */
+static unsigned long long s_conn_seq;  /* the last connect handled (the list's seq): sent back as ack */
+static ULONGLONG s_last_fetch_attempt; /* last /v1/hosts attempt (GetTickCount64) */
+static ULONGLONG s_host_start_ms;      /* when "host started" was set (for the endpoint-wait log) */
+static ULONGLONG s_reg_fail_ms;        /* last failed register (back off 5 s; a banned id gets 403 forever) */
+static int s_endpoint_warned;          /* logged once if the endpoint is not known 5 s after host start */
 
 /* the worker's contribution to the browse status (Q29 round 4) */
-static volatile LONG s_fetch_state;    /* 0 = never fetched, 1 = last fetch ok, 2 = last fetch failed */
-static volatile LONG s_fetch_nhosts;   /* number of hosts in the last successful fetch */
-static volatile LONG s_relay_refused;  /* 1 when the last relay mint was refused (503); clears on success */
-static volatile LONG s_list_refused;    /* FCI_LIST_REFUSED_*: why the list turned this build away */
+static volatile LONG s_fetch_state;   /* 0 = never fetched, 1 = last fetch ok, 2 = last fetch failed */
+static volatile LONG s_fetch_nhosts;  /* number of hosts in the last successful fetch */
+static volatile LONG s_relay_refused; /* 1 when the last relay mint was refused (503); clears on success */
+static volatile LONG s_list_refused;  /* FCI_LIST_REFUSED_*: why the list turned this build away */
 
 static const char *net_title(void) { return strstr(FCI_TITLE_NAME, "Evolution") ? "evolution" : "instincts"; }
 
@@ -241,11 +239,13 @@ static int note_refusal(int status, const char *body)
     was = InterlockedExchange(&s_list_refused, why);
     if (why != was) {
         if (why == FCI_LIST_REFUSED_UPDATE) {
-            if (!fci_json_str_val(body, "minBuild", min, sizeof min) ||
-                strspn(min, "0123456789abcdefghijklmnopqrstuvwxyz.+-") != strlen(min))
+            if (!fci_json_str_val(body, "minBuild", min, sizeof min)
+                || strspn(min, "0123456789abcdefghijklmnopqrstuvwxyz.+-") != strlen(min))
                 strcpy(min, "a newer build");
-            log_line("host list: this build (%s) is too old for online play; it needs %s or newer. Update in FCI "
-                     "Launcher.", FCI_BUILD_VERSION[0] ? FCI_BUILD_VERSION : "unversioned", min);
+            log_line("host list: this build (%s) is too old for online play; it needs %s or newer. Update in "
+                     "FCI "
+                     "Launcher.",
+                     FCI_BUILD_VERSION[0] ? FCI_BUILD_VERSION : "unversioned", min);
         } else if (why == FCI_LIST_REFUSED_MAINTENANCE) {
             log_line("host list: online play is paused for maintenance");
         } else {
@@ -323,7 +323,8 @@ static int http_request_on(HINTERNET session, const char *host, int port, int se
     to_wide(host, whost, 256);
     /* JSON: the Worker answers 415 to anything else. The build: the list's minimum-build gate (7a) */
     snprintf(headers, sizeof headers, "Content-Type: application/json\r\n%s%s%s",
-             FCI_BUILD_VERSION[0] ? "X-FCI-Build: " : "", FCI_BUILD_VERSION, FCI_BUILD_VERSION[0] ? "\r\n" : "");
+             FCI_BUILD_VERSION[0] ? "X-FCI-Build: " : "", FCI_BUILD_VERSION,
+             FCI_BUILD_VERSION[0] ? "\r\n" : "");
     to_wide(headers, wheaders, 160);
 
     hconnect = WinHttpConnect(session, whost, (UINT)port, 0);
@@ -486,8 +487,9 @@ static void identity_init(void)
         if (BCryptGenRandom(NULL, raw, sizeof raw, BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0)
             return; /* never: the system RNG is always available */
         if (path[0] && !ours)
-            log_line("new identity token: another instance holds %s; this one's is kept for this session only",
-                     path);
+            log_line(
+                    "new identity token: another instance holds %s; this one's is kept for this session only",
+                    path);
         else if (path[0] && (f = fopen(path, "wb")) != NULL) {
             wrote = fwrite(raw, 1, sizeof raw, f) == sizeof raw;
             fclose(f);
@@ -647,7 +649,8 @@ static void on_host_obj(const char *obj, int len)
         const char *lfield = s_local_addr[0] ? ",\"local\":\"" : "";
         if (s_local_addr[0])
             snprintf(buf, sizeof buf,
-                     "{\"id\":\"%s\",\"endpoint\":\"%s\",\"nonce\":\"%s\",\"mac\":\"%s\",\"token\":\"%s\"%s%s\"}",
+                     "{\"id\":\"%s\",\"endpoint\":\"%s\",\"nonce\":\"%s\",\"mac\":\"%s\",\"token\":\"%s\"%s%"
+                     "s\"}",
                      id, my_ep, nhex, my_mac, s_identity, lfield, s_local_addr);
         else
             snprintf(buf, sizeof buf,
@@ -666,16 +669,18 @@ static void on_host_obj(const char *obj, int len)
         return;
     }
     char local[64] = {0}, receipt[33] = {0};
-    if (s_report_build[0] && fci_json_str_val(resp, "reportReceipt", receipt, sizeof receipt) &&
-        (strlen(receipt) != 32 || strspn(receipt, "0123456789abcdef") != 32))
+    if (s_report_build[0] && fci_json_str_val(resp, "reportReceipt", receipt, sizeof receipt)
+        && (strlen(receipt) != 32 || strspn(receipt, "0123456789abcdef") != 32))
         receipt[0] = 0;
-    int ready = fci_json_str_val(resp, "endpoint", endpoint, sizeof endpoint) &&
-                fci_json_str_val(resp, "mac", macstr, sizeof macstr) &&
-                sscanf(macstr, "%2hhx:%2hhx:%2hhx:%2hhx:%2hhx:%2hhx", &mac[0], &mac[1], &mac[2],
-                       &mac[3], &mac[4], &mac[5]) == 6;
+    int ready = fci_json_str_val(resp, "endpoint", endpoint, sizeof endpoint)
+                && fci_json_str_val(resp, "mac", macstr, sizeof macstr)
+                && sscanf(macstr, "%2hhx:%2hhx:%2hhx:%2hhx:%2hhx:%2hhx", &mac[0], &mac[1], &mac[2], &mac[3],
+                          &mac[4], &mac[5])
+                           == 6;
     fci_json_str_val(resp, "local", local, sizeof local);
     AcquireSRWLockExclusive(lock);
-    if (!ready || !fci_nic_list_add_peer(endpoint, local[0] ? local : NULL, mac, nonce, 1, receipt, report_started))
+    if (!ready
+        || !fci_nic_list_add_peer(endpoint, local[0] ? local : NULL, mac, nonce, 1, receipt, report_started))
         fci_net_report_probe(receipt, "unknown", "peer_setup", report_started);
     ReleaseSRWLockExclusive(lock);
     if (!ready)
@@ -1040,8 +1045,8 @@ static void host_poll(void)
     if (!base || !s_registered)
         return;
     /* ack: every connect up to it is handled, so the list keeps the rest even if this poll dies */
-    snprintf(path, sizeof path, "/v1/connects?id=%s&token=%s&wait=%d&ack=%llu", s_host_id, s_identity, POLL_WAIT_S,
-             s_conn_seq);
+    snprintf(path, sizeof path, "/v1/connects?id=%s&token=%s&wait=%d&ack=%llu", s_host_id, s_identity,
+             POLL_WAIT_S, s_conn_seq);
     if (http_request(base, "GET", path, NULL, buf, sizeof buf, &status) != 0) {
         log_line("connect poll failed, backing off 5 s");
         Sleep(5000);
@@ -1131,9 +1136,10 @@ static DWORD WINAPI worker_main(LPVOID arg)
          * connects or relay credentials). Leaving a hosted match relaunches the game, which clears this. */
         if (probe == FCI_LIST_PROBE_DISCOVERY && s_host_started)
             probe = 0;
-        if (probe == FCI_LIST_PROBE_ENTRY ||
-            (probe == FCI_LIST_PROBE_DISCOVERY &&
-             (!s_last_fetch_attempt || GetTickCount64() - s_last_fetch_attempt >= LIST_FETCH_INTERVAL_MS)))
+        if (probe == FCI_LIST_PROBE_ENTRY
+            || (probe == FCI_LIST_PROBE_DISCOVERY
+                && (!s_last_fetch_attempt
+                    || GetTickCount64() - s_last_fetch_attempt >= LIST_FETCH_INTERVAL_MS)))
             guest_fetch();
         /* the TURN relay: a punch failed (mint), or the allocation is ready (post the relayed connect) */
         if (fci_nic_list_turn_need_take())
@@ -1172,8 +1178,8 @@ void fci_net_worker_start(void)
     const char *build = getenv("RECOMP_FCI_BETA_BUILD");
     const char *alnum = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     const char *build_chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-";
-    if (opt_in && !strcmp(opt_in, "1") && build && build[0] && strchr(alnum, build[0]) &&
-        strlen(build) < sizeof s_report_build && strspn(build, build_chars) == strlen(build))
+    if (opt_in && !strcmp(opt_in, "1") && build && build[0] && strchr(alnum, build[0])
+        && strlen(build) < sizeof s_report_build && strspn(build, build_chars) == strlen(build))
         strcpy(s_report_build, build);
 #endif
     s_report_head = s_report_count = 0;

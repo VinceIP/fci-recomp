@@ -272,7 +272,7 @@ static void open_session_log(const char *dir, int verbosity, int limit, const ch
     }
     _putenv_s("RECOMP_KERNEL_LOG_FILE", kernel);
     SetEnvironmentVariableA("RECOMP_FCI_RELAUNCH_LOG", path); /* relaunched instances append */
-    _putenv("RECOMP_FCI_LOG_SESSION=1"); /* fci_log_session_end marks a clean exit */
+    _putenv("RECOMP_FCI_LOG_SESSION=1");                      /* fci_log_session_end marks a clean exit */
     freopen(path, "w", stderr);
     freopen(path, "a", stdout);
 }
@@ -416,9 +416,9 @@ void fci_config_load(int *argc, char ***argv)
     {
         if (!list_set && (hub_arg[0] || lan_arg[0] || peers_arg[0]))
             list_arg[0] = 0; /* the default list gives way to a link the player chose */
-        if (network_menu == 1 ||
-            (network_menu < 0 && list_arg[0] && !hub_arg[0] && !lan_arg[0] && !peers_arg[0] &&
-             !_stricmp(FCI_IMAGE_FILENAME, "default.xbe")))
+        if (network_menu == 1
+            || (network_menu < 0 && list_arg[0] && !hub_arg[0] && !lan_arg[0] && !peers_arg[0]
+                && !_stricmp(FCI_IMAGE_FILENAME, "default.xbe")))
             snprintf(menu_arg, sizeof menu_arg, "RECOMP_FCI_NET_MENU=1");
         char *nets[] = {hub_arg, lan_arg, list_arg, peers_arg, menu_arg};
         int k;

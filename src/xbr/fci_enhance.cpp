@@ -773,12 +773,13 @@ class FciExtension final : public gpu::Extension {
             // each draw is fogged before it blends with the fogged colour behind it, so what it adds
             // depends on the blend (docs/rendering.md): 1 col*T + S, 2 col*T (dest ONE), 3 col*T + a*S
             // (premultiplied), 4 and 5 multiply blends fade to their neutral (1, 0.5 for 2x)
-            ext[2] = dst == kBlendOne                                        ? 2.0f
-                     : src == kBlendOne && dst == kBlendInvSrcAlpha          ? 3.0f
-                     : src == kBlendDestColor && dst == kBlendSrcColor       ? 5.0f
+            ext[2] = dst == kBlendOne                                  ? 2.0f
+                     : src == kBlendOne && dst == kBlendInvSrcAlpha    ? 3.0f
+                     : src == kBlendDestColor && dst == kBlendSrcColor ? 5.0f
                      : (src == kBlendDestColor && dst == kBlendZero)
-                             || (src == kBlendZero && dst == kBlendSrcColor) ? 4.0f
-                                                                             : 1.0f;
+                                     || (src == kBlendZero && dst == kBlendSrcColor)
+                             ? 4.0f
+                             : 1.0f;
             ext[3] = fog_desat_;
             vol[0] = kNearM;
             vol[1] = 1.0f / logf(kFarM / kNearM);
@@ -948,7 +949,8 @@ class FciExtension final : public gpu::Extension {
         c.Transition(notice_.Get(), notice_state_, D3D12_RESOURCE_STATE_RENDER_TARGET);
         size_t n = std::min<size_t>(msg.size(), 30);
         float p[68] = {};
-        float cell = std::max(2.0f, std::floor(t.h / 240.0f));   // 2 screen pixels per font pixel at 480 lines
+        float cell
+                = std::max(2.0f, std::floor(t.h / 240.0f));   // 2 screen pixels per font pixel at 480 lines
         p[0] = std::floor(t.w * 0.5f - (n * 6 - 1) * cell * 0.5f);
         p[1] = std::floor(t.h / 5.0f);   // below the compass
         p[2] = cell;
@@ -1161,8 +1163,18 @@ class FciExtension final : public gpu::Extension {
         ID3D12Resource* as[4] = {fb, ao_[0].Get(), ds.res.Get(), nullptr};
         DXGI_FORMAT af[4] = {rt.fmt, kAoFormat, kDepthRead, kBgra};
         bool fogged = !fog_mode_ && game_fog_;   // the game's own fog, in the surfaces' colour
-        float ap[12] = {float(ao_mode_), 0, 0, 0, fog_end_w_ / 16777215.0f, fogged ? fog_thick_ : 0.0f, 0, 0,
-                        fog_col_[0], fog_col_[1], fog_col_[2], 0};
+        float ap[12] = {float(ao_mode_),
+                        0,
+                        0,
+                        0,
+                        fog_end_w_ / 16777215.0f,
+                        fogged ? fog_thick_ : 0.0f,
+                        0,
+                        0,
+                        fog_col_[0],
+                        fog_col_[1],
+                        fog_col_[2],
+                        0};
         c.Pass(kAoHlsl, "apply", rt.fmt, c.View(rt), w, h, as, af, ap, 12, -1);
         c.Unbind();
         return true;
@@ -1716,15 +1728,17 @@ class FciExtension final : public gpu::Extension {
     ComPtr<ID3D12Resource> glow_[2];   // the scene's bright parts, blurred: the light in the fog
     D3D12_RESOURCE_STATES glow_state_[2]{};
     float fog_glow_ = 0.5f, fog_wisp_ = 0.6f, fog_wisp_size_ = 4.0f,
-          fog_desat_ = 0.35f;                       // the fog's additions
+          fog_desat_ = 0.35f;   // the fog's additions
     float fog_ceil_ = 150.0f;
     const Target* refl_rt_ = nullptr;
     float refl_wpm_ = 0;
-    bool refl_logged_ = false;   // the reflection's w units per metre; 0: not found, the main view's   // the water reflection's target, fogged by its own path in mode 3   // metres above the base where the distance fog ends (mode 3)
-    bool fog_lookup_ = true;                        // true: in-shader lookup, false: post-pass
-    static constexpr UINT kRtvSlots = 7 + 3 * 64;   // AO(2), post, ring, glow(2), 3 volume x 64 slices, notice
+    bool refl_logged_
+            = false;   // the reflection's w units per metre; 0: not found, the main view's   // the water reflection's target, fogged by its own path in mode 3   // metres above the base where the distance fog ends (mode 3)
+    bool fog_lookup_ = true;   // true: in-shader lookup, false: post-pass
+    static constexpr UINT kRtvSlots
+            = 7 + 3 * 64;   // AO(2), post, ring, glow(2), 3 volume x 64 slices, notice
     static constexpr int kNoticeSlot = 6 + 3 * 64;
-                                                    // the glow's two targets
+    // the glow's two targets
     // volume fog (mode 3)
     ComPtr<ID3D12Resource> vol_a_, vol_b_, vol_int_;
     D3D12_RESOURCE_STATES vol_a_state_{}, vol_b_state_{}, vol_int_state_{};

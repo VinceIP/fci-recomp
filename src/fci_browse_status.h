@@ -30,8 +30,7 @@ enum { FCI_LIST_REFUSED_NONE = 0, FCI_LIST_REFUSED_UPDATE = 1, FCI_LIST_REFUSED_
  *   Clears after a successful mint or an empty host list.
  * list_refused: FCI_LIST_REFUSED_UPDATE or _MAINTENANCE when the list refused us, else 0.
  */
-int fci_browse_status(int in_list, int fetch_state, int n_hosts,
-                      int n_pending, int n_dropped, int relay_refused,
-                      int list_refused);
+int fci_browse_status(int in_list, int fetch_state, int n_hosts, int n_pending, int n_dropped,
+                      int relay_refused, int list_refused);
 
 #endif /* FCI_BROWSE_STATUS_H */

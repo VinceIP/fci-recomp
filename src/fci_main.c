@@ -351,7 +351,7 @@ int main(int argc, char **argv)
     xbox_SetThreadMode(XBOX_THREAD_MODE_SPAWN);
     xbox_path_init(argv[2], argv[3]);
     fci_disk_init(argv[3]);
-    fci_pak_log_init(); /* RECOMP_FCI_PAK_LOG (fci_disk.c): trace pak lookups and .dat reads */
+    fci_pak_log_init();  /* RECOMP_FCI_PAK_LOG (fci_disk.c): trace pak lookups and .dat reads */
     fci_menu_log_init(); /* RECOMP_FCI_MENU_LOG (fci_menu.c): trace menu action dispatch */
     {
         /* Fixed disc time = the XBE TimeDate (0x114, UNIX s); heal a Z: cache stamped under a

@@ -19,10 +19,10 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 
-#define FCI_TURN_IDLE 0
+#define FCI_TURN_IDLE       0
 #define FCI_TURN_ALLOCATING 1
-#define FCI_TURN_READY 2
-#define FCI_TURN_FAILED 3
+#define FCI_TURN_READY      2
+#define FCI_TURN_FAILED     3
 
 /* Resolve the server (the only blocking call in the module), open a connected non-blocking UDP
  * socket to it and send the Allocate. Returns 1 on success, 0 on failure (the state is then

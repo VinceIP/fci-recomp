@@ -25,53 +25,104 @@ int fci_input_evolution_game(void);      /* fci_input.c */
 #define MAX_VALUES 10
 struct setting {
     const char *key, *label, *help;
-    int restart; /* 1: read at launch, so the change applies after a restart */
+    int restart;                    /* 1: read at launch, so the change applies after a restart */
     const char *values[MAX_VALUES]; /* "ini value|LABEL" (LABEL defaults to the value), the default first */
 };
 
 /* not here: controls-vibration, the master switch behind the game's own CONTROLLER VIBRATION row */
 static const struct setting settings[] = {
-        {"gfx-res-scale", "RESOLUTION SCALE", "Internal resolution as a multiple of 640x480.", 1,
+        {"gfx-res-scale",
+         "RESOLUTION SCALE",
+         "Internal resolution as a multiple of 640x480.",
+         1,
          {"auto|AUTO", "1", "1.5", "2", "2.5", "3", "4"}},
         {"gfx-aa", "ANTI-ALIASING", "Smooths jagged edges.", 0, {"1|ON", "0|OFF"}},
-        {"gfx-anisotropic-filtering", "TEXTURE FILTERING", "Anisotropic filtering: sharper textures at an angle.",
-         0, {"16|16X", "8|8X", "4|4X", "2|2X", "0|OFF"}},
+        {"gfx-anisotropic-filtering",
+         "TEXTURE FILTERING",
+         "Anisotropic filtering: sharper textures at an angle.",
+         0,
+         {"16|16X", "8|8X", "4|4X", "2|2X", "0|OFF"}},
         {"gfx-ssao", "AMBIENT OCCLUSION", "Shades creases and corners.", 0, {"1|ON", "0|OFF"}},
-        {"gfx-ssao-strength", "OCCLUSION STRENGTH", "How dark the ambient occlusion is.", 0,
+        {"gfx-ssao-strength",
+         "OCCLUSION STRENGTH",
+         "How dark the ambient occlusion is.",
+         0,
          {"1.2", "0.6", "0.9", "1.5", "2"}},
-        {"gfx-ssao-radius", "OCCLUSION RADIUS", "How far the ambient occlusion reaches, in metres.", 0,
+        {"gfx-ssao-radius",
+         "OCCLUSION RADIUS",
+         "How far the ambient occlusion reaches, in metres.",
+         0,
          {"1.5", "0.75", "1", "2", "3"}},
-        {"gfx-shadow-scale", "SHADOW DETAIL", "Sun shadow resolution, a multiple of the original.", 0,
+        {"gfx-shadow-scale",
+         "SHADOW DETAIL",
+         "Sun shadow resolution, a multiple of the original.",
+         0,
          {"auto|AUTO", "1", "2", "3", "4", "6", "8"}},
         {"gfx-shadow-filter", "SOFT SHADOWS", "Softer shadow edges.", 0, {"1|ON", "0|OFF"}},
-        {"gfx-fog", "FOG", "Volumetric fog is experimental: light shafts and haze, thicker.", 0,
+        {"gfx-fog",
+         "FOG",
+         "Volumetric fog is experimental: light shafts and haze, thicker.",
+         0,
          {"0|ORIGINAL", "3|VOLUMETRIC"}},
         {"gfx-bloom", "BLOOM", "The game's glow around bright light and sky.", 1, {"1|ON", "0|OFF"}},
-        {"gfx-object-draw-distance", "DRAW DISTANCE", "How far away objects are still drawn (original 48).", 0,
+        {"gfx-object-draw-distance",
+         "DRAW DISTANCE",
+         "How far away objects are still drawn (original 48).",
+         0,
          {"64", "48", "96", "128"}},
-        {"gfx-object-lod-distance", "OBJECT DETAIL", "How far objects keep their detailed models (original 8).", 0,
+        {"gfx-object-lod-distance",
+         "OBJECT DETAIL",
+         "How far objects keep their detailed models (original 8).",
+         0,
          {"16", "8", "24", "32"}},
-        {"gfx-foliage-lod", "FOLIAGE DETAIL", "How far plants stay 3D before turning flat (original 7.2).", 0,
+        {"gfx-foliage-lod",
+         "FOLIAGE DETAIL",
+         "How far plants stay 3D before turning flat (original 7.2).",
+         0,
          {"16", "7.2", "24", "32"}},
-        {"display-borderless", "FULLSCREEN", "Borderless fullscreen. Alt+Enter also toggles it.", 1,
+        {"display-borderless",
+         "FULLSCREEN",
+         "Borderless fullscreen. Alt+Enter also toggles it.",
+         1,
          {"0|NO", "1|YES"}},
-        {"display-aspect", "ASPECT RATIO", "The 3D view's shape; auto follows the window.", 1,
+        {"display-aspect",
+         "ASPECT RATIO",
+         "The 3D view's shape; auto follows the window.",
+         1,
          {"4:3", "16:9", "16:10", "21:9", "32:9", "auto|AUTO"}},
-        {"display-fov", "FIELD OF VIEW", "Vertical field of view in degrees; GAME keeps the original.", 1,
+        {"display-fov",
+         "FIELD OF VIEW",
+         "Vertical field of view in degrees; GAME keeps the original.",
+         1,
          {"0|GAME", "60", "70", "75", "80", "90", "100", "110"}},
-        {"display-frame-rate", "FRAME RATE", "Frames a second; above 30 is experimental.", 1,
+        {"display-frame-rate",
+         "FRAME RATE",
+         "Frames a second; above 30 is experimental.",
+         1,
          {"30", "60", "120", "144", "0|UNLIMITED"}},
-        {"engine-update-cap", "ENGINE AT 30 HZ", "Keeps physics and AI at the original rate above 30 fps.", 1,
+        {"engine-update-cap",
+         "ENGINE AT 30 HZ",
+         "Keeps physics and AI at the original rate above 30 fps.",
+         1,
          {"1|YES", "0|NO"}},
         {"display-vsync", "VSYNC", "Present in step with the display: no tearing.", 1, {"1|ON", "0|OFF"}},
         {"display-show-fps", "SHOW FPS", "The frame rate in the window's title.", 1, {"0|OFF", "1|ON"}},
         {"skip-intro-movies", "SKIP INTRO MOVIES", "Starts at the title screen.", 1, {"0|NO", "1|YES"}},
-        {"controls-mouse-sensitivity", "MOUSE SENSITIVITY", "Mouse look speed.", 1,
+        {"controls-mouse-sensitivity",
+         "MOUSE SENSITIVITY",
+         "Mouse look speed.",
+         1,
          {"1.0|1.0", "0.25", "0.5", "0.75", "1.25", "1.5", "2", "3"}},
         {"controls-mouse-invert-y", "INVERT MOUSE", "Invert vertical mouse look.", 1, {"0|NO", "1|YES"}},
-        {"controls-mouse-aim", "DIRECT MOUSE AIM", "On foot, the mouse turns the view by an exact angle.", 1,
+        {"controls-mouse-aim",
+         "DIRECT MOUSE AIM",
+         "On foot, the mouse turns the view by an exact angle.",
+         1,
          {"1|ON", "0|OFF"}},
-        {"controls-mouse-aim-assist", "MOUSE AIM ASSIST", "Aim assist with mouse and keyboard, as with a gamepad.", 1,
+        {"controls-mouse-aim-assist",
+         "MOUSE AIM ASSIST",
+         "Aim assist with mouse and keyboard, as with a gamepad.",
+         1,
          {"0|OFF", "1|ON"}},
         {"controls-mouse-keyboard", "MOUSE AND KEYBOARD", "Off: controllers only.", 1, {"1|ON", "0|OFF"}},
 };
@@ -88,10 +139,7 @@ static int section_of(const struct setting *s)
 #define PAGE_TITLE "GRAPHICS"
 
 /* ini keys the runtime reads itself, not through an environment option (fci_config.c) */
-static const char *setting_env(const char *key)
-{
-    return fci_config_option_of(key);
-}
+static const char *setting_env(const char *key) { return fci_config_option_of(key); }
 
 /* value i of setting s: the ini text, and the label shown */
 static void value_parts(const char *v, char *ini, size_t ini_size, char *label, size_t label_size)
@@ -188,15 +236,15 @@ static int ini_save(const char *key, const char *value)
 /* ---- the game's code ---------------------------------------------------------------------------------- */
 
 struct menu_addrs {
-    int evo;              /* Evolution's register conventions (noted per field as Instincts / Evolution) */
-    uint32_t fill;        /* the Controller Options screen's fill (screen; ret 4) */
-    uint32_t list_clear;  /* eax = list */
-    uint32_t list_add;    /* edi / eax = list, (option); ret 4 */
-    uint32_t list_rows;   /* (list); ret 4: the list widget's rows from the options */
-    uint32_t list_help;   /* ecx / edi = list: the selected row's help text */
-    uint32_t list_value;  /* (list, option); ret 8 / esi = list, (option); ret 4: the row shows its value */
-    uint32_t list_press;  /* eax = event, (list); ret 4 / eax = event, ecx = list: A on the selected row */
-    uint32_t alloc;       /* eax = size / cdecl (size, 0): operator new */
+    int evo;             /* Evolution's register conventions (noted per field as Instincts / Evolution) */
+    uint32_t fill;       /* the Controller Options screen's fill (screen; ret 4) */
+    uint32_t list_clear; /* eax = list */
+    uint32_t list_add;   /* edi / eax = list, (option); ret 4 */
+    uint32_t list_rows;  /* (list); ret 4: the list widget's rows from the options */
+    uint32_t list_help;  /* ecx / edi = list: the selected row's help text */
+    uint32_t list_value; /* (list, option); ret 8 / esi = list, (option); ret 4: the row shows its value */
+    uint32_t list_press; /* eax = event, (list); ret 4 / eax = event, ecx = list: A on the selected row */
+    uint32_t alloc;      /* eax = size / cdecl (size, 0): operator new */
     uint32_t vt_dtor, vt_index, vt_load, vt_can_prev, vt_can_next, nop_ret4; /* COption's methods */
     uint32_t empty_alloc; /* the vectors' allocator object */
     uint32_t list_offset; /* the option list inside the screen */
@@ -206,15 +254,15 @@ struct menu_addrs {
 };
 
 static const struct menu_addrs instincts = {
-        0,          0x00182570, 0x00152430, 0x001521B0, 0x00152510, 0x00152800, 0x00152730, 0x00152AF0,
-        0x0033CA60, 0x001817E0, 0x00151AB0, 0x00151450, 0x00151A70, 0x00151AC0, 0x002DF6F0, 0x006F5E3C,
-        0x60,       0x000665A0, 0x00068750, 0x00606524,
+        0,          0x00182570, 0x00152430, 0x001521B0, 0x00152510, 0x00152800, 0x00152730,
+        0x00152AF0, 0x0033CA60, 0x001817E0, 0x00151AB0, 0x00151450, 0x00151A70, 0x00151AC0,
+        0x002DF6F0, 0x006F5E3C, 0x60,       0x000665A0, 0x00068750, 0x00606524,
 };
 
 static const struct menu_addrs evolution = {
-        1,          0x00119C3D, 0x000FD6DE, 0x000FD4C1, 0x000FD74D, 0x000FD901, 0x000FD886, 0x000FDC7B,
-        0x001FEACC, 0x000DCCE1, 0x000FCF84, 0x000FCC85, 0x000FCF5E, 0x000FCF8E, 0x000BF67C, 0x005ADF2D,
-        0x60,       0x0004F7FC, 0x00050EC4, 0x004BB44C,
+        1,          0x00119C3D, 0x000FD6DE, 0x000FD4C1, 0x000FD74D, 0x000FD901, 0x000FD886,
+        0x000FDC7B, 0x001FEACC, 0x000DCCE1, 0x000FCF84, 0x000FCC85, 0x000FCF5E, 0x000FCF8E,
+        0x000BF67C, 0x005ADF2D, 0x60,       0x0004F7FC, 0x00050EC4, 0x004BB44C,
 };
 
 static const struct menu_addrs *addrs(void)
@@ -240,7 +288,7 @@ static int enabled(void)
 
 /* the profile and pause options screens get a GRAPHICS button that opens our page (fci_disk.c adds it) */
 int fci_settings_profile_button(void) { return enabled(); }
-static int s_open_page; /* GRAPHICS was chosen: the Controller Options about to open shows our page */
+static int s_open_page;  /* GRAPHICS was chosen: the Controller Options about to open shows our page */
 static int s_shown_page; /* our page was filled while the screen opened: its show sets the title after */
 
 struct regs {
@@ -274,7 +322,8 @@ static uint32_t galloc(uint32_t bytes)
 {
     const struct menu_addrs *m = addrs();
     const uint32_t args[2] = {bytes, 0};
-    uint32_t p = m->evo ? gcall(m->alloc, (struct regs){0}, 2, args) : gcall(m->alloc, (struct regs){.eax = bytes}, 0, NULL);
+    uint32_t p = m->evo ? gcall(m->alloc, (struct regs){0}, 2, args)
+                        : gcall(m->alloc, (struct regs){.eax = bytes}, 0, NULL);
     if (p)
         memset((void *)XBOX_PTR(p), 0, bytes);
     return p;
@@ -297,20 +346,21 @@ static void wstr_set(uint32_t p, const char *text)
 
 /* ---- the option objects ---------------------------------------------------------------------------- */
 
-static uint32_t s_vtable;              /* our COption vtable: the base's methods, a no-op visit */
-static uint32_t s_list;                /* the list our objects are in */
-static uint32_t s_entry;               /* the DISPLAY AND GRAPHICS row */
-static uint32_t s_heads[2];            /* the page's DISPLAY and GRAPHICS header rows */
-static uint32_t s_opts[N_SETTINGS];    /* our rows, while the list holds them */
-static int s_index[N_SETTINGS];        /* the value each showed */
-static int s_chosen[N_SETTINGS];       /* 1 + the value picked this session (saved, maybe not yet in use) */
+static uint32_t s_vtable;           /* our COption vtable: the base's methods, a no-op visit */
+static uint32_t s_list;             /* the list our objects are in */
+static uint32_t s_entry;            /* the DISPLAY AND GRAPHICS row */
+static uint32_t s_heads[2];         /* the page's DISPLAY and GRAPHICS header rows */
+static uint32_t s_opts[N_SETTINGS]; /* our rows, while the list holds them */
+static int s_index[N_SETTINGS];     /* the value each showed */
+static int s_chosen[N_SETTINGS];    /* 1 + the value picked this session (saved, maybe not yet in use) */
 
 /* a COption (0x80 bytes): +04 help, +20 name, +3C class name, +58 value index, +5C/+6C values, +7C locked */
 static uint32_t make_option(const char *name, const char *help, int n, const char *const *labels, int index)
 {
     const struct menu_addrs *m = addrs();
     if (!s_vtable) {
-        const uint32_t vt[6] = {m->vt_dtor, m->nop_ret4, m->vt_index, m->vt_load, m->vt_can_prev, m->vt_can_next};
+        const uint32_t vt[6]
+                = {m->vt_dtor, m->nop_ret4, m->vt_index, m->vt_load, m->vt_can_prev, m->vt_can_next};
         if (!(s_vtable = galloc(sizeof vt)))
             return 0;
         memcpy((void *)XBOX_PTR(s_vtable), vt, sizeof vt);
@@ -382,7 +432,8 @@ static void list_show(uint32_t list)
     for (int i = 0; i < (int)N_SETTINGS; i++)
         if (s_opts[i])
             row_value(list, s_opts[i]);
-    gcall(addrs()->list_help, addrs()->evo ? (struct regs){.edi = list} : (struct regs){.ecx = list}, 0, NULL);
+    gcall(addrs()->list_help, addrs()->evo ? (struct regs){.edi = list} : (struct regs){.ecx = list}, 0,
+          NULL);
 }
 
 /* the guest text (UTF-16, len characters) reads as s, ignoring case */
@@ -403,8 +454,9 @@ static void set_title(uint32_t screen, const char *expect, const char *title)
     const uint32_t pages = MEM32(screen + 0x4C);
     for (uint32_t p = 0; pages && p < 2; p++) {
         const uint32_t page = MEM32(pages + p * 4);
-        const uint32_t elem = m->evo ? gcall(m->find_child, (struct regs){.ecx = m->title_name}, 1, &page)
-                                     : gcall(m->find_child, (struct regs){.eax = page, .ecx = m->title_name}, 0, NULL);
+        const uint32_t elem
+                = m->evo ? gcall(m->find_child, (struct regs){.ecx = m->title_name}, 1, &page)
+                         : gcall(m->find_child, (struct regs){.eax = page, .ecx = m->title_name}, 0, NULL);
         const uint32_t widget = elem ? MEM32(elem + 8) : 0, field = widget + 0x3C;
         if (!widget)
             continue;
@@ -549,9 +601,10 @@ static int on_fill(void (*body)(void))
     const int n = add_section(list, SEC_CONTROLS, NULL, NULL);
     /* the GRAPHICS buttons reach the page; without them this row does */
     s_entry = 0;
-    if (!fci_settings_profile_button() &&
-        (s_entry = make_option("DISPLAY AND GRAPHICS", "Window, frame rate, field of view and graphics quality.",
-                               1, more, 0)) != 0)
+    if (!fci_settings_profile_button()
+        && (s_entry = make_option("DISPLAY AND GRAPHICS",
+                                  "Window, frame rate, field of view and graphics quality.", 1, more, 0))
+                   != 0)
         list_add(list, s_entry);
     list_show(list);
     fprintf(stderr, "[FCI] settings menu: %d control settings added\n", n);
@@ -655,7 +708,8 @@ static int on_show(void (*body)(void))
     if (s_shown_page) {
         s_shown_page = 0;
         set_title(screen, "CONTROLLER OPTIONS", PAGE_TITLE);
-        gcall(addrs()->list_help, addrs()->evo ? (struct regs){.edi = list} : (struct regs){.ecx = list}, 0, NULL);
+        gcall(addrs()->list_help, addrs()->evo ? (struct regs){.edi = list} : (struct regs){.ecx = list}, 0,
+              NULL);
     }
     return 1;
 }
@@ -667,7 +721,8 @@ int fci_gate_00118B88(void) { return on_show(sub_00118B88_fci_body); }
 /* ---- the gates: Instincts, then Evolution ---------------------------------------------------------- */
 
 int fci_gate_00182570(void) { return on_fill(sub_00182570_fci_body); }
-int fci_gate_00152AF0(void) { return on_press(sub_00152AF0_fci_body, MEM32(g_esp + 4), 8); } /* list on the stack */
+int fci_gate_00152AF0(void)
+{ return on_press(sub_00152AF0_fci_body, MEM32(g_esp + 4), 8); } /* list on the stack */
 int fci_gate_00152510(void) { return on_rows(sub_00152510_fci_body); }
 int fci_gate_00151AB0(void) { return on_set_index(sub_00151AB0_fci_body); }
 int fci_gate_00151FD0(void) { return on_popup(sub_00151FD0_fci_body); }

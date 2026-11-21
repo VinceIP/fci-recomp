@@ -27,4 +27,4 @@ void ShowNotice(const char* msg);
 std::string Notice();
 // A character's seven rows of five bits (bit 4 the left column); false when the font lacks it.
 bool GlyphRows(char c, uint8_t rows[7]);
-}  // namespace fci_quicksave
+}   // namespace fci_quicksave

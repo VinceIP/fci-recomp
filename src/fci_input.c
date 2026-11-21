@@ -302,29 +302,19 @@ void fci_input_typed(void) { kbm_at = (LONGLONG)GetTickCount64(); }
  * (src/xbr/fci_quicksave.cpp). A press, not a hold: the flag is set on the key-down edge only. */
 static volatile LONG quicksave_request, quickload_request, fog_request;
 
-int fci_input_take_quicksave_request(void)
-{
-    return InterlockedExchange(&quicksave_request, 0) != 0;
-}
-int fci_input_take_quickload_request(void)
-{
-    return InterlockedExchange(&quickload_request, 0) != 0;
-}
+int fci_input_take_quicksave_request(void) { return InterlockedExchange(&quicksave_request, 0) != 0; }
+int fci_input_take_quickload_request(void) { return InterlockedExchange(&quickload_request, 0) != 0; }
 /* the fog toggle is taken at the frame boundary too, so a mode never changes inside a frame */
-int fci_input_take_fog_request(void)
-{
-    return InterlockedExchange(&fog_request, 0) != 0;
-}
+int fci_input_take_fog_request(void) { return InterlockedExchange(&fog_request, 0) != 0; }
 /* Instincts' game image (not its map editor): fci_quicksave.cpp has its addresses */
 int fci_input_quicksave_supported(void)
-{
-    return !_stricmp(FCI_IMAGE_FILENAME, "default.xbe") && !strcmp(FCI_TITLE_NAME, "Far Cry Instincts");
-}
+{ return !_stricmp(FCI_IMAGE_FILENAME, "default.xbe") && !strcmp(FCI_TITLE_NAME, "Far Cry Instincts"); }
 
 /* Evolution's game image (not its map editor): fci_quicksave.cpp has its addresses too */
 int fci_input_evolution_game(void)
 {
-    return !_stricmp(FCI_IMAGE_FILENAME, "default.xbe") && !strcmp(FCI_TITLE_NAME, "Far Cry Instincts Evolution");
+    return !_stricmp(FCI_IMAGE_FILENAME, "default.xbe")
+           && !strcmp(FCI_TITLE_NAME, "Far Cry Instincts Evolution");
 }
 
 /* a key (virtual key, left/right resolved by the caller) or mouse button: the generic Shift/Ctrl/Alt follow */

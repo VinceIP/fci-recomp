@@ -24,7 +24,7 @@ void fci_net_worker_browse_state(int *fetch_state, int *n_hosts, int *relay_refu
 
 /* Match the complete writable string, including the terminator, before changing guest memory. */
 static const uint16_t browse_original[17] = {
-    'N', 'O', ' ', 'M', 'A', 'T', 'C', 'H', 'E', 'S', ' ', 'F', 'O', 'U', 'N', 'D', 0,
+        'N', 'O', ' ', 'M', 'A', 'T', 'C', 'H', 'E', 'S', ' ', 'F', 'O', 'U', 'N', 'D', 0,
 };
 
 static uint16_t *browse_find_text(void)
@@ -52,14 +52,14 @@ static uint16_t *browse_find_text(void)
 static void browse_relabel(void)
 {
     static const char *const texts[] = {
-        [BROWSE_NONE] = "NO MATCHES FOUND",
-        [BROWSE_LIST_OFFLINE] = "LIST OFFLINE",
-        [BROWSE_LIST_EMPTY] = "NO MATCHES FOUND",
-        [BROWSE_SEARCHING] = "SEARCHING...",
-        [BROWSE_HOST_UNREACHABLE] = "HOST UNREACHABLE",
-        [BROWSE_RELAY_OFFLINE] = "RELAY OFFLINE",
-        [BROWSE_UPDATE_REQUIRED] = "UPDATE REQUIRED",
-        [BROWSE_ONLINE_PAUSED] = "ONLINE PAUSED",
+            [BROWSE_NONE] = "NO MATCHES FOUND",
+            [BROWSE_LIST_OFFLINE] = "LIST OFFLINE",
+            [BROWSE_LIST_EMPTY] = "NO MATCHES FOUND",
+            [BROWSE_SEARCHING] = "SEARCHING...",
+            [BROWSE_HOST_UNREACHABLE] = "HOST UNREACHABLE",
+            [BROWSE_RELAY_OFFLINE] = "RELAY OFFLINE",
+            [BROWSE_UPDATE_REQUIRED] = "UPDATE REQUIRED",
+            [BROWSE_ONLINE_PAUSED] = "ONLINE PAUSED",
     };
     static uint16_t *text;
     static uint16_t previous[17];
@@ -71,10 +71,9 @@ static void browse_relabel(void)
 
     if (text) {
         MEMORY_BASIC_INFORMATION mbi;
-        if (!VirtualQuery(text, &mbi, sizeof mbi) || mbi.State != MEM_COMMIT ||
-            mbi.Protect != PAGE_READWRITE ||
-            (uintptr_t)text - (uintptr_t)mbi.BaseAddress + sizeof previous > mbi.RegionSize ||
-            (memcmp(text, previous, sizeof previous) && memcmp(text, browse_original, sizeof previous)))
+        if (!VirtualQuery(text, &mbi, sizeof mbi) || mbi.State != MEM_COMMIT || mbi.Protect != PAGE_READWRITE
+            || (uintptr_t)text - (uintptr_t)mbi.BaseAddress + sizeof previous > mbi.RegionSize
+            || (memcmp(text, previous, sizeof previous) && memcmp(text, browse_original, sizeof previous)))
             text = NULL;
     }
     if (!text && in_list) {
@@ -88,7 +87,8 @@ static void browse_relabel(void)
         return;
 
     fci_net_worker_browse_state(&fetch_state, &n_hosts, &relay_refused, &list_refused);
-    int status = fci_browse_status(in_list, fetch_state, n_hosts, n_pending, n_dropped, relay_refused, list_refused);
+    int status = fci_browse_status(in_list, fetch_state, n_hosts, n_pending, n_dropped, relay_refused,
+                                   list_refused);
     const char *label = texts[status];
     uint16_t replacement[17] = {0};
     for (size_t i = 0; label[i] && i < 16; i++)
@@ -185,9 +185,9 @@ static uint32_t browser_call_frame(uint32_t sp)
     const uint32_t frame = sp - sizeof(struct browser_menu_call);
     MEMORY_BASIC_INFORMATION mbi;
     const void *start = (const void *)XBOX_PTR(frame);
-    if (frame > sp || !VirtualQuery(start, &mbi, sizeof mbi) || mbi.State != MEM_COMMIT ||
-        mbi.Protect != PAGE_READWRITE ||
-        (uintptr_t)start - (uintptr_t)mbi.BaseAddress + sizeof(struct browser_menu_call) > mbi.RegionSize)
+    if (frame > sp || !VirtualQuery(start, &mbi, sizeof mbi) || mbi.State != MEM_COMMIT
+        || mbi.Protect != PAGE_READWRITE
+        || (uintptr_t)start - (uintptr_t)mbi.BaseAddress + sizeof(struct browser_menu_call) > mbi.RegionSize)
         return 0;
     return frame;
 }
@@ -197,9 +197,9 @@ static uint32_t set_menu_label(uint32_t frame, const char *label)
     struct browser_menu_call *call = (struct browser_menu_call *)XBOX_PTR(frame);
     const uint32_t length = (uint32_t)strlen(label);
     call->label = (struct guest_menu_string){
-        .text = frame + offsetof(struct browser_menu_call, label_text),
-        .length = length,
-        .capacity = (sizeof call->label_text / sizeof *call->label_text) - 1,
+            .text = frame + offsetof(struct browser_menu_call, label_text),
+            .length = length,
+            .capacity = (sizeof call->label_text / sizeof *call->label_text) - 1,
     };
     for (uint32_t i = 0; i <= length; i++)
         call->label_text[i] = (uint16_t)label[i];
@@ -211,9 +211,9 @@ static uint32_t set_menu_icon(uint32_t frame, const char *icon)
     struct browser_menu_call *call = (struct browser_menu_call *)XBOX_PTR(frame);
     const uint32_t length = (uint32_t)strlen(icon);
     call->icon = (struct guest_menu_string){
-        .text = frame + offsetof(struct browser_menu_call, icon_text),
-        .length = length,
-        .capacity = sizeof call->icon_text - 1,
+            .text = frame + offsetof(struct browser_menu_call, icon_text),
+            .length = length,
+            .capacity = sizeof call->icon_text - 1,
     };
     memcpy(call->icon_text, icon, length + 1);
     return frame + offsetof(struct browser_menu_call, icon);
@@ -265,7 +265,8 @@ static int browser_badge(uint32_t page, unsigned icon_arg, unsigned label_arg, r
         fci_net_worker_browse_state(&fetch_state, &n_hosts, &relay_refused, &list_refused);
         if (!fci_nic_transport_active())
             fetch_state = 2;
-        if (list_refused == FCI_LIST_REFUSED_UPDATE) { /* the list wants a newer build: say so, not "offline" */
+        if (list_refused
+            == FCI_LIST_REFUSED_UPDATE) { /* the list wants a newer build: say so, not "offline" */
             label = "UPDATE REQUIRED";
             icon = "Live_Icon_Offline";
         } else if (list_refused == FCI_LIST_REFUSED_MAINTENANCE) {

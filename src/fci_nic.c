@@ -55,9 +55,10 @@ extern uint32_t fci_xbe_version; /* the XBE certificate's Version (fci_main.c): 
 #define FRAME_MAX 1536
 #define RX_QUEUE  64
 #define ETHER_MAX 1514 /* the largest frame without its checksum */
-#define MAGIC  "FCN1"  /* datagrams: magic, kind ('H' hello: MAC, cookie, room (version-scoped) or knock:
+#define MAGIC                                                                                                \
+    "FCN1"       /* datagrams: magic, kind ('H' hello: MAC, cookie, room (version-scoped) or knock:
                           * MAC, triple; 'C' cookie; 'F' frame; 'P'/'A' punch) */
-#define COOKIE 8       /* the hub's proof that this address is ours (tools/fci_hub.py) */
+#define COOKIE 8 /* the hub's proof that this address is ours (tools/fci_hub.py) */
 
 /* LIST mode: the internet host list (RECOMP_FCI_NET_LIST) */
 #define LIST_PEER_MAX    16
@@ -114,20 +115,20 @@ static unsigned long s_unrouted, s_stray;
  * nothing leaves it: no hub, no list, no worker. The learned MAC table is s_peers (32 entries,
  * twice the game's 16-player cap, the entry shape already mac + endpoint). */
 #define LAN_PORT_DEFAULT 47920 /* 3074 is taken by Windows' own Xbox services */
-#define LAN_REFRESH_MS 30000   /* the adapter list: a 30 s timer and a send failure re-read it (Wi-Fi) */
+#define LAN_REFRESH_MS   30000 /* the adapter list: a 30 s timer and a send failure re-read it (Wi-Fi) */
 static int s_lan;
 static uint16_t s_lan_port;
 static uint16_t s_lan_bcports[8]; /* broadcast destination ports; default: the bind port */
 static int s_lan_nbcports;
 static struct in_addr s_lan_bc[8]; /* the subnet broadcast of each up IPv4 adapter */
 static int s_lan_nbc;
-static int s_lan_bc_logged; /* the list was logged at start; a refresh logs only a change */
+static int s_lan_bc_logged;        /* the list was logged at start; a refresh logs only a change */
 static ULONGLONG s_lan_bc_refresh; /* next adapter refresh (GetTickCount64) */
 static ULONGLONG s_lan_knock_next, s_dir_knock_next; /* next knock (GetTickCount64) */
 static void lan_adapters_refresh(void);
 int fci_nic_start_list(const char *url); /* defined below; the lazy starter (above) calls it */
 int fci_nic_start_lan(void);             /* defined below; the menu transport entry (above) calls it */
-static char s_room[33]; /* the hub's room name, scoped by the triple (room_scope) */
+static char s_room[33];                  /* the hub's room name, scoped by the triple (room_scope) */
 static uint8_t s_cookie[COOKIE];
 static uint8_t s_mac[6];
 static int s_mac_made;
@@ -146,7 +147,7 @@ static void traffic_rx(int path, int len) { s_tfc[path][2]++, s_tfc[path][3] += 
 /* the cumulative traffic line: once a minute while frames flow, and at shutdown (force) */
 static void traffic_summary(ULONGLONG now, int force)
 {
-    static const char *const name[TP_N] = { "direct", "relay", "hub" };
+    static const char *const name[TP_N] = {"direct", "relay", "hub"};
     unsigned long long total = 0;
     int i, shown = 0;
     for (i = 0; i < TP_N; i++)
@@ -159,8 +160,8 @@ static void traffic_summary(ULONGLONG now, int force)
     for (i = 0; i < TP_N; i++) {
         if (!(s_tfc[i][0] + s_tfc[i][2]))
             continue;
-        fprintf(stderr, "%s %s tx %llu frames %llu bytes, rx %llu frames %llu bytes", shown++ ? ";" : "", name[i],
-                s_tfc[i][0], s_tfc[i][1], s_tfc[i][2], s_tfc[i][3]);
+        fprintf(stderr, "%s %s tx %llu frames %llu bytes, rx %llu frames %llu bytes", shown++ ? ";" : "",
+                name[i], s_tfc[i][0], s_tfc[i][1], s_tfc[i][2], s_tfc[i][3]);
     }
     fprintf(stderr, "\n");
     fflush(stderr);
@@ -219,7 +220,7 @@ static char s_list_url[512];          /* the Worker base URL (for the worker thr
 static int s_up;
 static int s_menu;
 static char s_menu_list_url[512];
-static char s_relay_spec[256];        /* RECOMP_FCI_NET_RELAY, if set */
+static char s_relay_spec[256]; /* RECOMP_FCI_NET_RELAY, if set */
 /* the relay fallback (RECOMP_FCI_NET_RELAY): the hub keys a member by address, so one socket per
  * relay room, opened on the first relay peer and closed when its peer expires */
 #define RELAY_MAX       4
@@ -230,14 +231,14 @@ static SOCKET s_relsock[RELAY_MAX]; /* a socket per relay room; INVALID_SOCKET =
 static uint8_t s_relcookie[RELAY_MAX][COOKIE];
 static char s_relroom[RELAY_MAX][33];   /* the room name: the peer's nonce in hex (32) */
 static ULONGLONG s_relhello[RELAY_MAX]; /* next hello deadline per socket */
-static volatile LONG s_probe; /* A browser entry takes precedence over a discovery broadcast. */
+static volatile LONG s_probe;           /* A browser entry takes precedence over a discovery broadcast. */
 /* the TURN relay (guest side): a failed punch moves the peer to LP_TURN_WAIT, the worker mints a
  * credential (POST /v1/turn) and starts the allocation; when it is ready the peer is relayed over
  * it and the worker posts the relayed connect (research/qwen/notes/q17-turn-design.md) */
 static volatile LONG s_turn_need;  /* a peer is in LP_TURN_WAIT: the worker should mint a credential */
 static volatile LONG s_turn_ready; /* the allocation is ready: the worker should post the relayed connect */
 static int s_turn_ok;              /* RECOMP_FCI_NET_TURN != "0" */
-static int s_punch_off;            /* test builds only (FCI_NET_TEST): RECOMP_FCI_NET_PUNCH=0 sends every pair to
+static int s_punch_off; /* test builds only (FCI_NET_TEST): RECOMP_FCI_NET_PUNCH=0 sends every pair to
                                       the relay. Players get no such switch: the relay costs its operator */
 
 #define TRACE(...)                                                                                           \
@@ -359,7 +360,8 @@ int fci_nic_start_list_lazy(const char *url)
         return 0;
     }
     if (!url || !*url) {
-        fprintf(stderr, "[FCI] network: INTERNET: no list URL set (set network-list); no transport started\n");
+        fprintf(stderr,
+                "[FCI] network: INTERNET: no list URL set (set network-list); no transport started\n");
         fflush(stderr);
         return 0;
     }
@@ -623,8 +625,8 @@ static int route_frame(const uint8_t *f, uint32_t len)
                 lan_adapters_refresh(); /* an address gone (Wi-Fi changed): re-read the list once */
             if (now >= next_log && s_lan_nbc) {
                 next_log = now + 5000; /* about one a second: the steady state stays quiet */
-                fprintf(stderr, "[FCI] network: LAN broadcast %uB -> %s:%u (x%d adapters, %d ports)\n",
-                        len, inet_ntoa(s_lan_bc[0]), s_lan_bcports[0], s_lan_nbc, s_lan_nbcports);
+                fprintf(stderr, "[FCI] network: LAN broadcast %uB -> %s:%u (x%d adapters, %d ports)\n", len,
+                        inet_ntoa(s_lan_bc[0]), s_lan_bcports[0], s_lan_nbc, s_lan_nbcports);
                 fflush(stderr);
             }
             return s_lan_nbc > 0;
@@ -787,8 +789,9 @@ static void finish_probe(lpeer_t *peer, const char *stage)
 {
     if (!peer->report_receipt[0])
         return;
-    const char *path = peer->state == LP_RELAY ? (peer->turn_ch >= 0 ? "turn" : "hub")
-                       : peer->state == LP_TURN_WAIT ? "turn" : "direct";
+    const char *path = peer->state == LP_RELAY       ? (peer->turn_ch >= 0 ? "turn" : "hub")
+                       : peer->state == LP_TURN_WAIT ? "turn"
+                                                     : "direct";
     fci_net_report_probe(peer->report_receipt, path, stage, peer->report_started);
     peer->report_receipt[0] = 0;
     s_report_peers--;
@@ -826,8 +829,8 @@ static int rx_enqueue(const uint8_t *f, int n, const struct sockaddr_in *from)
     if (s_list && s_report_peers) {
         for (int i = 0; i < s_nlpeers; i++) {
             lpeer_t *peer = &s_lpeers[i];
-            if (peer->report_receipt[0] && (peer->state == LP_LIVE || peer->state == LP_RELAY) &&
-                !memcmp(peer->mac, f + 6, sizeof peer->mac)) {
+            if (peer->report_receipt[0] && (peer->state == LP_LIVE || peer->state == LP_RELAY)
+                && !memcmp(peer->mac, f + 6, sizeof peer->mac)) {
                 finish_probe(peer, "first_frame");
                 break;
             }
@@ -836,8 +839,8 @@ static int rx_enqueue(const uint8_t *f, int n, const struct sockaddr_in *from)
     return 1;
 }
 
-#define LAN_KNOCK_MS        1000  /* the knock: every second, as the game's discovery broadcast */
-#define LAN_KNOCK_EXPIRE_MS 5000  /* a card quiet for 5 s (four lost knocks) is no longer admitted */
+#define LAN_KNOCK_MS        1000 /* the knock: every second, as the game's discovery broadcast */
+#define LAN_KNOCK_EXPIRE_MS 5000 /* a card quiet for 5 s (four lost knocks) is no longer admitted */
 
 static peer_t *lan_find(const uint8_t *mac)
 {
@@ -874,8 +877,8 @@ static peer_t *lan_admit(const uint8_t *mac, const struct sockaddr_in *from)
     s_peers[free].has_mac = 1;
     s_peers[free].last_heard = now;
     s_peers[free].last_knock = now;
-    fprintf(stderr, "[FCI] network: LAN admit %02X:%02X:%02X:%02X:%02X:%02X <- %s:%u\n",
-            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], inet_ntoa(from->sin_addr), ntohs(from->sin_port));
+    fprintf(stderr, "[FCI] network: LAN admit %02X:%02X:%02X:%02X:%02X:%02X <- %s:%u\n", mac[0], mac[1],
+            mac[2], mac[3], mac[4], mac[5], inet_ntoa(from->sin_addr), ntohs(from->sin_port));
     fflush(stderr);
     return &s_peers[free];
 }
@@ -895,9 +898,8 @@ static peer_t *lan_frame_seen(const uint8_t *mac, const struct sockaddr_in *from
         /* quiet for 3 s (an adapter change): the card moved, the new source wins */
         p->addr = *from;
         p->last_heard = now;
-        fprintf(stderr, "[FCI] network: LAN learn %02X:%02X:%02X:%02X:%02X:%02X <- %s:%u (moved)\n",
-                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], inet_ntoa(from->sin_addr),
-                ntohs(from->sin_port));
+        fprintf(stderr, "[FCI] network: LAN learn %02X:%02X:%02X:%02X:%02X:%02X <- %s:%u (moved)\n", mac[0],
+                mac[1], mac[2], mac[3], mac[4], mac[5], inet_ntoa(from->sin_addr), ntohs(from->sin_port));
         fflush(stderr);
     } /* a frame from another adapter while the endpoint is alive: keep it, no log */
     return p;
@@ -1072,8 +1074,8 @@ static int stun_recv(const char *buf, int n, const struct sockaddr_in *from)
             fprintf(stderr, "[FCI] network: STUN endpoint %s:%u\n", inet_ntoa(s_stun_ep.sin_addr),
                     ntohs(s_stun_ep.sin_port));
         else
-            fprintf(stderr, "[FCI] network: STUN endpoint (MAPPED) %s:%u\n",
-                    inet_ntoa(s_stun_ep.sin_addr), ntohs(s_stun_ep.sin_port));
+            fprintf(stderr, "[FCI] network: STUN endpoint (MAPPED) %s:%u\n", inet_ntoa(s_stun_ep.sin_addr),
+                    ntohs(s_stun_ep.sin_port));
         fflush(stderr);
     }
     return 1;
@@ -1120,12 +1122,10 @@ static void punch_recv(const char *buf, char type, const struct sockaddr_in *fro
             continue;
         /* match the primary endpoint or the LAN address (when both sides are behind the same NAT) */
         int is_local = 0;
-        if (p->endpoint.sin_addr.s_addr == from->sin_addr.s_addr &&
-            p->endpoint.sin_port == from->sin_port) {
+        if (p->endpoint.sin_addr.s_addr == from->sin_addr.s_addr && p->endpoint.sin_port == from->sin_port) {
             /* primary match */
-        } else if (p->has_local &&
-                   p->local_ep.sin_addr.s_addr == from->sin_addr.s_addr &&
-                   p->local_ep.sin_port == from->sin_port) {
+        } else if (p->has_local && p->local_ep.sin_addr.s_addr == from->sin_addr.s_addr
+                   && p->local_ep.sin_port == from->sin_port) {
             is_local = 1;
         } else {
             continue;
@@ -1464,8 +1464,8 @@ int fci_nic_list_turn_peer(const uint8_t nonce[16], const uint8_t mac[6], const 
         p->next_punch = now; /* the tick opens our NAT to the relayed address */
         p->last_frame = now;
         freeaddrinfo(ai);
-        fprintf(stderr, "[FCI] network: guest now at relay %s:%u (nonce %02x%02x%02x%02x)\n", inet_ntoa(ep.sin_addr),
-                ntohs(ep.sin_port), nonce[0], nonce[1], nonce[2], nonce[3]);
+        fprintf(stderr, "[FCI] network: guest now at relay %s:%u (nonce %02x%02x%02x%02x)\n",
+                inet_ntoa(ep.sin_addr), ntohs(ep.sin_port), nonce[0], nonce[1], nonce[2], nonce[3]);
         fflush(stderr);
         return 1;
     }
@@ -1490,8 +1490,8 @@ int fci_nic_list_turn_peer(const uint8_t nonce[16], const uint8_t mac[6], const 
         p->next_punch = now; /* the tick opens our NAT to the relayed address */
         p->last_frame = now;
         s_nlpeers++;
-        fprintf(stderr, "[FCI] network: guest now at relay %s (nonce %02x%02x%02x%02x)\n", endpoint, nonce[0], nonce[1],
-                nonce[2], nonce[3]);
+        fprintf(stderr, "[FCI] network: guest now at relay %s (nonce %02x%02x%02x%02x)\n", endpoint, nonce[0],
+                nonce[1], nonce[2], nonce[3]);
         fflush(stderr);
         return 1;
     }
@@ -1544,7 +1544,7 @@ static int relay_socket_new(const lpeer_t *p)
         sprintf(s_relroom[i] + n * 2, "%02x", p->nonce[n]);
     s_relroom[i][32] = 0;
     room_scope(s_relroom[i], sizeof s_relroom[i]); /* the nonce is cut to fit the scope */
-    s_relhello[i] = GetTickCount64(); /* hello now: the cookie exchange starts */
+    s_relhello[i] = GetTickCount64();              /* hello now: the cookie exchange starts */
     relay_hello(i);
     return i;
 }
@@ -1677,9 +1677,10 @@ static void receive_turn(void)
                     }
                 fprintf(stderr,
                         "[FCI] network: a relayed frame from no TURN peer, dropped (logged once): src "
-                        "%02X:%02X:%02X:%02X:%02X:%02X, turn peer state %d mac %02X:%02X:%02X:%02X:%02X:%02X\n",
-                        f[6], f[7], f[8], f[9], f[10], f[11], st, pm ? pm[0] : 0, pm ? pm[1] : 0, pm ? pm[2] : 0,
-                        pm ? pm[3] : 0, pm ? pm[4] : 0, pm ? pm[5] : 0);
+                        "%02X:%02X:%02X:%02X:%02X:%02X, turn peer state %d mac "
+                        "%02X:%02X:%02X:%02X:%02X:%02X\n",
+                        f[6], f[7], f[8], f[9], f[10], f[11], st, pm ? pm[0] : 0, pm ? pm[1] : 0,
+                        pm ? pm[2] : 0, pm ? pm[3] : 0, pm ? pm[4] : 0, pm ? pm[5] : 0);
             }
             fflush(stderr);
             continue;
@@ -2439,7 +2440,8 @@ static int connect_list(const char *url, char *err, int errlen)
         const char *punch = getenv("RECOMP_FCI_NET_PUNCH");
         s_punch_off = punch && punch[0] == '0';
         if (s_punch_off)
-            fprintf(stderr, "[FCI] network: hole punching disabled (RECOMP_FCI_NET_PUNCH=0): a test of the relay\n");
+            fprintf(stderr,
+                    "[FCI] network: hole punching disabled (RECOMP_FCI_NET_PUNCH=0): a test of the relay\n");
     }
 #endif
     if (!s_turn_ok)
@@ -2669,7 +2671,7 @@ static void lan_adapters_refresh(void)
     free(a);
     if (got && !first && lan_bc_set_changed(oldbc, oldn, s_lan_bc, s_lan_nbc))
         fprintf(stderr, "[FCI] network: LAN adapters changed: %d broadcast addresses\n", s_lan_nbc),
-            fflush(stderr);
+                fflush(stderr);
     s_lan_bc_logged = 1;
 }
 
@@ -2691,8 +2693,8 @@ int fci_nic_start_hub(const char *spec)
         return 0;
     }
     fci_nic_mac(m);
-    fprintf(stderr, "[FCI] network: link up through hub %s, card %02X:%02X:%02X:%02X:%02X:%02X\n", spec,
-            m[0], m[1], m[2], m[3], m[4], m[5]);
+    fprintf(stderr, "[FCI] network: link up through hub %s, card %02X:%02X:%02X:%02X:%02X:%02X\n", spec, m[0],
+            m[1], m[2], m[3], m[4], m[5]);
     fflush(stderr);
     return 1;
 }
@@ -2733,8 +2735,8 @@ int fci_nic_start_list(const char *url)
         return 0;
     }
     fci_nic_mac(m);
-    fprintf(stderr, "[FCI] network: link up (host list %s), card %02X:%02X:%02X:%02X:%02X:%02X\n", url,
-            m[0], m[1], m[2], m[3], m[4], m[5]);
+    fprintf(stderr, "[FCI] network: link up (host list %s), card %02X:%02X:%02X:%02X:%02X:%02X\n", url, m[0],
+            m[1], m[2], m[3], m[4], m[5]);
     fflush(stderr);
     fci_net_worker_start(); /* LIST mode: the worker thread does the host-list HTTP */
     /* leave the host list on a clean exit (quit-to-dashboard / shutdown): the toolkit calls
@@ -2849,7 +2851,8 @@ int fci_nic_init(ptrdiff_t mem_offset)
     const char *net = getenv("RECOMP_FCI_NET"), *peers = getenv("RECOMP_FCI_NET_PEERS");
     const char *list = getenv("RECOMP_FCI_NET_LIST"), *lan = getenv("RECOMP_FCI_NET_LAN");
     const char *menu = getenv("RECOMP_FCI_NET_MENU"), *trace = getenv("RECOMP_FCI_NET_TRACE");
-    int nset = (net && *net) + (peers && *peers) + (list && *list && !(menu && *menu == '1')) + (lan && *lan == '1');
+    int nset = (net && *net) + (peers && *peers) + (list && *list && !(menu && *menu == '1'))
+               + (lan && *lan == '1');
     s_trace = trace && *trace == '1';
     s_mem_offset = mem_offset;
     s_menu = menu && *menu == '1';
