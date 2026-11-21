@@ -37,6 +37,7 @@ struct VOut {
     float4 tc3 : TEXCOORD3;
     float fogamt : TEXCOORD4;
     float wdep : TEXCOORD6;  // FCI: w, perspective correct, for W-buffered depth
+    float4 clip : SV_ClipDistance0;  // FCI: a remapped 2D draw clipped to the guest screen
 };
 cbuffer VC : register(b0) { float4 c[192]; };
 cbuffer DC : register(b1) {
@@ -51,7 +52,9 @@ cbuffer DC : register(b1) {
     float4 bumplum[4];
     float4x4 wvp;
 )";
-const char* kCommonTail = R"(    float4 spread[4];
+const char* kCommonTail = R"(    float4 vol;
+    float4 volsize;
+    float4 spread[4];
     float4x4 wv;
     float4x4 wvn;
     float4x4 tm[4];
@@ -59,6 +62,7 @@ const char* kCommonTail = R"(    float4 spread[4];
     float4 amb;
     float4 lt[56];
     float4 wbuf;
+    float4 hudbox;
 };
 )";
 
@@ -232,6 +236,12 @@ const char* kVsEpilogue = R"(
     // of the far edges on D3D12's, which upscaled leaves the last host columns and rows undrawn
     if (abs(p.x - (surf.x - 0.5)) < 1e-3) p.x = surf.x;
     if (abs(p.y - (surf.y - 0.5)) < 1e-3) p.y = surf.y;
+    // the pretransformed 2D remapped from the guest's 16:9 to the host aspect A about its anchor
+    // (the centred 16:9 box at A > 16:9, fitted to the width at 16:10); (1,1,0,0) is the identity
+    // what the console draws off screen stays off screen once the remap shrinks the layout into view
+    bool remap = any(hudbox != float4(1, 1, 0, 0));
+    o.clip = remap ? float4(p.x + 1, surf.x + 1 - p.x, p.y + 1, surf.y + 1 - p.y) : float4(1, 1, 1, 1);
+    p.xy = (p.xy - hudbox.zw) * hudbox.xy + hudbox.zw;
     q.x = p.x * 2 / surf.x - 1;
     q.y = 1 - p.y * 2 / surf.y;
     q.z = p.z * surf.z;
@@ -240,6 +250,7 @@ const char* kVsEpilogue = R"(
     // FCI: W-buffered draws take depth from w in the pixel shader; the game's z row equals w (z / w = 1, on the
     // far plane), so z is kept inside to avoid clipping by rounding, as the console does not clip them by z
     if (wbuf.x != 0) q.z = 0.5 * q.w;
+    q.z += wbuf.w * q.w;  // FCI: the console's fixed-point depth bias, the same at every depth
     o.pos = q;
     o.d0 = saturate(oD0);
     o.d1 = saturate(oD1);
@@ -825,6 +836,7 @@ std::string FixedVertexHlsl(uint16_t regs, bool pretransformed, uint64_t decode,
     if (abs(sp.y - (surf.y - 0.5)) < 1e-3) cp.y = -cp.w;
     o.pos = cp;
     if (wbuf.x != 0) o.pos.z = 0.5 * cp.w;  // FCI: as for programs, W-buffered depth is not clipped by z
+    o.pos.z += wbuf.w * cp.w;  // FCI: as for programs, the constant depth bias
     o.d0 = saturate(oD0);
     o.d1 = saturate(oD1);
     o.b0 = o.d0;
@@ -835,6 +847,7 @@ std::string FixedVertexHlsl(uint16_t regs, bool pretransformed, uint64_t decode,
     o.tc3 = oT3;
     o.fogamt = fogfactor(abs(cp.z));
     o.wdep = cp.w;
+    o.clip = float4(1, 1, 1, 1);
     return o;
 }
 )";
@@ -849,6 +862,7 @@ std::string PixelHlsl(const PixelKey& k) {
         const char* type = t.shadow ? "Texture2D<float>" : t.kind == kTex3D ? "Texture3D" : t.kind == kTexCube ? "TextureCube" : "Texture2D";
         s += F("%s tex%d : register(t%d);\n%s smp%d : register(s%d);\n", type, i, i, t.shadow ? "SamplerComparisonState" : "SamplerState", i, i);
     }
+    s += "Texture3D<float4> fogvol : register(t4);\nSamplerState fogsmp : register(s4);\n";
     s += k.wbuf ? F("float4 main(VOut i, bool front : SV_IsFrontFace, out float odep : SV_Depth) : SV_Target {\n")
                 : F("float4 main(VOut i, bool front : SV_IsFrontFace) : SV_Target {\n");
     // FCI: NV2A W-buffering stores w (the title scales it to the depth range) rather than z / w; offsets are
@@ -858,7 +872,7 @@ std::string PixelHlsl(const PixelKey& k) {
     s += "    float4 tc0 = i.tc0, tc1 = i.tc1, tc2 = i.tc2, tc3 = i.tc3;\n";
     s += k.two_sided ? "    float4 v0 = front ? i.d0 : i.b0, v1 = front ? i.d1 : i.b1;\n" : "    float4 v0 = i.d0, v1 = i.d1;\n";
     s += "    if (misc.w == 0) v1 = float4(0, 0, 0, 1);\n";
-    s += "    float4 fogin = float4(fogcolor.rgb, saturate(i.fogamt));\n";
+    s += "    float4 fogin = float4(fogcolor.rgb, ext.y > 0.5 ? 1.0 : saturate(i.fogamt));\n";
     std::string body;
     if (k.programmable) {
         for (int i = 0; i < 4; i++) {
@@ -930,6 +944,25 @@ std::string PixelHlsl(const PixelKey& k) {
     // FCI diagnostic XBE_PS_SHOW=v1: programmable combiners output their interpolated v1 (g, b, a as r, g, b)
     if (k.programmable && std::getenv("XBE_PS_SHOW") && !std::strcmp(std::getenv("XBE_PS_SHOW"), "v1"))
         body += "outc = float4(v1.g, v1.b, v1.a, 1);\n";
+    // FCI volume fog: sample the integrated volume at the pixel's depth
+    // FCI: ext.z 6 (7 additive): the water's reflection, which the main volume does not cover; a mirrored
+    // view's depth is the whole path camera-water-object, so it is fogged by that length (vol.y if no depth)
+    body += R"(    if (ext.z > 5.5) {
+        float d = wbuf.x != 0 ? i.wdep * wbuf.x * 16777215.0 * vol.w : vol.y;
+        float t = exp(-vol.x * d);
+        outc.rgb = ext.z > 6.5 ? outc.rgb * t : outc.rgb * t + volsize.rgb * (1.0 - t);
+    } else if (ext.z > 0.5 && wbuf.x != 0) {
+        float d = i.wdep * wbuf.x * 16777215.0 * vol.w;  // as the depth buffer: fixed function w is not in w-units
+        float kf = vol.z * log(max(d, vol.x) / vol.x) * vol.y;
+        float w = saturate((kf - 0.5) / vol.z);
+        float2 uv = i.pos.xy / volsize.xy;
+        float4 v = fogvol.SampleLevel(fogsmp, float3(uv, w), 0);
+        float3 cs = lerp(outc.rgb, dot(outc.rgb, float3(0.299, 0.587, 0.114)).xxx, (1.0 - v.a) * ext.w);
+        outc.rgb = ext.z > 3.5 ? lerp(ext.z > 4.5 ? 0.5 : 1.0, outc.rgb, v.a)
+                 : ext.z > 2.5 ? cs * v.a + v.rgb * outc.a
+                 : ext.z > 1.5 ? cs * v.a : cs * v.a + v.rgb;
+    }
+)";
     body += "alphatest(outc.a);\n" + Hooks().Output() + "return outc;\n}\n";
     s += body;
     return k.quad ? QuadHlsl(std::move(s)) : s;

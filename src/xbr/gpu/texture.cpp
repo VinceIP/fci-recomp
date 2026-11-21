@@ -432,6 +432,11 @@ void MarkDirty(uint32_t res) {
     g_dirty[data] = ++g_epoch;
 }
 
+void MarkDataDirty(uint32_t data) {
+    std::lock_guard<std::mutex> lock(g_dirty_lock);
+    g_dirty[data] = ++g_epoch;
+}
+
 uint64_t DirtyEpoch(uint32_t data) {
     std::lock_guard<std::mutex> lock(g_dirty_lock);
     auto it = g_dirty.find(data);

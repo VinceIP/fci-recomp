@@ -39,6 +39,7 @@ import toolchain  # noqa: E402
 
 # for development only: tests, CI, lint settings, and the launcher's source (the zip carries it built)
 EXCLUDE = (
+    "tools/hostlist",
     "launcher",
     "tests",
     ".github",

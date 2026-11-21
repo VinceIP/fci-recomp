@@ -87,6 +87,8 @@ struct DrawConstants {
     float bumpl[4][4];  // scale offset
     float wvp[16];      // fixed function
     float ext[4];       // a backend extension's, declared by ShaderHooks::Constants
+    float vol[4];       // FCI volume fog: near, 1/log(far/near), VZ, 1/wpm
+    float volsize[4];   // FCI volume fog: host target width, height (a float4 in HLSL)
     float spread[4][4]; // kTexWide: tap step in uv, taps per axis
     // fixed function, lit in view space
     float wv[16];
@@ -95,7 +97,8 @@ struct DrawConstants {
     float mat[5][4];     // material diffuse, ambient, specular, emissive, power
     float amb[4];        // D3DRS_AMBIENT
     float lt[8][7][4];   // per light: diffuse, specular, ambient, position range, direction falloff, attenuation, cos theta/2 phi/2
-    float wbuf[4];       // FCI: W-buffer depth per unit of w, constant bias, slope bias
+    float wbuf[4];       // FCI: W-buffer depth per unit of w, constant bias, slope bias; z-buffer constant bias
+    float hudbox[4];     // FCI: the pretransformed 2D's 16:9 -> A remap (sx, sy, ax, ay), (1,1,0,0) identity
 };
 
 }  // namespace gpu

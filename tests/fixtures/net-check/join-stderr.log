@@ -1,0 +1,6 @@
+[FCI] network: LAN up, 02:46:43:32:FC:03, bound 0.0.0.0:47921
+[FCI] network: LAN admit 02:46:43:BB:49:60 <- 192.168.1.144:47920
+[FCI] nic: tx 342 bytes in 2 descriptors from 0
+[FCI] network: first frame sent (342 bytes)
+[FCI] nic: rx 443 bytes into 0
+[FCI] network: first frame received (443 bytes)

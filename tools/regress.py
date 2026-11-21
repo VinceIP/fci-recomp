@@ -12,6 +12,7 @@ variables) in a folder of its own with copied fixtures, drives the pad, captures
 References and fixtures come from the game, so they live in the test folder (FCI_REGRESS, default
 build/regress), never in Git. Fixtures, each copied in once:
   save-tunnel        a save folder whose checkpoint is Story Mode's Training tunnel
+  save-bunker        a save folder at The Bunker (the quick save and load scenario's level)
   editor-save        the save folder of a game that went to the Map Editor
   editor-launch.bin  the launch page that switch wrote (RECOMP_LAUNCH_DATA)
 
@@ -21,8 +22,10 @@ build/regress), never in Git. Fixtures, each copied in once:
   python -B tools/regress.py list
 
 Timing is wall-clock, so frames vary a little run to run (two runs: mean <= 2.6, worst block <= 31 on
-the animated title); the block tolerance is per scenario and the report prints every difference. A failed
-check names the scenario folder to look at.
+the animated title); the block tolerance is per scenario and the report prints every difference. A
+scenario may also mask a region that animates on wall clock (the view model, "block_mask") out of the
+worst-block score; the mean and the other blocks still catch a real change. A failed check names the
+scenario folder to look at.
 """
 
 import ctypes
@@ -30,16 +33,18 @@ import ctypes.wintypes as wt
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
 import time
 
+from frame_diff import block_mask, diff, lum_stats  # noqa: E402
 import game_driver
 from game_driver import EDITOR_EXE, FIXTURES, GAME_DIR, GAME_EXE, KINIT, REGRESS  # noqa: E402
 
 GOLDEN = REGRESS / "golden"
-FIXTURE_NAMES = ("save-tunnel", "editor-save", "editor-launch.bin")
+FIXTURE_NAMES = ("save-tunnel", "save-bunker", "editor-save", "editor-launch.bin")
 
 # the editor's menus to terrain mode (Create a New Map), about 60 s after start
 EDITOR_TO_TERRAIN = ["16.2:down:200", "16.6:a:200", "29.4:up:200", "29.8:a:200", "31.4:a:200", "50.9:a:200"]
@@ -108,6 +113,42 @@ SCENARIOS = {
         ],
         "block": 30,
     },
+    "quicksave": {
+        "what": "quick save and load: F5 saves, walk away, F9 loads back at the save's view",
+        "kind": "driven",
+        "save": "save-bunker",
+        "seconds": 60,
+        "steps": [
+            "wait:title",
+            "sleep:2",
+            "pad:start:200",
+            "sleep:3",
+            "pad:a:200",
+            "sleep:3",
+            "pad:a:200",
+            "sleep:3",
+            "pad:a:200",
+            "wait:ingame",
+            "sleep:2",
+            "pad:lup:5000",
+            "sleep:1",
+            "key:74",
+            "sleep:3",  # past the 2 s notice, which the frame after the load does not have
+            "capture",
+            "mouse:3600:0",
+            "pad:lup:2000",
+            "sleep:1",
+            "capture",
+            "key:78",
+            "wait:ingame",
+            "sleep:3",
+            "capture",
+        ],
+        "block": 30,
+        "log": ["quick save: posting", "quick load: posting"],
+        # the load restores the save's view: the last frame matches the first (same run)
+        "same_frames": [(0, 2)],
+    },
     "editor-terrain": {
         "what": "map editor: Create a New Map, terrain bump with Y raises a hill",
         "kind": "editor",
@@ -121,6 +162,8 @@ SCENARIOS = {
         "seconds": 80,
         "plan": EDITOR_TO_TERRAIN + ["62:back:300", "75:capture", "76.5:capture"],
         "block": 30,
+        # the hand and pistol sway on wall clock: keep that region out of the worst-block score
+        "block_mask": [64, 64, 128, 120],
     },
     "relaunch-window": {
         "what": "game -> Map Editor -> Exit Editor -> main menu, one window in front, each instance's own",
@@ -244,7 +287,8 @@ EVO_SCENARIOS = {
         "seconds": 90,
         "steps": EVO_TO_GAME
         + ["pad:start:200", "sleep:2"]
-        + ["pad:down:150", "sleep:0.4"] * 6
+        # up from Resume wraps to the last item, Quit: counting down depends on Friends List, skipped with no link
+        + ["pad:up:150", "sleep:0.4"]
         + ["pad:a:200", "sleep:2", "pad:up:200", "sleep:1", "pad:a:200", "sleep:12", "capture"],
         "block": 170,  # as menu, and the relaunch lands anywhere in the background video's loop (144 seen)
         "mean": 20,
@@ -256,8 +300,9 @@ if game_driver.TITLE.key == "evolution":
 
 
 def fixture(name, src):
-    if name not in FIXTURE_NAMES:
-        raise SystemExit("fixtures: " + ", ".join(FIXTURE_NAMES))
+    # slot-<name>: a save folder holding a quick save at a problem spot, for scenarios written against it
+    if name not in FIXTURE_NAMES and not (name.startswith("slot-") and len(name) > 5 and Path(src).is_dir()):
+        raise SystemExit("fixtures: " + ", ".join(FIXTURE_NAMES) + ", slot-<name> (a save folder)")
     src, dst = Path(src), FIXTURES / name
     if dst.exists():
         raise SystemExit(f"error: {dst} exists; remove it first to replace it")
@@ -266,30 +311,7 @@ def fixture(name, src):
     print("fixture", name, "from", src)
 
 
-def lum_stats(path):
-    from PIL import Image
-
-    im = Image.open(path).convert("L").resize((160, 120))
-    return im, sum(im.tobytes()) / (160 * 120)
-
-
 MEAN_TOLERANCE = 6.0  # whole-frame mean; two runs of each scenario differed by at most 2.6
-
-
-def diff(a, b):
-    """mean absolute difference over the frame, and the worst 8x8 block's (a missing piece of a
-    model is local: it barely moves the mean)"""
-    pa, pb = a.tobytes(), b.tobytes()
-    mean = sum(abs(x - y) for x, y in zip(pa, pb)) / (160 * 120)
-    worst = 0.0
-    for by in range(15):
-        for bx in range(20):
-            s = 0
-            for y in range(by * 8, by * 8 + 8):
-                o = y * 160 + bx * 8
-                s += sum(abs(pa[o + i] - pb[o + i]) for i in range(8))
-            worst = max(worst, s / 64)
-    return mean, worst
 
 
 def timeline(child, start, plan, pad, cap):
@@ -369,6 +391,9 @@ def run_direct(sc, folder):
 
 # ---- the relaunch scenario: no arguments, fci.ini beside the executables, window checks ----
 user32 = ctypes.windll.user32
+# The game is per-monitor DPI aware; measured from an unaware process its client size is scaled down
+# and a grab copies only that corner. PER_MONITOR_AWARE_V2 is -4; a no-op where unsupported.
+user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
 WNDENUM = ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
 
 
@@ -503,17 +528,17 @@ def flow_timeline(sc, folder, start, child, frames, windows):
     return child.poll()
 
 
-def cache_time_problems(cache, disc):
-    """the game's copies in its Z: cache against the disc files: the game copies again when the times differ"""
-    originals = {p.name.lower(): p for p in disc.glob("*.ss2")} if disc.is_dir() else {}
+def cache_time_problems(cache, text):
+    """the game's copies in its Z: cache carry the disc's one time (the run logs it), or the game copies
+    them again on the next boot"""
+    m = re.search(r"\[FCI\] disc time ([0-9A-F]+)", text)
+    if not m:
+        return ["no disc time in the log"]
+    disc_ns = (int(m.group(1), 16) - 116444736000000000) * 100  # FILETIME to Unix nanoseconds
     copies = sorted(cache.glob("*.ss2")) if cache.is_dir() else []
     if not copies:
         return [f"no cache copies in {cache}"]
-    return [
-        f"cache copy {c.name} has another time than the disc's"
-        for c in copies
-        if c.name.lower() in originals and c.stat().st_mtime_ns != originals[c.name.lower()].stat().st_mtime_ns
-    ]
+    return [f"cache copy {c.name} has another time than the disc's" for c in copies if c.stat().st_mtime_ns != disc_ns]
 
 
 def check(name, sc, result, folder, bless):
@@ -533,7 +558,15 @@ def check(name, sc, result, folder, bless):
         if text.count(needle) < count:
             problems.append(f"log line {needle!r} seen {text.count(needle)} times, {count} expected")
     if sc.get("cache_times"):
-        problems += cache_time_problems(folder / "save" / "Cache" / "sounds_xb", GAME_DIR / "sounds_xb")
+        problems += cache_time_problems(folder / "save" / "Cache" / "sounds_xb", text)
+    for a, b in sc.get("same_frames", []):  # frames of this run that must match each other
+        if a >= len(result["frames"]) or b >= len(result["frames"]):
+            problems.append(f"same_frames {a}/{b}: only {len(result['frames'])} frames captured")
+            continue
+        mask = block_mask(sc["block_mask"]) if "block_mask" in sc else frozenset()
+        mean, block = diff(lum_stats(result["frames"][a])[0], lum_stats(result["frames"][b])[0], mask)
+        if mean > MEAN_TOLERANCE or block > sc["block"]:
+            problems.append(f"frames {a} and {b} differ: mean {mean:.1f}, worst block {block:.1f}")
     if "windows" in result:
         w = result["windows"]
         if any(x["frames"] != 1 for x in w):
@@ -567,9 +600,11 @@ def check(name, sc, result, folder, bless):
         elif ref.exists():
             from PIL import Image
 
-            mean, block = diff(im, Image.open(ref).convert("L"))
+            mask = block_mask(sc["block_mask"]) if "block_mask" in sc else frozenset()
+            mean, block = diff(im, Image.open(ref).convert("L"), mask)
             limit = sc.get("mean", MEAN_TOLERANCE)
-            notes.append(f"frame {i} mean {mean:.1f} (<= {limit}), worst block {block:.1f} (<= {sc['block']})")
+            masked = f", {len(mask)} blocks masked" if mask else ""
+            notes.append(f"frame {i} mean {mean:.1f} (<= {limit}), worst block {block:.1f} (<= {sc['block']}){masked}")
             if mean > limit or block > sc["block"]:
                 problems.append(f"frame {i} differs from its reference: mean {mean:.1f}, worst block {block:.1f}")
         else:

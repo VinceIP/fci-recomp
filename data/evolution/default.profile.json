@@ -80,10 +80,70 @@
     "sub_0012D981": [
       "prehook",
       "called by the movement handler 0012C298 (ebx = vehicle): RECOMP_FCI_VEHTRACE (fci_vehdiag.c)"
-    ]
+    ],
+    "sub_003CFAEA": [
+      "prehook",
+      "XNetCreateKey (Instincts' 0051C5EA, research qwen/notes/q5-hosting-hook.md): only a host creates a key; RegisterKey also runs on a joining guest here. The worker thread registers with the host list (fci_net_worker.c)",
+      "0051C5EA"
+    ],
+    "sub_003D02D4": [
+      "prehook",
+      "XNetRegisterKey (Instincts' 0051CDD4): logs the session key; a host or a joining guest is in a System Link match (fci_net_worker.c)",
+      "0051CDD4"
+    ],
+    "sub_00063F01": [
+      "prehook",
+      "the CEntity constructor (the entity is the first stack argument; it stores the vtable 004B04E8 at recomp_0010.c:7114): registers the entity with RECOMP_FCI_TELEMETRY (fci_telemetry.c)"
+    ],
+    "sub_000648E7": [
+      "prehook",
+      "the CEntity destructor body (ecx = the entity; called by the deleting destructor sub_000648B4, the vtable 004B04E8's first slot): unregisters it from RECOMP_FCI_TELEMETRY (fci_telemetry.c)"
+    ],
+    "sub_0004ABC6": [
+      "gate",
+      "per-frame join driver (recomp_0006.c:30575): refreshes the Internet browser's empty row before running the original state machine (fci_lan_menu.c)"
+    ],
+    "sub_000CF7EE": ["gate", "set the native browser title at the System Link call site (fci_lan_menu.c)"],
+    "sub_000FE553": ["gate", "render host-list status on the browser page (fci_lan_menu.c)"],
+    "sub_00119C3D": ["gate", "the Controller Options screen's fill (screen; ret 4), as Instincts' 00182570: adds the control settings, and the DISPLAY AND GRAPHICS row where no GRAPHICS button reaches the page (fci_settings_menu.c)"],
+    "sub_00118B88": ["gate", "Controller Options' show (ecx screen, 1 argument; ret 4), as Instincts' 00181F70: the display and graphics page gets its title and help line after the screen's labels (fci_settings_menu.c)"],
+    "sub_00042BA9": ["gate", "the save writer's room-maker (object, profile folder, new name on the stack), as Instincts' 00056320: from the menu, keeps a level file its checkpoint needs by setting its time past the checkpoint's (fci_saves.c)"],
+    "sub_00123C3D": ["gate", "the profile screen's buttons (eax event, screen on the stack), as Instincts' 001937B0: the added GRAPHICS button opens Controller Options showing the display and graphics page (fci_settings_menu.c)"],
+    "sub_000F9C7C": ["gate", "the pause menu's Options buttons (eax event, ecx screen; ret), as Instincts' 0014CEB0: the added GRAPHICS button opens Controller Options showing the display and graphics page (fci_settings_menu.c)"],
+    "sub_000FDC7B": ["gate", "A on an option list's row (eax = event, ecx = list; ret), as Instincts' 00152AF0: the DISPLAY AND GRAPHICS row opens that page; changes are applied and saved (fci_settings_menu.c)"],
+    "sub_000FD74D": ["gate", "an option list's rows from its options ((list); ret 4), as Instincts' 00152510: a value picked in the popup is applied and saved (fci_settings_menu.c)"],
+    "sub_000FCF84": ["gate", "COption's value index set (ecx = option, index; ret 4), as Instincts' 00151AB0: our rows apply, save and show the new value (fci_settings_menu.c)"],
+    "sub_000FD37D": ["gate", "the value popup's input (ecx, 2 arguments; ret 8), as Instincts' 00151FD0: the GRAPHICS title is put back after it (fci_settings_menu.c)"],
+    "sub_000FB0A2": [
+      "gate",
+      "the pre-game multiplayer action dispatcher (recomp_0023.c:27569; it tests B_SystemLink before B_Live and re-reads the hash in each): in menu mode, SYSTEM LINK starts LAN, XBOX LIVE starts the host list and is rewritten to B_SystemLink (fci_lan_menu.c)"
+    ],
+    "sub_0005022C": ["prehook", "the UI input manager's router (ecx the manager, its vtable slot 1; the function table at 004AF750 gives 0005022C-000508CF), as Instincts' 000675B0; its popup root is +0x24 (FCI_VKB_MODAL): typing stops under a popup (fci_vkb.c)", "000675B0"],
+    "sub_000D0750": ["prehook", "the on-screen keyboard's open, as Instincts' 0010B500: typing starts (fci_vkb.c)", "0010B500"],
+    "sub_000D07EC": ["prehook", "the on-screen keyboard's close, as Instincts' 0010B5E0: typing stops (fci_vkb.c)", "0010B5E0"],
+    "sub_004048C9": ["prehook", "the shared perspective matrix builder (param2 = vertical FOV in radians, at g_esp+8): display-aspect scales the aspect; display-fov is applied at the camera instead (fci_fov.c, Instincts 005514C9)", "005514C9"],
+    "sub_001F1DA9": ["prehook", "the camera update (edi the camera, FOV in radians at +0x38, frustum extents +0x388..+0x3A8; calls the builder at 001F1EFF): display-fov scales the field when Camera_BuildViews (000B8CF5) calls it, so projection and culling agree (fci_fov.c, Instincts 002A84E0)", "002A84E0"]
   },
   "evidence": "Exploratory Evolution profile: descriptor helper by masked bytes (unique match); code end = BINKDATA end (as Instincts' 0070C6E4).",
   "constants": {
+    "FCI_VKB_OBJECT": [
+      "0x0056ADCC",
+      "the virtual keyboard object's pointer, read by its methods (fci_vkb.c, re/notes/KEYBOARD.md)"
+    ],
+    "FCI_VKB_INSERT": ["0x00000000", "Evolution takes the string on the stack instead (FCI_VKB_CHAR)"],
+    "FCI_VKB_CHAR": ["0x000D0DFB", "insert a string at the cursor (X's space): eax keyboard, the string on the stack"],
+    "FCI_VKB_DELETE": ["0x000D0E83", "the keyboard's delete (Y): eax keyboard"],
+    "FCI_VKB_A": ["0x000D0C0B", "the keyboard's A: eax keyboard; accepts with the wheel on its first slot"],
+    "FCI_VKB_BACK": ["0x000D0940", "the keyboard's back (B): esi keyboard"],
+    "FCI_VKB_MODAL": ["0x00000024", "the UI input manager's popup root (Instincts +0x20; read at 000506CE in its router 00050440): typing stops under a popup (fci_vkb.c)"],
+    "FCI_AIM_SETTINGS": [
+      "0x0056B594",
+      "the console settings object: sub_00030CB2's aim assist gate reads cl_aimingHelper through it each frame (recomp_0003.c:17527)"
+    ],
+    "FCI_AIM_HELPER_SLOT": [
+      "0x000000A0",
+      "cl_aimingHelper's cvar in the settings object (registered with name 004AD9A4, stored at +0xA0)"
+    ],
     "FCI_GAMEVIEW_INPUT": [
       "0x000008C8",
       "the view's ViewInput block: Camera_BuildViews passes view+0x8C8 to Player_ProcessInput (000B9056)"
@@ -91,6 +151,34 @@
     "FCI_GAME_TIMER": [
       "0x0056CCC8",
       "the engine timer, as Instincts' 00644488: the game update (0017E185) updates it (001801EB), takes its frame time (00180281, the double at +0x68) and hands it and the clock (+0x28) to the scripts as _frametime and _time (0018FA11)"
+    ],
+    "FCI_TELEMETRY_ENTITY_VTABLE": [
+      "0x004B04E8",
+      "the CEntity vtable: all four player CEntities in the Q20 sync dumps carry it (re/notes/q20 §10); also the vtable Player_ProcessInput dispatches through (sub_00075C3E)"
+    ],
+    "FCI_TELEMETRY_PLAYER_VTABLE": [
+      "0x004AA7E0",
+      "the CPlayer vtable: a player CEntity's CPlayer back-ref (+0x4) carries it; filters player entities from the rest"
+    ],
+    "FCI_TELEMETRY_ENTITY_ID": [
+      "0x000001E0",
+      "CEntity::m_nID (build/fc1-src/CryEntitySystem/Entity.h:746): 2 host / 3 joiner, the same on both instances (re/notes/q20 §10)"
+    ],
+    "FCI_TELEMETRY_ENTITY_PLAYER": [
+      "0x00000004",
+      "the CEntity's CPlayer back-ref: points to the CPlayer (vtable 004AA7E0) for a player entity; CPlayer+0x23C points back (re/notes/q20 §10)"
+    ],
+    "FCI_TELEMETRY_ENTITY_ANG": [
+      "0x00000220",
+      "CEntity::m_angles: the orientation in degrees (yaw), consistent to within 0.01° on both instances (re/notes/q20 §10)"
+    ],
+    "FCI_TELEMETRY_PLAYER_FOOT": [
+      "0x0000034C",
+      "the CPlayer's foot position: the member comparable across instances (the owner's m_center is the bounding-box centre, foot + ~1.44 m Z; re/notes/q20 §10)"
+    ],
+    "FCI_TELEMETRY_CLOCK": [
+      "0x003CC868",
+      "the process-local tick counter at the same address in both instances, rising ~80/s (re/notes/q20 §9)"
     ]
   }
 }

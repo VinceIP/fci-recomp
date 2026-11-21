@@ -15,6 +15,8 @@
 
 extern void xbe_entry_point(void);
 extern void xbox_path_init(const char *game_dir, const char *save_dir);
+/* Declared in the toolkit's kernel.h (patch 0026); re-declared so the unpatched sandbox check compiles. */
+extern void xbox_SetDiscTime(unsigned long long filetime);
 
 static void dump_guest(const char *why)
 {
@@ -65,6 +67,11 @@ int xbox_OhciOwnsAddress(uint32_t xbox_va);
 int xbox_OhciHandleMmio(void *ctx, uint32_t xbox_va);
 void xbox_InputInit(void);
 
+/* the network card: registers, rings and interrupt, and the hub link of RECOMP_FCI_NET (fci_nic.c) */
+int fci_nic_init(ptrdiff_t mem_offset);
+int fci_nic_owns(uint32_t va);
+int fci_nic_mmio(void *ctx, uint32_t va);
+
 static LONG CALLBACK fci_veh(PEXCEPTION_POINTERS ep)
 {
     DWORD code = ep->ExceptionRecord->ExceptionCode;
@@ -89,6 +96,8 @@ static LONG CALLBACK fci_veh(PEXCEPTION_POINTERS ep)
             return EXCEPTION_CONTINUE_EXECUTION;
         if (xbox_OhciOwnsAddress(va) && xbox_OhciHandleMmio(ep->ContextRecord, va))
             return EXCEPTION_CONTINUE_EXECUTION; /* USB host controllers (RECOMP_USB) */
+        if (fci_nic_owns(va) && fci_nic_mmio(ep->ContextRecord, va))
+            return EXCEPTION_CONTINUE_EXECUTION;
     }
     if (code == EXCEPTION_ACCESS_VIOLATION || code == EXCEPTION_ILLEGAL_INSTRUCTION
         || code == EXCEPTION_INT_DIVIDE_BY_ZERO || code == EXCEPTION_STACK_OVERFLOW
@@ -132,6 +141,24 @@ static int load_file(const char *path, void **data, size_t *size)
  * fci-kinit.dll is a real image laid out that way, and its loaded header is copied there unchanged. */
 void fci_cpu_init(void);
 void fci_disk_init(const char *save_dir);
+void fci_pak_log_init(void);
+void fci_menu_log_init(void);
+void fci_exit_wait(void); /* fci_exit.c: a user exit waits for a save to finish */
+
+/* Closing the console window ends the process: wait (bounded) for a save in flight first, so the
+ * console does not end it between a save's file writes. Ctrl+Break and Ctrl+C keep the system's
+ * behaviour. */
+static BOOL WINAPI fci_console_ctrl(DWORD type)
+{
+    if (type == CTRL_CLOSE_EVENT || type == CTRL_SHUTDOWN_EVENT) {
+        extern void fci_net_leave(void);
+        fci_exit_wait();
+        fci_net_leave(); /* then leave the host list: the process ends on return */
+        return TRUE;
+    }
+    return FALSE;
+}
+void fci_disk_cache_heal(const char *save_dir, uint64_t disc_time);
 
 static int install_kernel_header(void)
 {
@@ -206,6 +233,7 @@ void guest_cpu_part(void);
 const char *fci_xbe_path, *fci_game_dir, *fci_save_dir;
 int fci_launch_argc;
 char **fci_launch_argv;
+uint32_t fci_xbe_version; /* the XBE certificate's Version field (the disc's version, for the host list) */
 void fci_config_load(int *argc, char ***argv); /* fci_config.c: fci.ini when started without arguments */
 
 int main(int argc, char **argv)
@@ -230,6 +258,7 @@ int main(int argc, char **argv)
     }
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
+    SetConsoleCtrlHandler(fci_console_ctrl, TRUE);
     if (argc < 4) {
         fprintf(stderr, "usage: %s <default.xbe> <game dir> <save dir> [RECOMP_*=value ...]\n", argv[0]);
         return 2;
@@ -286,6 +315,13 @@ int main(int argc, char **argv)
                 FCI_ENTRY_VA);
         return 2;
     }
+    { /* the certificate's Version field: a patched disc lists apart from another */
+        /* the certificate's address (0x118) is a VA: minus the load address (0x104) */
+        uint32_t base = *(const uint32_t *)((const char *)xbe + 0x104);
+        uint32_t cert = *(const uint32_t *)((const char *)xbe + 0x118) - base;
+        if (cert + 0xB0 <= xbe_size)
+            fci_xbe_version = *(const uint32_t *)((const char *)xbe + cert + 0xAC);
+    }
     if (!xbox_MemoryLayoutInit(xbe, xbe_size)) {
         fprintf(stderr, "[FCI] memory layout init failed\n");
         return 2;
@@ -302,6 +338,10 @@ int main(int argc, char **argv)
     if (!getenv("RECOMP_USB_PORT"))
         _putenv_s("RECOMP_USB_PORT", "2");
     xbox_OhciInit(); /* inert unless RECOMP_USB=1 */
+    if (!fci_nic_init(g_xbox_mem_offset)) {
+        fprintf(stderr, "[FCI] network card unavailable (error %lu)\n", GetLastError());
+        return 2;
+    }
     fprintf(stderr, "[FCI] guest memory offset %llX code [%08X,%08X)\n",
             (unsigned long long)g_xbox_mem_offset, g_xbox_code_lo, g_xbox_code_hi);
     if (!install_kernel_header())
@@ -311,6 +351,17 @@ int main(int argc, char **argv)
     xbox_SetThreadMode(XBOX_THREAD_MODE_SPAWN);
     xbox_path_init(argv[2], argv[3]);
     fci_disk_init(argv[3]);
+    fci_pak_log_init();  /* RECOMP_FCI_PAK_LOG (fci_disk.c): trace pak lookups and .dat reads */
+    fci_menu_log_init(); /* RECOMP_FCI_MENU_LOG (fci_menu.c): trace menu action dispatch */
+    {
+        /* Fixed disc time = the XBE TimeDate (0x114, UNIX s); heal a Z: cache stamped under a
+         * different time. Why: research/docs/internals.md (Disk and saves). */
+        uint32_t unix_ts = *(const uint32_t *)((const uint8_t *)xbe + 0x114);
+        uint64_t disc_ft = (uint64_t)(unix_ts + 11644473600ull) * 10000000ull;
+        xbox_SetDiscTime((ULONGLONG)disc_ft);
+        fci_disk_cache_heal(argv[3], disc_ft);
+        fprintf(stderr, "[FCI] disc time %016llX (XBE unix %u)\n", (unsigned long long)disc_ft, unix_ts);
+    }
     xbox_kernel_bridge_init();
     { /* XeImageFileName names the image compiled into this process */
         const char name[] = "\\Device\\CdRom0\\" FCI_IMAGE_FILENAME;
@@ -343,6 +394,10 @@ int main(int argc, char **argv)
         extern void fci_xbr_init(void);
         fci_xbr_init();
     }
+    {
+        extern void fci_saves_repair(void);
+        fci_saves_repair(); /* a profile a level start damaged before this build signs in again */
+    }
     fprintf(stderr, "[FCI] entering original entry %08X esp=%08X\n", FCI_ENTRY_VA, g_esp);
     xbox_WatchdogStart(); /* inert unless RECOMP_WATCHDOG_SECS is given */
     fci_watchdog_start(); /* inert unless RECOMP_FCI_WATCHDOG is given */
@@ -360,6 +415,10 @@ int main(int argc, char **argv)
         extern void fci_status_start(void);
         fci_memdump_start(); /* inert unless RECOMP_FCI_MEMDUMP is given */
         fci_status_start();  /* inert unless RECOMP_FCI_STATUS is given */
+    }
+    {
+        extern void fci_telemetry_start(void);
+        fci_telemetry_start(); /* inert unless RECOMP_FCI_TELEMETRY is given (Evolution only) */
     }
     fci_register_guest_thread(FCI_ENTRY_VA, 0);
     guest_cpu_join(); /* the entry is a guest thread too */

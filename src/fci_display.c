@@ -1,17 +1,95 @@
-/* Display options for the kernel's EEPROM and the host renderer: RECOMP_FCI_ASPECT=16:9 is the console's
- * widescreen setting (re/notes/DISPLAY.md); RECOMP_FCI_WINDOW=<w>x<h> the window size. */
+/* Display options for the kernel's EEPROM and the host renderer: RECOMP_FCI_ASPECT the console's
+ * widescreen setting (re/notes/DISPLAY.md), RECOMP_FCI_WINDOW=<w>x<h> the window size. The host's
+ * effective display aspect A (the configured aspect, or for auto the window's client aspect re-read on
+ * resize) is fci_host_aspect in fci_xbr_glue.cpp; the guest is told 16:9 widescreen for any A > 4:3. */
+#include <math.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "fci_display.h"
+
+/* the guest is told 16:9 widescreen for any host aspect above 4:3, 4:3 otherwise: A comes from the
+ * window (fci_host_aspect, fci_xbr_glue.cpp), so auto follows the window's client aspect */
 int fci_aspect_wide(void)
 {
     static int wide = -1;
-    if (wide < 0) {
-        const char *e = getenv("RECOMP_FCI_ASPECT");
-        wide = e && (!strcmp(e, "16:9") || !strcmp(e, "16x9") || !strcmp(e, "16/9"));
-    }
+    if (wide < 0)
+        wide = fci_host_aspect() > 4.0f / 3.0f;
     return wide;
+}
+
+/* RECOMP_FCI_ASPECT as a float: the configured 4:3/16:9/16:10/21:9/32:9, 0 for auto (the window's
+ * client aspect, fci_host_aspect); unset is 4:3, the original, as before the wider aspects */
+float fci_display_aspect(void)
+{
+    static float a = -1.0f;
+    if (a < 0.0f) {
+        const char *e = getenv("RECOMP_FCI_ASPECT");
+        a = 4.0f / 3.0f;
+        if (e) {
+            if (!strcmp(e, "auto"))
+                a = 0.0f;
+            else if (!strcmp(e, "4:3"))
+                a = 4.0f / 3.0f;
+            else if (!strcmp(e, "16:9"))
+                a = 16.0f / 9.0f;
+            else if (!strcmp(e, "16:10"))
+                a = 16.0f / 10.0f;
+            else if (!strcmp(e, "21:9"))
+                a = 21.0f / 9.0f;
+            else if (!strcmp(e, "32:9"))
+                a = 32.0f / 9.0f;
+        }
+    }
+    return a;
+}
+
+/* the display-aspect ini value normalised to one of 4:3/16:9/16:10/21:9/32:9/auto: the WxH and W/H
+ * spellings are folded to W:H first; 1 when the value is one of these, 0 otherwise */
+int fci_normalize_aspect(const char *value, char *out, size_t size)
+{
+    static const char *const names[] = {"4:3", "16:9", "16:10", "21:9", "32:9", "auto"};
+    char v[16];
+    size_t n, i;
+    if (!value || !*value || size == 0)
+        return 0;
+    n = strlen(value);
+    if (n >= sizeof v)
+        n = sizeof v - 1;
+    for (i = 0; i < n; i++) {
+        char c = value[i];
+        v[i] = (c == 'x' || c == 'X' || c == '/') ? ':' : c;
+    }
+    v[n] = 0;
+    /* the values before the wider aspects: 0 the original 4:3, 1 16:9 */
+    if (!strcmp(v, "0") || !strcmp(v, "1")) {
+        snprintf(out, size, "%s", v[0] == '1' ? "16:9" : "4:3");
+        return 1;
+    }
+    if ((v[0] | 0x20) == 'a' && (v[1] | 0x20) == 'u' && (v[2] | 0x20) == 't' && (v[3] | 0x20) == 'o'
+        && !v[4]) {
+        snprintf(out, size, "auto");
+        return 1;
+    }
+    for (i = 0; i < sizeof names / sizeof names[0]; i++)
+        if (!strcmp(v, names[i])) {
+            snprintf(out, size, "%s", names[i]);
+            return 1;
+        }
+    return 0;
+}
+
+/* the HUD remap (sx, sy, ax, ay) at a host aspect A between 4:3 and 16:9 (16:10): the guest's 16:9 layout
+ * fitted to the width, y scaled by A/(16/9) about the middle. One transform for every draw: a per-draw
+ * anchor split strings drawn a glyph at a time (backlog 73) */
+void fci_hud_fit(float a, float *sx, float *sy, float *ax, float *ay)
+{
+    *sx = 1.0f;
+    *sy = a / (16.0f / 9.0f);
+    *ax = 0.0f;
+    *ay = 240.0f;
 }
 
 /* EEPROM XC_VIDEO as the dashboard stores it: video flags in the high word (0x00010000 widescreen,

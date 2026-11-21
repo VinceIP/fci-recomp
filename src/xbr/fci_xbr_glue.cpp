@@ -39,21 +39,30 @@ uint32_t xbox_HeapAlloc(uint32_t size, uint32_t alignment);
 void xbox_HeapFree(uint32_t xbox_va);
 void fci_guest_event(uint32_t guest_va, int set);
 int fci_guest_host_thread_init(void);
+unsigned long fci_nic_link_state(void);   // nonzero while the network card has a hub or peers (fci_nic.c)
+int fci_nic_transport_active(void);       // 1 while the card has any transport up (fci_nic.c)
 int guest_cpu_interrupt_enter(void);
 void guest_cpu_interrupt_leave(int);
 void fci_framebuffer_key(int vk, int down);   // keyboard pad, fci_nv2a.c
 // mouse and keyboard as the controller (fci_input.c)
 void fci_input_key(int code, int down);
 void fci_input_release_all(void);
+// typing into the game's on-screen keyboard (fci_vkb.c)
+int fci_vkb_key(int vk);
+void fci_vkb_char(unsigned c);
 void fci_input_wheel(int notches);
 void fci_input_mouse_move(int dx, int dy);
 int fci_input_capture_enabled(void);
 void fci_input_set_captured(int on);
 int fci_input_captured(void);
 int fci_guest_set_event_handle(uint32_t token);
-int fci_aspect_wide(void);                        // fci_display.c: RECOMP_FCI_ASPECT=16:9
+int fci_aspect_wide(void);                        // fci_display.c: the guest is told 16:9 for any A > 4:3
+float fci_display_aspect(void);                   // fci_display.c: RECOMP_FCI_ASPECT as a float, 0 for auto
 int fci_window_size(uint32_t* w, uint32_t* h);    // fci_display.c: RECOMP_FCI_WINDOW
 void fci_log_session_end(void);                   // fci_config.c: a clean exit, for the log
+void fci_net_leave(void);                         // fci_net_worker.c: leave the host list on a clean exit
+void fci_exit_begin(void);                        // fci_exit.c: the user exit waits for a save to finish
+int fci_exit_ready(void);                         // fci_exit.c: 1 when the process may end
 extern const char *fci_xbe_path, *fci_game_dir;   // fci_main.c: from the arguments or fci.ini
 }
 
@@ -286,10 +295,22 @@ namespace {
 // which overlays such as NVIDIA's follow. A render window inside the frame takes the device.
 HWND g_window = nullptr;   // this instance's render window
 HWND g_frame = nullptr;    // this instance's frame
+
+// the window's client aspect for auto, updated on WM_SIZE and at creation; 0 before the window exists
+static std::atomic<float> g_window_aspect{0.0f};
+static void UpdateWindowAspect(HWND w)
+{
+    RECT c;
+    if (w && GetClientRect(w, &c) && c.right > 0 && c.bottom > 0)
+        g_window_aspect.store(float(c.right) / float(c.bottom), std::memory_order_relaxed);
+}
 DWORD g_window_thread = 0;
+std::wstring g_title_base;                // the window title without the fps (FpsReadout)
 bool g_alt_enter = true;                  // RECOMP_FCI_ALT_ENTER=0: no fullscreen toggle
 constexpr UINT kMsgToggle = WM_APP + 1;   // render window to frame: Alt+Enter
 constexpr UINT kMsgLeave = WM_APP + 2;    // fci_window_handoff: the render window goes
+constexpr UINT kMsgFps = WM_APP + 3;      // renderer to frame: the fps for the title (-1: none)
+constexpr UINT_PTR kExitTimer = 1;        // the frame's poll while a user exit waits for a save (fci_exit.c)
 constexpr int kClientW = 1280, kClientH = 960;
 
 bool Option(const char* name, bool fallback) { return OptionFlag(name, fallback); }
@@ -360,6 +381,7 @@ LRESULT CALLBACK FrameProc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
     case WM_SIZE: {
         RECT r;
         GetClientRect(w, &r);
+        UpdateWindowAspect(w);
         EnumChildWindows(w, FitChild, reinterpret_cast<LPARAM>(&r));
         return 0;
     }
@@ -369,9 +391,31 @@ LRESULT CALLBACK FrameProc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
     case kMsgToggle:
         ToggleFullscreen(w);
         return 0;
+    case WM_DPICHANGED: {   // moved to a monitor with other scaling: take the size Windows suggests for it
+        const RECT* r = reinterpret_cast<const RECT*>(lp);
+        if (GetWindowLongW(w, GWL_STYLE) & WS_POPUP)
+            return 0;   // fullscreen: ToggleFullscreen sizes it to the monitor
+        SetWindowPos(w, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+        return 0;
+    }
+    case kMsgFps: {   // set here: SetWindowText from the render thread would wait on this thread
+        std::wstring t = g_title_base;
+        if (int(wp) >= 0)
+            t += L" (" + std::to_wstring(int(wp)) + L" fps)";
+        SetWindowTextW(w, t.c_str());
+        return 0;
+    }
     case WM_CLOSE:   // the session ends: the first instance waits for this one's job to empty
         fci_log_session_end();
-        TerminateProcess(GetCurrentProcess(), 0);
+        fci_exit_begin();
+        SetTimer(w, kExitTimer, 10, nullptr);   // fci_exit_ready ends the process, bounded
+        return 0;
+    case WM_TIMER:
+        if (wp == kExitTimer && fci_exit_ready()) {
+            fci_net_leave();   // leave the host list: TerminateProcess skips every handler, so this is the only chance
+            TerminateProcess(GetCurrentProcess(), 0);
+        }
         return 0;
     }
     return DefWindowProcW(w, msg, wp, lp);
@@ -421,8 +465,17 @@ LRESULT CALLBACK WindowProc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
     switch (msg) {
     case WM_KEYDOWN:
     case WM_KEYUP:
+        if (msg == WM_KEYDOWN && fci_vkb_key(int(wp)))
+            return 0;                                             // typing into the on-screen keyboard
+        if (msg == WM_KEYDOWN && wp == VK_F11 && g_alt_enter) {   // F11 toggles fullscreen, as Alt+Enter
+            PostMessageW(g_frame, kMsgToggle, 0, 0);
+            return 0;
+        }
         fci_framebuffer_key(int(wp), msg == WM_KEYDOWN);
         fci_input_key(SpecificKey(wp, lp), msg == WM_KEYDOWN);
+        return 0;
+    case WM_CHAR:
+        fci_vkb_char(unsigned(wp));
         return 0;
     case WM_SYSKEYDOWN:
     case WM_SYSKEYUP:
@@ -510,7 +563,22 @@ LRESULT CALLBACK WindowProc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
 }
 }   // namespace
 
-const GameInfo kGame{nullptr};
+// the fps in the window title (RECOMP_FCI_SHOW_FPS=1): the backend has no text path (no ImGui,
+// FCI_XBR_IMGUI=0, no font renderer), so the title carries the readout instead of a drawn overlay
+void FpsReadout(double fps)
+{
+    if (!g_frame)
+        return;
+    static int shown = -2;
+    int on = Option("RECOMP_FCI_SHOW_FPS", false) ? 1 : 0;
+    int v = on ? int(fps) : -1;
+    if (v == shown)
+        return;
+    shown = v;
+    PostMessageW(g_frame, kMsgFps, WPARAM(v), 0);
+}
+
+const GameInfo kGame{FpsReadout};
 
 // Graphics options (fci_gfx.h) are read again when they change. RECOMP_FCI_XBR_NO_PRESENT_WAIT=1 (tests)
 // drops a frame the compositor cannot take now: with the display asleep it would wait hundreds of ms.
@@ -522,6 +590,7 @@ Settings& Get()
     if (gen.load(std::memory_order_relaxed) != now) {
         int n = int(fci_gfx::Number("RECOMP_FCI_XBR_ANISO", 0));
         s.aniso = n >= 2 ? uint32_t(std::min(n, 16)) : 0;
+        s.vsync = Option("RECOMP_FCI_VSYNC", true);   // display-vsync: 0 = no present wait
         s.present_never_waits = Option("RECOMP_FCI_XBR_NO_PRESENT_WAIT", false);
         gen.store(now, std::memory_order_relaxed);
     }
@@ -529,10 +598,23 @@ Settings& Get()
 }
 
 // the title asked for a widescreen display (CreateDevice: D3DPRESENTFLAG_WIDESCREEN, which FCI sets when
-// RECOMP_FCI_ASPECT=16:9 reaches it through XGetVideoFlags, fci_display.c): its 4:3 buffer is shown at 16:9
+// the display aspect is wide, fci_display.c): its 4:3 buffer is shown at 16:9
 std::atomic<bool> g_widescreen{false};
 void SetWidescreen(bool on) { g_widescreen = on; }
 bool Widescreen() { return g_widescreen; }
+
+// the host's effective display aspect A: the configured 4:3/16:9/16:10/21:9/32:9, or for auto the window's
+// client aspect (cached), clamped to >= 4:3. The guest is told 16:9 widescreen for any A > 4:3
+extern "C" float fci_host_aspect(void)
+{
+    float a = fci_display_aspect();
+    if (a > 0.0f)
+        return a;
+    a = g_window_aspect.load(std::memory_order_relaxed);
+    if (a <= 0.0f)
+        a = 16.0f / 9.0f;   // no window yet
+    return a < 4.0f / 3.0f ? 4.0f / 3.0f : a;
+}
 
 // The render scale per axis: RECOMP_FCI_XBR_SCALE=auto follows the shown picture's size, <n> (0.25 to 4)
 // is n times the console's lines with the columns the aspect needs; above the window size it supersamples.
@@ -550,7 +632,7 @@ void RenderScale(uint32_t guest_w, uint32_t guest_h, float& sx, float& sy)
         sx = sy = 1;
         return;
     }
-    float aspect = Widescreen() ? 16.0f / 9.0f : 4.0f / 3.0f;
+    float aspect = fci_host_aspect();
     if (fixed == 0) {
         static float last_w = 0;
         RECT c;
@@ -611,6 +693,7 @@ void* Window()
             bool editor = fci_xbe_path && std::strstr(fci_xbe_path, "ige.xbe");
             const wchar_t* title = editor ? L"" FCI_TITLE_NAME " Map Editor (recompiled)"
                                           : L"" FCI_TITLE_NAME " (recompiled)";
+            g_title_base = title;
             // the previous instance's frame (a relaunch): this one takes its place, then hides it
             const char* fe = std::getenv("RECOMP_FCI_FRAME");
             HWND prev = fe ? reinterpret_cast<HWND>(uintptr_t(std::strtoull(fe, nullptr, 16))) : nullptr;
@@ -623,7 +706,8 @@ void* Window()
             uint32_t cw = 0, ch = 0;
             if (!fci_window_size(&cw, &ch)) {
                 ch = uint32_t(work.bottom - work.top);
-                cw = fci_aspect_wide() ? ch * 16 / 9 : ch * 4 / 3;
+                // the display aspect (16:9 for auto before the window)
+                cw = uint32_t(ch * fci_host_aspect());
             }
             float fit = std::min(
                     {1.0f, float(work.right - work.left - 32) / cw, float(work.bottom - work.top - 64) / ch});
@@ -656,6 +740,7 @@ void* Window()
             GetClientRect(frame, &c);
             g_window = CreateWindowExW(0, wc.lpszClassName, L"", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS, 0,
                                        0, c.right, c.bottom, frame, nullptr, inst, nullptr);
+            UpdateWindowAspect(g_window);
             if (!background)
                 SetFocus(g_window);
             {   // raw mouse motion, delivered while the game is in front (checked per message)
@@ -696,17 +781,30 @@ void Pace()
     static int unlock = -1;
     static double fps;
     static LARGE_INTEGER freq, next;
+    static int linked_logged = 0;
     if (unlock < 0) {
         unlock = OptionFlag("RECOMP_FCI_XBR_UNLOCK", false);
         const char* f = std::getenv("RECOMP_FCI_XBR_FPS");
         fps = f ? std::atof(f) : 0.0;
         QueryPerformanceFrequency(&freq);
     }
+    // multiplayer runs the Xbox's 30 updates while a transport is up (physics and AI depend on the rate);
+    // checked every frame, so a link started from the menu catches it and leaving it gives the rate back
+    const bool linked = fci_nic_transport_active() && (unlock || fps > 0);
+    if (linked != (linked_logged == 1)) {
+        std::fprintf(stderr,
+                     linked ? "[FCI] network: the game keeps its own 30 frames a second while linked; "
+                              "RECOMP_FCI_XBR_REPLAY still shows more\n"
+                            : "[FCI] network: link down; the frame rate setting applies again\n");
+        linked_logged = linked ? 1 : 2;
+    }
+    const int unlock_now = linked ? 0 : unlock;
+    const double fps_now = linked ? 0.0 : fps;
     uint32_t blanks = g_interval & 0xF;
-    if (unlock || (fps <= 0 && blanks < 2))
+    if (unlock_now || (fps_now <= 0 && blanks < 2))
         return;   // 0 and 1 blanks: the display's own refresh paces it
-    LONGLONG period = fps > 0 ? LONGLONG(double(freq.QuadPart) / fps)
-                              : freq.QuadPart * blanks * 1001 / 60000;   // NTSC blanks
+    LONGLONG period = fps_now > 0 ? LONGLONG(double(freq.QuadPart) / fps_now)
+                                  : freq.QuadPart * blanks * 1001 / 60000;   // NTSC blanks
     LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
     if (!next.QuadPart || now.QuadPart > next.QuadPart + period) {

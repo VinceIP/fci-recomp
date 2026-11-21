@@ -1,0 +1,121 @@
+Subject: File paths stay inside the game and save folders
+
+A guest path was joined to the game or save folder as written, so a ".." in it left the folder, and a
+path no rule matched (another drive letter, a bare "\Textures_xbox\...") was opened on the host as it
+stood. Guest paths can carry names from the network: a map downloaded from a System Link host is saved
+under a folder named by the host. Now a translated path must still lie inside its folder once Windows
+has resolved it (no "..", stream or device name such as CON), a path relative to an open directory must stay inside
+that directory, and an unmatched path is not found, as on a console. Refusals are logged.
+
+---
+diff --git a/src/kernel/kernel_file.c b/src/kernel/kernel_file.c
+index 1d908e7..a504048 100644
+--- a/src/kernel/kernel_file.c
++++ b/src/kernel/kernel_file.c
+@@ -114,6 +114,8 @@ static DWORD xbox_share_to_win32(ULONG Share)
+     return result;
+ }
+ 
++BOOL xbox_path_confined(const WCHAR *host_path, const WCHAR *base); /* kernel_path.c */
++
+ /* Translate an Xbox OBJECT_ATTRIBUTES path to a Win32 wide path */
+ static BOOL translate_obj_path(PXBOX_OBJECT_ATTRIBUTES ObjectAttributes,
+                                WCHAR* win_path, DWORD buf_size)
+@@ -130,7 +132,18 @@ static BOOL translate_obj_path(PXBOX_OBJECT_ATTRIBUTES ObjectAttributes,
+         if (win_path[used - 1] != L'\\') win_path[used++] = L'\\';
+         int count = MultiByteToWideChar(CP_ACP, 0, xbox_path, -1,
+             win_path + used, (int)(buf_size - used));
+-        return count != 0;
++        if (!count)
++            return FALSE;
++        {   /* the child stays inside the directory; GetFullPathName leaves "\\?\" paths alone, so drop it */
++            WCHAR root[MAX_PATH];
++            int skip = !wcsncmp(win_path, L"\\\\?\\", 4) ? 4 : 0;
++            wcsncpy_s(root, MAX_PATH, win_path, used);
++            if (!xbox_path_confined(win_path + skip, root + skip)) {
++                xbox_log(XBOX_LOG_WARN, XBOX_LOG_FILE, "Xbox path leaves its folder, refused: %s", xbox_path);
++                return FALSE;
++            }
++        }
++        return TRUE;
+     }
+     return xbox_translate_path(xbox_path, win_path, buf_size);
+ }
+diff --git a/src/kernel/kernel_path.c b/src/kernel/kernel_path.c
+index 77e1f7a..18991ae 100644
+--- a/src/kernel/kernel_path.c
++++ b/src/kernel/kernel_path.c
+@@ -389,7 +389,48 @@ static void xbox_remember_host_path(const wchar_t *p)
+     if (p) wcsncpy_s(s_last_host_path_shared, MAX_PATH, p, _TRUNCATE);
+ }
+ 
++/* A name Windows may take for a device (CON, NUL, COM1.txt, ...): Windows 11 resolves "dir\CON" to a
++ * path inside dir, but older systems and some APIs still open the device. */
++static BOOL xbox_path_device_name(const WCHAR *name, size_t len)
++{
++    static const WCHAR *names[] = { L"CON", L"PRN", L"AUX", L"NUL", L"CONIN$", L"CONOUT$" };
++    size_t stem = 0;
++    while (stem < len && name[stem] != L'.')
++        stem++;
++    while (stem > 0 && name[stem - 1] == L' ')
++        stem--;
++    for (int i = 0; i < 6; i++)
++        if (wcslen(names[i]) == stem && !_wcsnicmp(name, names[i], stem))
++            return TRUE;
++    return stem == 4 && (!_wcsnicmp(name, L"COM", 3) || !_wcsnicmp(name, L"LPT", 3))
++           && ((name[3] >= L'0' && name[3] <= L'9') || name[3] == 0xB9 || name[3] == 0xB2 || name[3] == 0xB3);
++}
+ 
++/* Whether a host path, once Windows has resolved "..", device names and the like, still lies inside
++ * base: guest paths can carry names from the network (a downloaded map's folder), so none may leave
++ * the game or save folder or name a stream or a device. */
++BOOL xbox_path_confined(const WCHAR *host_path, const WCHAR *base)
++{
++    WCHAR full[MAX_PATH], root[MAX_PATH];
++    DWORD n = GetFullPathNameW(host_path, MAX_PATH, full, NULL);
++    DWORD r = GetFullPathNameW(base, MAX_PATH, root, NULL);
++    const WCHAR *p;
++    if (!n || n >= MAX_PATH || !r || r >= MAX_PATH)
++        return FALSE;
++    while (r > 3 && root[r - 1] == L'\\')
++        root[--r] = L'\0';
++    if (_wcsnicmp(full, root, r) || (full[r] && full[r] != L'\\') || wcschr(full + r, L':'))
++        return FALSE;
++    for (p = full + r; *p;) {
++        const WCHAR *name = *p == L'\\' ? p + 1 : p, *end = name;
++        while (*end && *end != L'\\')
++            end++;
++        if (xbox_path_device_name(name, (size_t)(end - name)))
++            return FALSE;
++        p = end;
++    }
++    return TRUE;
++}
+ 
+ BOOL xbox_translate_path(const char* xbox_path, xbox_host_char* host_path_buf, DWORD buf_size)
+ {
+@@ -426,9 +467,9 @@ BOOL xbox_translate_path(const char* xbox_path, xbox_host_char* host_path_buf, D
+         }
+     }
+ 
+-    xbox_log(XBOX_LOG_WARN, XBOX_LOG_PATH, "Unrecognized Xbox path: %s", xbox_path);
+-    MultiByteToWideChar(CP_ACP, 0, xbox_path, -1, host_path_buf, buf_size);
+-    return TRUE;
++    /* Not a device this layer maps: as on a console, nothing to open (never a host path as written) */
++    xbox_log(XBOX_LOG_WARN, XBOX_LOG_PATH, "Unrecognized Xbox path, not found: %s", xbox_path);
++    return FALSE;
+ 
+ translate:
+     if (g_xbox_path_hook)
+@@ -467,6 +508,11 @@ translate:
+                 host_path_buf[--n] = L'\0';
+         }
+ 
++        if (!xbox_path_confined(host_path_buf, base_dir)) {
++            xbox_log(XBOX_LOG_WARN, XBOX_LOG_PATH, "Xbox path leaves its folder, refused: %s", xbox_path);
++            return FALSE;
++        }
++
+         XBOX_TRACE(XBOX_LOG_PATH, "%s -> %S", xbox_path, host_path_buf);
+         xbox_remember_host_path(host_path_buf);
+         return TRUE;

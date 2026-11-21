@@ -1,0 +1,289 @@
+Subject: Reserve the guest window so wild addresses fault inside it
+
+A guest address maps as host = g_xbox_mem_offset + (uint32)guest, so the game's whole 32-bit
+space is one 4 GB window of the host address space. On Windows only the base view, the mirrors
+and the fixed apertures are placed in it; the rest is whatever Windows has there -- the
+loader's DLLs, the heap, thread stacks -- and with the first base hint (XBOX_BASE_ADDRESS) the
+window is the host's low 4 GB. A memory bug in the game, in its network parsing for instance,
+that writes a wild 32-bit address lands in that host memory. Now the layout walks the window
+with VirtualQuery once every view and aperture is placed, and reserves each free region as
+PAGE_NOACCESS, rounded to the allocation granularity since allocations are 64 KB granular; the
+sub-64 KB slivers left at the edges of a region sit between mapped regions and no allocation
+can start inside one, so they stay unmapped. A wild address then faults inside the window
+instead of reaching host memory. Committed host regions the OS put in the window before our
+code runs are listed one line each, the writable ones at warning level: they cannot be moved,
+and failing on them would make the game unstartable on any host where the OS placed something
+in the low 4 GB. The reservations are released at shutdown, where the layout frees its own
+mappings, so a relaunch in the same process starts clean. POSIX already reserves the span.
+
+---
+diff --git a/src/kernel/guest_vmem.c b/src/kernel/guest_vmem.c
+index 24b948e..12fe02e 100644
+--- a/src/kernel/guest_vmem.c
++++ b/src/kernel/guest_vmem.c
+@@ -104,6 +104,15 @@ int guest_vmem_init(ptrdiff_t offset, uint64_t mirror_lo, uint64_t mirror_top)
+     return 1;
+ }
+ 
++int guest_vmem_range(uintptr_t *lo, uintptr_t *hi)
++{
++    if (!s_pages)
++        return 0;
++    *lo = (uintptr_t)s_lo + (uintptr_t)s_offset;
++    *hi = (uintptr_t)s_top + (uintptr_t)s_offset;
++    return 1;
++}
++
+ void guest_vmem_shutdown(void)
+ {
+     if (s_pages)
+diff --git a/src/kernel/guest_vmem.h b/src/kernel/guest_vmem.h
+index ce05198..62bf424 100644
+--- a/src/kernel/guest_vmem.h
++++ b/src/kernel/guest_vmem.h
+@@ -37,6 +37,9 @@ void guest_vmem_shutdown(void);
+ /* True once guest_vmem_init has succeeded. */
+ int guest_vmem_active(void);
+ 
++/* [lo, hi) of the host range the tracker reserved; 0 when it is not live. */
++int guest_vmem_range(uintptr_t *lo, uintptr_t *hi);
++
+ /* Each returns 0 when the request is not the tracker's (it is not live, or the
+  * address is below the mirrors' start), in which case the caller carries on
+  * with its own path. Otherwise they return 1 with *status set. */
+diff --git a/src/kernel/xbox_memory_layout.c b/src/kernel/xbox_memory_layout.c
+index 0a26aa8..ef7c91c 100644
+--- a/src/kernel/xbox_memory_layout.c
++++ b/src/kernel/xbox_memory_layout.c
+@@ -1733,6 +1733,207 @@ volatile uint32_t g_icall_trace[16] = {0};
+ volatile uint32_t g_icall_trace_idx = 0;
+ volatile uint64_t g_icall_count = 0;
+ 
++#ifdef _WIN32
++/*
++ * Reserving the guest window.
++ *
++ * A guest address maps to host = g_xbox_mem_offset + (uint32)guest, so the
++ * title's whole 32-bit space is one 4 GB window of the host address space.
++ * What the layout places in it is only the base view, the mirrors and the
++ * fixed apertures; the rest is whatever Windows has there -- the loader's
++ * DLLs, the heap, the thread stacks. A memory bug in the title, in its
++ * network parsing for instance, that writes a wild 32-bit address lands
++ * there.
++ *
++ * So once everything is placed, walk the window and reserve every free
++ * region as PAGE_NOACCESS: a wild address then faults inside the window
++ * instead of writing host memory. The reservations are released in
++ * xbox_MemoryLayoutShutdown, so a second init in the same process starts
++ * clean. POSIX needs none of this: the span reservation above already covers
++ * the window.
++ */
++static void **g_guest_reserved = NULL;
++static size_t g_guest_reserved_n = 0;
++static size_t g_guest_reserved_cap = 0;
++
++static void guest_reserved_push(void *base)
++{
++    if (g_guest_reserved_n == g_guest_reserved_cap) {
++        size_t cap = g_guest_reserved_cap ? g_guest_reserved_cap * 2 : 32;
++        void **tmp = realloc(g_guest_reserved, cap * sizeof *tmp);
++        if (!tmp) {
++            fprintf(stderr, "  WARNING: guest window: out of memory tracking "
++                    "reservations; a relaunch in this process will not be "
++                    "clean\n");
++            return;
++        }
++        g_guest_reserved = tmp;
++        g_guest_reserved_cap = cap;
++    }
++    g_guest_reserved[g_guest_reserved_n++] = base;
++}
++
++static void guest_window_release(void)
++{
++    for (size_t i = 0; i < g_guest_reserved_n; i++)
++        VirtualFree(g_guest_reserved[i], 0, MEM_RELEASE);
++    free(g_guest_reserved);
++    g_guest_reserved = NULL;
++    g_guest_reserved_n = g_guest_reserved_cap = 0;
++}
++
++/* mingw's winnt.h has MEMORY_BASIC_INFORMATION but not the TYPE_ values. */
++#ifndef TYPE_IMAGE
++#define TYPE_IMAGE 0x10000000
++#endif
++#ifndef TYPE_MAPPED_FILE
++#define TYPE_MAPPED_FILE 0x00040000
++#endif
++#ifndef TYPE_PRIVATE
++#define TYPE_PRIVATE 0x00010000
++#endif
++
++static const char *guest_protect_name(DWORD protect)
++{
++    switch (protect & 0xFF) {
++    case PAGE_NOACCESS:          return "NOACCESS";
++    case PAGE_READONLY:          return "READONLY";
++    case PAGE_READWRITE:         return "READWRITE";
++    case PAGE_WRITECOPY:         return "WRITECOPY";
++    case PAGE_EXECUTE:           return "EXECUTE";
++    case PAGE_EXECUTE_READ:      return "EXECUTE_READ";
++    case PAGE_EXECUTE_READWRITE: return "EXECUTE_READWRITE";
++    case PAGE_EXECUTE_WRITECOPY: return "EXECUTE_WRITECOPY";
++    default:                     return NULL;
++    }
++}
++
++static void guest_window_reserve(void)
++{
++    SYSTEM_INFO si;
++    GetSystemInfo(&si);
++    const uintptr_t gran = si.dwAllocationGranularity;  /* 64 KB */
++
++    const uintptr_t win_lo = (uintptr_t)g_xbox_mem_offset;
++    const uintptr_t win_hi = win_lo + 0x100000000ull;
++
++    /* The ranges this layout owns in the window. Anything committed outside
++     * them is host memory the OS put there. */
++    struct range { uintptr_t lo, hi; } ours[64];
++    int n_ours = 0;
++    #define OURS(base, size) do { \
++        if ((base) && (size) && \
++            n_ours < (int)(sizeof ours / sizeof ours[0])) { \
++            ours[n_ours].lo = (uintptr_t)(base); \
++            ours[n_ours].hi = ours[n_ours].lo + (size_t)(size); \
++            n_ours++; \
++        } \
++    } while (0)
++    OURS(g_memory_base, g_memory_size);
++    for (int m = 0; m < XBOX_NUM_MIRRORS; m++)
++        OURS(g_mirror_views[m], g_memory_size);
++    OURS(g_contig_memory, XBOX_CONTIG_SIZE);
++    {
++        size_t tiled = xbox_TiledApertureSize();
++        if (tiled > XBOX_CONTIG_SIZE)
++            tiled = XBOX_CONTIG_SIZE;
++        OURS(g_tiled_view, tiled);
++    }
++    OURS(g_nv2a_memory, XBOX_NV2A_SIZE);
++    OURS(g_mcpx_memory, XBOX_MCPX_SIZE);
++    OURS(g_flash_memory, XBOX_FLASH_SIZE);
++    OURS(g_kernel_memory, 4096);
++    {
++        uintptr_t lo, hi;
++        if (guest_vmem_range(&lo, &hi) &&
++            n_ours < (int)(sizeof ours / sizeof ours[0])) {
++            ours[n_ours].lo = lo;
++            ours[n_ours].hi = hi;
++            n_ours++;
++        }
++    }
++    #undef OURS
++
++    size_t reserved_bytes = 0;
++    int foreign = 0;
++    size_t writable_bytes = 0;
++    uintptr_t addr = win_lo;
++
++    while (addr < win_hi) {
++        MEMORY_BASIC_INFORMATION mbi;
++        if (!VirtualQuery((LPCVOID)addr, &mbi, sizeof mbi) || !mbi.RegionSize)
++            break;
++        uintptr_t reg_lo = (uintptr_t)mbi.BaseAddress;
++        uintptr_t reg_hi = reg_lo + mbi.RegionSize;
++        if (reg_hi > win_hi)
++            reg_hi = win_hi;
++
++        int is_ours = 0;
++        for (int i = 0; i < n_ours; i++)
++            if (reg_lo < ours[i].hi && reg_hi > ours[i].lo) {
++                is_ours = 1;
++                break;
++            }
++
++        if (mbi.State == MEM_FREE) {
++            /* A reservation must start on an allocation-granularity
++             * boundary, so round inward. The slivers left at the edges sit
++             * between mapped regions, and no allocation can start inside one
++             * (allocations are granule-granular), so they stay unmapped.
++             * They can only become allocatable if the neighbouring region is
++             * released later, and then they are sub-64 KB holes. */
++            uintptr_t r_lo = (reg_lo + gran - 1) & ~(gran - 1);
++            uintptr_t r_hi = reg_hi & ~(gran - 1);
++            if (r_hi > r_lo) {
++                if (VirtualAlloc((LPVOID)r_lo, r_hi - r_lo,
++                                 MEM_RESERVE, PAGE_NOACCESS) == (LPVOID)r_lo) {
++                    reserved_bytes += r_hi - r_lo;
++                    guest_reserved_push((LPVOID)r_lo);
++                } else {
++                    fprintf(stderr, "  WARNING: guest window: could not "
++                            "reserve 0x%llX-0x%llX (error %lu); that gap "
++                            "reaches host memory\n",
++                            (unsigned long long)r_lo,
++                            (unsigned long long)r_hi, GetLastError());
++                }
++            }
++        } else if (!is_ours && mbi.State == MEM_COMMIT) {
++            /*
++             * Host memory inside the window. The loader, the heap and the
++             * stacks put some of this here before we run, and nothing we do
++             * can move it, so a process that has one simply cannot start --
++             * which is why we log and continue rather than fail. The
++             * writable ones are the residual risk of the unreserved gaps: a
++             * wild address that lands in one writes host memory, so they are
++             * warnings.
++             */
++            foreign++;
++            int writable = (mbi.Protect &
++                            (PAGE_READWRITE | PAGE_WRITECOPY |
++                             PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) != 0;
++            if (writable)
++                writable_bytes += reg_hi - reg_lo;
++            const char *ptype = mbi.Type == TYPE_IMAGE ? "IMAGE"
++                            : mbi.Type == TYPE_MAPPED_FILE ? "MAPPED"
++                            : mbi.Type == TYPE_PRIVATE ? "PRIVATE" : "OTHER";
++            const char *pname = guest_protect_name(mbi.Protect);
++            fprintf(stderr, "%s guest window: foreign %s region 0x%llX-0x%llX "
++                    "(%zu KB) %s\n",
++                    writable ? "  WARNING:" : "  ",
++                    ptype, (unsigned long long)reg_lo,
++                    (unsigned long long)reg_hi, (reg_hi - reg_lo) / 1024,
++                    pname ? pname : "UNKNOWN");
++        }
++        addr = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
++    }
++
++    fprintf(stderr, "[FCI] guest window: %zu MB reserved, %d foreign regions "
++            "(%zu MB writable)\n",
++            reserved_bytes / (1024 * 1024), foreign,
++            writable_bytes / (1024 * 1024));
++}
++#endif /* _WIN32 */
++
+ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+ {
+     g_force_return = getenv("RECOMP_FORCE_RETURN") != NULL;
+@@ -2719,6 +2920,10 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+     guest_vmem_init(g_memory_offset, g_memory_size,
+                     (uint64_t)g_memory_size * (1u + XBOX_NUM_MIRRORS));
+ 
++#ifdef _WIN32
++    guest_window_reserve();
++#endif
++
+     xbox_WatchInit();
+     fprintf(stderr, "xbox_MemoryLayoutInit: complete\n");
+     return TRUE;
+@@ -2755,6 +2960,12 @@ void xbox_ProtectMirrorsForDebug(void)
+ 
+ void xbox_MemoryLayoutShutdown(void)
+ {
++    /* The window's NOACCESS reservations (disjoint from the views and
++     * apertures freed below) go first: a relaunch in this process must find
++     * the whole window free again. */
++#ifdef _WIN32
++    guest_window_release();
++#endif
+     if (g_kernel_memory) {
+         VirtualFree(g_kernel_memory, 0, MEM_RELEASE);
+         g_kernel_memory = NULL;

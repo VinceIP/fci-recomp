@@ -6,9 +6,12 @@
 #include <string.h>
 #include <time.h>
 
+#include "fci_display.h"
 #include "fci_image.h"
 
 #define SESSION_END "[FCI] session ended normally"
+/* the project's match list, as the fci.ini template shows it; a player's network-list replaces it */
+#define FCI_NET_LIST_DEFAULT "https://fci-hostlist.fci-recomp.workers.dev"
 
 /* what fci.ini got wrong, printed once the log is open */
 static char warnings[2048];
@@ -27,6 +30,9 @@ static const struct {
         {"display-borderless", "RECOMP_FCI_FULLSCREEN"},
         {"display-dimensions", "RECOMP_FCI_WINDOW"},
         {"display-aspect", "RECOMP_FCI_ASPECT"},
+        {"display-vsync", "RECOMP_FCI_VSYNC"},
+        {"display-show-fps", "RECOMP_FCI_SHOW_FPS"},
+        {"display-fov", "RECOMP_FCI_FOV"},
         {"skip-intro-movies", "RECOMP_FCI_SKIP_INTROS"},
         {"gfx-res-scale", "RECOMP_FCI_XBR_SCALE"},
         {"gfx-anisotropic-filtering", "RECOMP_FCI_XBR_ANISO"},
@@ -36,15 +42,22 @@ static const struct {
         {"gfx-aa", "RECOMP_FCI_XBR_AA"},
         {"gfx-shadow-scale", "RECOMP_FCI_XBR_SHADOW_SCALE"},
         {"gfx-shadow-filter", "RECOMP_FCI_XBR_SHADOW_FILTER"},
+        {"gfx-fog", "RECOMP_FCI_XBR_FOG"},
+        {"gfx-bloom", "RECOMP_CVAR_r_glow"},
         {"gfx-object-draw-distance", "RECOMP_CVAR_e_obj_view_dist_ratio"},
         {"gfx-object-lod-distance", "RECOMP_CVAR_e_obj_lod_ratio"},
         {"gfx-foliage-lod", "RECOMP_CVAR_e_obj_sprite_switch_dist_ratio"},
         {"controls-mouse-keyboard", "RECOMP_KEYBOARD"},
+        {"controls-vibration", "RECOMP_VIBRATION"},
+        {"quicksave-key", "RECOMP_QUICKSAVE_KEY"},
+        {"quickload-key", "RECOMP_QUICKLOAD_KEY"},
+        {"fog-toggle-key", "RECOMP_FOG_TOGGLE_KEY"},
         {"controls-walk-speed", "RECOMP_WALK_SCALE"},
         {"controls-wheel-hold-ms", "RECOMP_WHEEL_HOLD_MS"},
         {"controls-mouse-sensitivity", "RECOMP_MOUSE_SENSITIVITY"},
         {"controls-mouse-degrees", "RECOMP_MOUSE_DEGREES"},
         {"controls-mouse-aim", "RECOMP_MOUSE_AIM"},
+        {"controls-mouse-aim-assist", "RECOMP_MOUSE_AIM_ASSIST"},
         {"controls-mouse-y-scale", "RECOMP_MOUSE_Y_SCALE"},
         {"controls-mouse-invert-y", "RECOMP_MOUSE_INVERT_Y"},
         {"controls-mouse-capture", "RECOMP_MOUSE_CAPTURE"},
@@ -85,6 +98,29 @@ static const struct {
 };
 
 /* the runtime option for one ini line, in out; 0 when the line sets nothing (auto, an unknown key) */
+/* the runtime option an fci.ini key sets (fci_settings_menu.c applies menu changes through it); NULL if none */
+const char *fci_config_option_of(const char *key)
+{
+    for (size_t i = 0; i < sizeof keys / sizeof keys[0]; i++)
+        if (!_stricmp(key, keys[i].key))
+            return keys[i].option;
+    return NULL;
+}
+
+/* fci.ini beside the executable, where the settings menu saves */
+const char *fci_config_ini_path(void)
+{
+    static char path[MAX_PATH];
+    if (!path[0]) {
+        char *slash;
+        GetModuleFileNameA(NULL, path, sizeof path);
+        if ((slash = strrchr(path, '\\')) != NULL)
+            slash[1] = 0;
+        strncat(path, "fci.ini", sizeof path - strlen(path) - 1);
+    }
+    return path;
+}
+
 static int translate(const char *key, const char *value, char *out, size_t size)
 {
     size_t i;
@@ -107,8 +143,10 @@ static int translate(const char *key, const char *value, char *out, size_t size)
         if (!_stricmp(value, "auto")
             && (!strcmp(keys[i].key, "display-dimensions") || !strcmp(keys[i].key, "gfx-shadow-scale")))
             return 0; /* the runtime's own default */
-        if (!strcmp(keys[i].key, "display-aspect"))
-            value = !strcmp(value, "1") || !strcmp(value, "16:9") ? "16:9" : "4:3";
+        if (!strcmp(keys[i].key, "display-aspect")) {
+            static char aspect[16];
+            value = fci_normalize_aspect(value, aspect, sizeof aspect) ? aspect : "4:3";
+        }
         if (!strcmp(keys[i].key, "gfx-ssao"))
             value = atoi(value) ? "1" : "0"; /* the debug views (2, 3) stay developer options */
         snprintf(out, size, "%s=%s", keys[i].option, value);
@@ -143,25 +181,11 @@ static void expand(const char *in, char *out, size_t size)
         out[--n] = 0;
 }
 
-/* the last bytes of a log name a clean exit */
-static int ended_normally(const char *path)
-{
-    char tail[256];
-    size_t n = 0;
-    FILE *f = fopen(path, "rb");
-    if (!f)
-        return 0;
-    if (!fseek(f, -(long)(sizeof tail - 1), SEEK_END) || !fseek(f, 0, SEEK_SET))
-        n = fread(tail, 1, sizeof tail - 1, f);
-    fclose(f);
-    tail[n] = 0;
-    return strstr(tail, SESSION_END) != NULL;
-}
-
 static int by_name(const void *a, const void *b) { return strcmp((const char *)a, (const char *)b); }
 
-/* delete the clean sessions' logs (verbosity 1), then the oldest until a new one fits in limit */
-static void prune_logs(const char *dir, int verbosity, int limit)
+/* delete the oldest logs until a new one fits in limit; clean exits are kept too, so a tester can
+ * send the log of a session that went wrong without crashing */
+static void prune_logs(const char *dir, int limit)
 {
     static char names[512][MAX_PATH];
     char pattern[MAX_PATH], path[MAX_PATH];
@@ -180,9 +204,7 @@ static void prune_logs(const char *dir, int verbosity, int limit)
     for (i = n - 1; i >= 0; i--) {
         int drop;
         snprintf(path, sizeof path, "%s\\%s", dir, names[i]);
-        drop = verbosity == 1 && ended_normally(path);
-        if (!drop && limit > 0 && kept >= limit - 1)
-            drop = 1;
+        drop = limit > 0 && kept >= limit - 1;
         if (!drop) {
             kept++;
             continue;
@@ -191,6 +213,27 @@ static void prune_logs(const char *dir, int verbosity, int limit)
         snprintf(path, sizeof path, "%s\\%.*s-kernel.log", dir, (int)(strlen(names[i]) - 4), names[i]);
         DeleteFileA(path);
     }
+}
+
+/* log=<file>: the previous sessions move to <file>.1, .2, ... so a new start does not erase them; limit
+ * counts the new one too, as for log-dir (0: unlimited, kept to 100) */
+static void rotate_log(const char *file, int limit)
+{
+    char from[MAX_PATH], to[MAX_PATH];
+    int keep = limit > 0 ? limit - 1 : 100, i;
+    if (keep <= 0) {
+        DeleteFileA(file);
+        return;
+    }
+    snprintf(to, sizeof to, "%s.%d", file, keep);
+    DeleteFileA(to);
+    for (i = keep - 1; i >= 1; i--) {
+        snprintf(from, sizeof from, "%s.%d", file, i);
+        snprintf(to, sizeof to, "%s.%d", file, i + 1);
+        MoveFileExA(from, to, MOVEFILE_REPLACE_EXISTING);
+    }
+    snprintf(to, sizeof to, "%s.1", file);
+    MoveFileExA(file, to, MOVEFILE_REPLACE_EXISTING);
 }
 
 /* the session's log (and the kernel's trace with verbosity 2), when there is no console to print to */
@@ -210,6 +253,7 @@ static void open_session_log(const char *dir, int verbosity, int limit, const ch
         return;
     }
     if (fixed) { /* the older log=<file> */
+        rotate_log(fixed, limit);
         snprintf(path, sizeof path, "%s", fixed);
         snprintf(kernel, sizeof kernel, "NUL");
     } else {
@@ -219,7 +263,7 @@ static void open_session_log(const char *dir, int verbosity, int limit, const ch
         localtime_s(&t, &now);
         strftime(stem, sizeof stem, "fci-%Y%m%d-%H%M%S", &t);
         make_dirs(dir);
-        prune_logs(dir, verbosity, limit);
+        prune_logs(dir, limit);
         snprintf(path, sizeof path, "%s\\%s.log", dir, stem);
         if (verbosity >= 2)
             snprintf(kernel, sizeof kernel, "%s\\%s-kernel.log", dir, stem);
@@ -228,13 +272,12 @@ static void open_session_log(const char *dir, int verbosity, int limit, const ch
     }
     _putenv_s("RECOMP_KERNEL_LOG_FILE", kernel);
     SetEnvironmentVariableA("RECOMP_FCI_RELAUNCH_LOG", path); /* relaunched instances append */
-    if (verbosity == 1)
-        _putenv("RECOMP_FCI_LOG_SESSION=1"); /* fci_log_session_end marks a clean exit */
+    _putenv("RECOMP_FCI_LOG_SESSION=1");                      /* fci_log_session_end marks a clean exit */
     freopen(path, "w", stderr);
     freopen(path, "a", stdout);
 }
 
-/* the window was closed: with log-verbosity 1 the next start deletes this session's log */
+/* the window was closed: the log says so, to tell a clean exit from a crash */
 void fci_log_session_end(void)
 {
     const char *on = getenv("RECOMP_FCI_LOG_SESSION");
@@ -253,9 +296,11 @@ void fci_config_load(int *argc, char ***argv)
 {
     static char exe_dir[MAX_PATH], xbe[MAX_PATH], game[MAX_PATH], save[MAX_PATH], log_dir[MAX_PATH];
     static char fixed_log[MAX_PATH], shader_cache[MAX_PATH], shader_cache_arg[MAX_PATH + 32];
-    static char lines[96][512], rate_arg[64];
-    static char *args[120];
-    int n = 0, opts = 0, i, have_ini = 0, verbosity = 1, limit = 20, cap = 1;
+    static char lines[96][512], rate_arg[64], hub_arg[300], lan_arg[40], list_arg[300], peers_arg[300],
+            menu_arg[40];
+    static char *args[128];
+    int n = 0, opts = 0, i, have_ini = 0, verbosity = 1, limit = 3, cap = 1;
+    int network_menu = -1, list_set = 0;
     double rate = 30;
     char ini[MAX_PATH], *slash;
     FILE *f;
@@ -271,6 +316,8 @@ void fci_config_load(int *argc, char ***argv)
     expand("%APPDATA%\\" FCI_APPDATA "\\logs", log_dir, sizeof log_dir);
     expand("%APPDATA%\\" FCI_APPDATA "\\shader-cache", shader_cache, sizeof shader_cache);
     xbe[0] = fixed_log[0] = 0;
+    if (!_stricmp(FCI_IMAGE_FILENAME, "default.xbe")) /* the game, not the map editor */
+        snprintf(list_arg, sizeof list_arg, "RECOMP_FCI_NET_LIST=%s", FCI_NET_LIST_DEFAULT);
     snprintf(ini, sizeof ini, "%s\\fci.ini", exe_dir);
     if ((f = fopen(ini, "r")) != NULL) {
         char line[512];
@@ -312,7 +359,24 @@ void fci_config_load(int *argc, char ***argv)
                 rate = !strcmp(v, "0") || !_stricmp(v, "unlimited") ? 0 : atof(v) > 0 ? atof(v) : 30;
             else if (!_stricmp(key, "engine-update-cap"))
                 cap = atoi(v) != 0;
-            else if (opts < 96 && translate(key, v, lines[opts], sizeof lines[0]))
+            else if (!_stricmp(key, "network-hub")) {
+                if (v[0])
+                    snprintf(hub_arg, sizeof hub_arg, "RECOMP_FCI_NET=%s", v);
+            } else if (!_stricmp(key, "network-lan")) {
+                if (v[0] && strcmp(v, "0"))
+                    snprintf(lan_arg, sizeof lan_arg, "RECOMP_FCI_NET_LAN=1");
+            } else if (!_stricmp(key, "network-list")) {
+                list_set = 1;
+                if (v[0])
+                    snprintf(list_arg, sizeof list_arg, "RECOMP_FCI_NET_LIST=%s", v);
+                else
+                    list_arg[0] = 0; /* "network-list =" turns internet play off */
+            } else if (!_stricmp(key, "network-peers")) {
+                if (v[0])
+                    snprintf(peers_arg, sizeof peers_arg, "RECOMP_FCI_NET_PEERS=%s", v);
+            } else if (!_stricmp(key, "network-menu")) {
+                network_menu = v[0] && strcmp(v, "0");
+            } else if (opts < 96 && translate(key, v, lines[opts], sizeof lines[0]))
                 opts++;
         }
         fclose(f);
@@ -347,6 +411,26 @@ void fci_config_load(int *argc, char ***argv)
     }
     /* experimental frame rates: capped, the game keeps its 30 updates and the
        frames in between are blended from its last two; uncapped, the game itself runs at the rate */
+    /* the network keys: one link at a time (the card refuses two and says so). network-menu is not a
+     * link (no transport at boot): it does not set cap, the 30-updates lock engages on the pick. */
+    {
+        if (!list_set && (hub_arg[0] || lan_arg[0] || peers_arg[0]))
+            list_arg[0] = 0; /* the default list gives way to a link the player chose */
+        if (network_menu == 1
+            || (network_menu < 0 && list_arg[0] && !hub_arg[0] && !lan_arg[0] && !peers_arg[0]
+                && !_stricmp(FCI_IMAGE_FILENAME, "default.xbe")))
+            snprintf(menu_arg, sizeof menu_arg, "RECOMP_FCI_NET_MENU=1");
+        char *nets[] = {hub_arg, lan_arg, list_arg, peers_arg, menu_arg};
+        int k;
+        for (k = 0; k < 5; k++)
+            if (nets[k][0]) {
+                args[n++] = nets[k];
+                /* online every player runs the Xbox's 30 updates: physics and AI depend on the rate. A list in
+                 * menu mode starts no transport at boot; the pacer locks the rate when the pick starts one */
+                if (k < 4 && !(k == 2 && menu_arg[0]))
+                    cap = 1;
+            }
+    }
     if (rate == 0 || rate > 30) {
         if (cap)
             snprintf(rate_arg, sizeof rate_arg, "RECOMP_FCI_XBR_REPLAY=%g", rate ? rate : 1000);

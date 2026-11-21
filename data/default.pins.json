@@ -21,6 +21,14 @@
   "D3DDevice_EndVisibilityTest": {
    "va": "0x005072D0",
    "evidence": "stdcall (index), ret 4: 00507260 finds the report slot (device+0x7D4 page table, a 0x1000 page from XMemAlloc(0x1000, 0xA1800000), slot = index % 256 * 16) and sets slot+12 to ~0; pushes 0x000817CC: ZPASS_PIXEL_COUNT_ENABLE 0 and NV097_GET_REPORT 0x17D0 = slot offset | type 1; GetVisibilityTestResult 00506340 returns D3DERR_TESTINCOMPLETE (0x88760828) while slot+12 is ~0, else the count at slot+8"
+  },
+  "D3DDevice_SetPalette": {
+   "va": "0x005070E0",
+   "evidence": "Instincts: stdcall (stage, palette), ret 8, 141 bytes; writes CDevice Palettes + stage * 4 (0xF98) with the AddRef/Release pair and pushes the stage's palette methods. The 5849 signature misses it. sub_002414A0 loads Textures_xbox\\NMapTangent8bit.PAL (the palette of the 8-bit normal maps), creates it and binds it here to stages 0-3 (00241566-00241586); without the pin every P8 normal map is decoded as grey."
+  },
+  "D3DDevice_SetRenderTargetFast": {
+   "va": "0x00506820",
+   "evidence": "Instincts: stdcall (render target, depth stencil, flags), ret 12, 288 bytes; like SetRenderTarget (0x005065A0) it AddRefs the new surfaces, Releases the old and writes CDevice RenderTarget (0x1A04) and Depth (0x1A08), then pushes the surface methods (0x40210 colour, 0x40214 zeta, 0x4030C/0x4032C), without the viewport reset; the title's render-target save/restore (0025FB60 saves, 0025FCB0 restores through it) and 16 other callers. The 5849 signatures miss it."
   }
  }
 }

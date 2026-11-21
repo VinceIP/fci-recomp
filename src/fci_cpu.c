@@ -91,7 +91,8 @@ void fci_override_004B03B4(void)
 }
 
 /* pushfd/popfd keep only EFLAGS' control bits (IF, DF, AC, ID; arithmetic flags read as 0), and CPUID
- * answers as the console's Pentium III for leaves 0 and 1 (the CRT's MMX check, 004FFED0) */
+ * answers as the console's Pentium III for leaves 0 to 2 (the CRT's MMX check, 004FFED0; 004C3D20 on the
+ * network path stores leaf 2 without asking for the highest leaf) */
 #define FCI_EFLAGS_WRITABLE (0x400u | 0x40000u | 0x200000u) /* DF, AC, ID */
 static RECOMP_TLS uint32_t eflags_ac_id;                    /* per thread, like IF and DF */
 
@@ -142,7 +143,7 @@ void fci_cpuid(uint32_t va)
     static unsigned calls;
     uint32_t leaf = g_eax;
     if (leaf == 0) {
-        g_eax = 1;           /* highest leaf answered (leaf 2 is not modeled) */
+        g_eax = 2;           /* highest leaf answered */
         g_ebx = 0x756E6547u; /* "Genu" */
         g_edx = 0x49656E69u; /* "ineI" */
         g_ecx = 0x6C65746Eu; /* "ntel" */
@@ -151,6 +152,11 @@ void fci_cpuid(uint32_t va)
         g_ebx = 0;
         g_ecx = 0;
         g_edx = 0x0383F9FFu; /* see above */
+    } else if (leaf == 2) {  /* cache and TLB descriptors of a 128 KB L2 Coppermine; only stored */
+        g_eax = 0x03020101u;
+        g_ebx = 0;
+        g_ecx = 0;
+        g_edx = 0x0C040841u;
     } else {
         cpu_stop("CPUID leaf not modeled", leaf, va);
     }

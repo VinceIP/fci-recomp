@@ -1,0 +1,85 @@
+Subject: The network card's link, address and interrupt
+
+fci-recomp models the MCPX network card (src/fci_nic.c). PhyGetLinkState asks it: the link is up when
+the card has somewhere to send frames and down, an unplugged cable, otherwise. EEPROM setting 0x101, the
+factory Ethernet address the network stack programs into the card, comes from it too, one per instance;
+it read as zeros before. The kernel's 1 ms timer thread calls the card's tick, which moves frames and
+says when to raise its interrupt. KeInitializeDpc cleared 32 bytes where an Xbox KDPC has 28, wiping the
+caller's next field: XNET stores its interrupt vector there, so the card's routine was connected on
+vector 0.
+
+---
+diff --git a/src/kernel/kernel_bridge.c b/src/kernel/kernel_bridge.c
+index 7d8df0c..915f78c 100644
+--- a/src/kernel/kernel_bridge.c
++++ b/src/kernel/kernel_bridge.c
+@@ -2395,13 +2395,14 @@ static void bridge_KeInitializeDpc(void)
+      * makes this memset write through NULL inside the bridge. The export
+      * returns void, so refusing is doing nothing -- which is what the real
+      * kernel does with an object it cannot write. */
+-    if (!bridge_buf_ok(dpc_va, 32, "KeInitializeDpc")) {
++    if (!bridge_buf_ok(dpc_va, 28, "KeInitializeDpc")) {
+         g_eax = 0;
+         return;
+     }
+ 
+-    /* Zero the structure (32 bytes) */
+-    memset(XBOX_TO_NATIVE(dpc_va), 0, 32);
++    /* Zero the structure: an Xbox KDPC is 28 bytes. 32 cleared the caller's next field; XNET keeps its
++     * interrupt vector there (adapter+0x208 after the DPC at +0x1EC), so its card connected on vector 0. */
++    memset(XBOX_TO_NATIVE(dpc_va), 0, 28);
+ 
+     /* Set Type (0x13 = DpcObject) and fields */
+     BRIDGE_MEM16(dpc_va + 0) = 0x13;   /* Type */
+@@ -2643,6 +2644,12 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
+ 
+         Sleep(1);
+         kernel_vblank_tick();  /* the GPU's frame clock */
++        {
++            extern int fci_nic_tick(void); /* the network card (src/fci_nic.c): its vector, or -1 */
++            int v = fci_nic_tick();
++            if (v >= 0)
++                kernel_raise_interrupt((uint32_t)v);
++        }
+         kernel_drain_dpcs();   /* deferred work, before due timers */
+         now = (long long)GetTickCount64();
+ 
+diff --git a/src/kernel/kernel_xbox.c b/src/kernel/kernel_xbox.c
+index 290b956..500cd31 100644
+--- a/src/kernel/kernel_xbox.c
++++ b/src/kernel/kernel_xbox.c
+@@ -194,6 +194,15 @@ NTSTATUS __stdcall xbox_ExQueryNonVolatileSetting(
+         }
+         break;
+ 
++    case 0x101: /* XC_FACTORY_ETHERNET_ADDR: the card's MAC, one per instance (src/fci_nic.c) */
++        if (ValueLength >= 6) {
++            extern void fci_nic_mac(uint8_t *mac);
++            fci_nic_mac((uint8_t *)Value);
++            if (Type) *Type = 3; /* REG_BINARY */
++            if (ResultLength) *ResultLength = 6;
++        }
++        break;
++
+     case XC_TIMEZONE_BIAS:
+         /* UTC-5 (Eastern Time) in minutes: -300 */
+         if (ValueLength >= sizeof(LONG)) {
+@@ -234,14 +243,15 @@ NTSTATUS __stdcall xbox_ExSaveNonVolatileSetting(
+  * Network / PHY
+  *
+  * PhyGetLinkState reports Ethernet link status. Xbox had a built-in 100Mbit
+- * NIC. For PC, we report link-up since we'll handle networking differently.
++ * NIC. fci-recomp models the card (src/fci_nic.c): the link is up when it has
++ * somewhere to send frames, and down -- an unplugged cable -- otherwise.
+  * ============================================================================ */
+ 
+ ULONG __stdcall xbox_PhyGetLinkState(BOOLEAN Verify)
+ {
++    extern ULONG fci_nic_link_state(void);
+     (void)Verify;
+-    /* Return link up, 100 Mbps, full duplex */
+-    return 0x01; /* XNET_ETHERNET_LINK_ACTIVE */
++    return fci_nic_link_state();
+ }
+ 
+ NTSTATUS __stdcall xbox_PhyInitialize(BOOLEAN ForceReset, PVOID Param2)

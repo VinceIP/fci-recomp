@@ -1,6 +1,8 @@
 // Direct3D 8 (XDK 5849) entry points the title calls, implemented on the host renderer.
 // Resource creation, locking and the XG helpers stay recompiled: they only manage memory.
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <atomic>
 #include <chrono>
 #include <map>
@@ -25,6 +27,13 @@ extern "C" void fci_nv2a_overlay_compose(uint32_t* frame, uint32_t height, uint3
 extern "C" int xbox_ContiguousFreeNow(uint32_t addr);  // FCI: patches/runtime
 extern "C" int fci_contig_reuse(void);                 // fci_xbr_glue.cpp
 extern "C" void fci_status_present(void);              // fci_threads.c
+extern "C" int fci_input_take_quicksave_request(void); // fci_input.c
+extern "C" int fci_input_take_quickload_request(void); // fci_input.c
+extern "C" int fci_input_take_fog_request(void);       // fci_input.c
+extern "C" int fci_gfx_set(const char* key_value);     // fci_enhance.cpp
+static const char* fci_getenv_or(const char* n) { const char* e = std::getenv(n); return e ? e : ""; }
+
+#include "fci_quicksave.h"
 
 // configs written before the SDK knew the name
 #ifndef SYM_D3DDevice_BeginPush
@@ -592,6 +601,15 @@ HLE_STDCALL(D3DDevice_SetRenderTarget, 2) {
     return 0;
 }
 
+// FCI: the titles restore their targets through it; unseen, the renderer kept the previous depth (none, after a
+// pass into a texture) and the world drew without it. Its body keeps the reference counts, outside g_lock: the
+// releases can free through the title's allocator, whose lock another thread may hold while it waits for g_lock
+HLE_WRAP(D3DDevice_SetRenderTargetFast, 3) {
+    GuestLock lock(g_lock);
+    g_state.rt = SurfaceOf(a[0] ? a[0] : Dev(kDevRenderTarget));
+    g_state.zs = SurfaceOf(a[1]);
+}
+
 HLE_STDCALL(D3DDevice_GetBackBuffer2, 1) {
     int32_t i = int32_t(a[0]);
     uint32_t s = i < 0 ? g_buffers[0] : g_buffers[std::min<uint32_t>(uint32_t(i) + 1, g_buffer_count - 1)];
@@ -639,6 +657,25 @@ HLE_STDCALL(D3DDevice_Swap, 1) {
         }
     }
     ComposeOverlay(g_buffers[1]);
+    // FCI: quick save (F5), quick load (F9) and the fog toggle (F8): the frame boundary, the game thread, the guest
+    // lock held. The host input path set a request; the notice is drawn by the renderer (fci_enhance.cpp).
+    {
+        int qs_save = fci_input_take_quicksave_request(), qs_load = fci_input_take_quickload_request();
+        if (qs_save || qs_load)
+            fci_quicksave::Execute(ctx, qs_load);
+        if (fci_input_take_fog_request()) {   // original <-> the configured custom fog (3 when gfx-fog is 0)
+            static const int custom = [] { int m = std::atoi(fci_getenv_or("RECOMP_FCI_XBR_FOG")); return m > 0 && m <= 3 ? m : 3; }();
+            bool on = std::atoi(fci_getenv_or("RECOMP_FCI_XBR_FOG")) > 0;
+            char kv[32];
+            std::snprintf(kv, sizeof kv, "RECOMP_FCI_XBR_FOG=%d", on ? 0 : custom);
+            fci_gfx_set(kv);
+            fci_quicksave::ShowNotice(on ? "FOG ORIGINAL" : custom == 3 ? "FOG VOLUMETRIC" : "FOG CUSTOM");
+        }
+        // RECOMP_FCI_CONTROL "post <text>": a game command the control thread queued (fci_threads.c)
+        std::string queued = fci_quicksave::TakePost();
+        if (!queued.empty())
+            fci_quicksave::PostControl(ctx, queued.c_str());
+    }
     if (diag::Perf()) {  // FCI: latency figures (diag.h)
         int64_t start = diag::g_frame_start_ns.load();
         diag::NotePresent(start ? diag::NowNs() - start : 0);

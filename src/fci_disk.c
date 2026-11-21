@@ -1,6 +1,7 @@
 /* Raw hard disk partitions: <save>\PartitionN.img starts empty and grows as the game writes; a partition
  * has its table length and no end of file, so never-written sectors read as zeros. Also movie skipping. */
 #include <windows.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -8,6 +9,133 @@
 #include <wchar.h>
 
 #include "recomp_types.h"
+
+/* ── RECOMP_FCI_PAK_LOG=<file>: a JSON-lines trace of pak lookups and .dat reads ─────────────────
+ * The name→hash step (sub_002ACAF0) names the file the game wants; the .dat read that follows it
+ * lands at the entry's offset. tools/pak_pairs.py pairs the two to recover the name→hash function.
+ * Inert unless the variable is set; each line is flushed (a debug trace). */
+static FILE *pak_log;
+static volatile LONG pak_seq;
+static SRWLOCK pak_lock = SRWLOCK_INIT;
+
+void fci_pak_log_init(void)
+{
+    const char *path = getenv("RECOMP_FCI_PAK_LOG");
+    if (path && *path)
+        pak_log = fopen(path, "w");
+}
+
+/* a JSON string literal (quoted, escaped) for a UTF-8 C string */
+static size_t pak_json_str(char *out, size_t cap, const char *s)
+{
+    size_t o = 0;
+    if (o < cap)
+        out[o++] = '"';
+    for (const unsigned char *p = (const unsigned char *)s; *p && o < cap - 7; p++) {
+        if (*p == '"' || *p == '\\') {
+            out[o++] = '\\';
+            if (o < cap - 1)
+                out[o++] = (char)*p;
+        } else if (*p < 0x20) {
+            o += (size_t)snprintf(out + o, cap - o, "\\u%04x", *p);
+        } else if (o < cap - 1) {
+            out[o++] = (char)*p;
+        }
+    }
+    if (o < cap)
+        out[o++] = '"';
+    if (o < cap)
+        out[o] = 0;
+    return o;
+}
+
+/* one JSON line: seq (global counter), tid (host thread), ev (event), then the caller's extra fields */
+static void pak_log_line(const char *ev, const char *extra)
+{
+    if (!pak_log)
+        return;
+    AcquireSRWLockExclusive(&pak_lock);
+    fprintf(pak_log, "{\"seq\": %ld, \"tid\": %lu, \"ev\": \"%s\"%s}\n", (long)InterlockedIncrement(&pak_seq),
+            (unsigned long)GetCurrentThreadId(), ev, extra);
+    fflush(pak_log);
+    ReleaseSRWLockExclusive(&pak_lock);
+}
+
+/* the file name behind a handle (the same FILE_NAME_INFO lookup partition_of uses) */
+static int pak_file_name(HANDLE h, char *out, size_t cap)
+{
+    union {
+        FILE_NAME_INFO info;
+        uint8_t raw[sizeof(FILE_NAME_INFO) + MAX_PATH * sizeof(wchar_t)];
+    } u;
+    wchar_t w[MAX_PATH];
+    size_t chars;
+    if (!h || h == INVALID_HANDLE_VALUE || !GetFileInformationByHandleEx(h, FileNameInfo, &u, sizeof u))
+        return 0;
+    chars = u.info.FileNameLength / sizeof(wchar_t);
+    if (chars >= MAX_PATH)
+        return 0;
+    memcpy(w, u.info.FileName, chars * sizeof(wchar_t));
+    w[chars] = 0;
+    return WideCharToMultiByte(CP_UTF8, 0, w, -1, out, (int)cap, NULL, NULL) != 0;
+}
+
+/* pak name→hash (recomp_0043.c:23244, sub_002ACAF0): thiscall, ecx = the pak object; esi = output
+ * (fastcall); 1 stack param: a UTF-8 file name. The body normalizes the name (appends ".xgb", strips
+ * the extension) and hashes it (sub_0023FA10), then the caller passes the hash to the .fat binary
+ * search (sub_002B09F0 → sub_002B9E10). This is on every pak-lookup path, including boot/menu, unlike
+ * the vtable FindFile (sub_002DFD20) which is never dispatched during boot. Log the name here. */
+void fci_prehook_002ACAF0(void)
+{
+    uint32_t name;
+    int i, ro;
+    char raw[768], rj[1024], extra[2048];
+    if (!pak_log)
+        return;
+    name = MEM32(g_esp + 4); /* the UTF-8 file name (first stack param) */
+    ro = 0;
+    for (i = 0; i < 255; i++) {
+        char c = (char)MEM8(name + (size_t)i);
+        if (!c || ro + 1 >= (int)sizeof raw)
+            break;
+        raw[ro++] = c;
+    }
+    raw[ro] = 0;
+    pak_json_str(rj, sizeof rj, raw);
+    snprintf(extra, sizeof extra, ", \"name\": %s", rj);
+    pak_log_line("findfile", extra);
+}
+
+/* a .dat read (bridge_NtReadFile -> fci_partition_read_fill): the file, offset and length. When the
+ * read is position-based (off == NULL, bridge_NtReadFile with no explicit offset), the file pointer
+ * has already advanced past the data, so the start is the current position minus the bytes read. */
+static void fci_pak_log_read(HANDLE h, const LARGE_INTEGER *off, uint32_t length, uint32_t status,
+                             uint32_t got)
+{
+    char name[MAX_PATH], nj[MAX_PATH + 16], extra[2 * (MAX_PATH + 16) + 64];
+    const char *dot;
+    LONGLONG start;
+    LARGE_INTEGER pos;
+    if (!pak_log || status != 0)
+        return;
+    if (off)
+        start = off->QuadPart;
+    else if (SetFilePointerEx(h, (LARGE_INTEGER){0}, &pos, FILE_CURRENT))
+        start = pos.QuadPart - (LONGLONG)got;
+    else
+        return;
+    if (start < 0)
+        return;
+    if (!pak_file_name(h, name, sizeof name))
+        return;
+    dot = strrchr(name, '.');
+    if (!dot || _stricmp(dot, ".dat"))
+        return;
+    pak_json_str(nj, sizeof nj, name);
+    snprintf(extra, sizeof extra, ", \"file\": %s, \"offset\": %lld, \"length\": %u, \"got\": %u", nj,
+             (long long)start, length, got);
+    pak_log_line("read", extra);
+}
 
 static const ULONGLONG part_sectors[6] = {
         0, 0x00465400ull, 0x000FA000ull, 0x00177000ull, 0x00177000ull, 0x00177000ull,
@@ -48,11 +176,277 @@ int fci_partition_length(HANDLE h, LARGE_INTEGER *length)
     return 1;
 }
 
+/* QUIT GAME on the main menu: the hidden CHEATS (DEBUG) item of each title's main menu layout
+ * (magma/crypregame.mgb in common.dat) becomes B_Quit: its element ID at every site, same size, and its
+ * position lined up with the items above. Only a read that is exactly that file, with the old ID and
+ * position at every site, is changed; the archive on disk is not. Evidence: re/notes/MENUS.md. */
+#define MGB_CHEATS_DEBUG 0xE5B2EC52u /* CRC-32 of the element name */
+#define MGB_QUIT         0x8BCDF569u
+static const struct quit_layout {
+    const char *title;
+    uint32_t size, record, sites[3], old_x, old_y, x, y;
+} quit_layouts[] = {
+        {"Instincts", 62654, 0xA24, {0x4C7, 0xA24, 0xA33}, 0x00460000u, 0x17C, 0x003E0000u, 0x181},
+        {"Evolution", 68737, 0xB05, {0x4C7, 0xB05, 0xB14}, 0x00400000u, 0x162, 0x00300000u, 0x162},
+};
+
+static void add_quit_item(void *buffer, uint32_t bytes)
+{
+    static const uint32_t pos[] = {0x30, 0x54, 0x78}; /* the record's three X, Y pairs */
+    uint8_t *b = buffer;
+    extern int fci_menu_quit_enabled(void);
+    if (bytes < 16 || memcmp(b, "MAGMA", 5) || !fci_menu_quit_enabled())
+        return;
+    for (size_t l = 0; l < sizeof quit_layouts / sizeof *quit_layouts; l++) {
+        const struct quit_layout *q = &quit_layouts[l];
+        uint32_t v;
+        int ok = bytes == q->size;
+        for (int i = 0; ok && i < 3; i++) {
+            memcpy(&v, b + q->sites[i], 4);
+            ok = v == MGB_CHEATS_DEBUG;
+        }
+        for (int i = 0; ok && i < 3; i++) {
+            uint32_t xy[2];
+            memcpy(xy, b + q->record + pos[i], 8);
+            ok = xy[0] == q->old_x && xy[1] == q->old_y;
+        }
+        if (!ok)
+            continue;
+        for (int i = 0; i < 3; i++) {
+            const uint32_t id = MGB_QUIT, xy[2] = {q->x, q->y};
+            memcpy(b + q->sites[i], &id, 4);
+            memcpy(b + q->record + pos[i], xy, 8);
+        }
+        fprintf(stderr, "[FCI] menu: QUIT GAME added to the %s main menu\n", q->title);
+        fflush(stderr);
+        return;
+    }
+}
+
+/* GRAPHICS on the options screens (P_EditProfile: the profile's, magma/cryprofile.mgb, and the pause
+ * menu's, magma/cryingame.mgb; all in common.dat, both titles): one more button, a copy of DISPLAY's record named
+ * B_ControllerScheme (labelled GRAPHICS), after DISPLAY. The file grows, so common.fat's entry for it is
+ * lengthened and the longer read of common.dat is rebuilt from the original bytes. Layout: re/notes/MENUS.md. */
+#define MGB_VIDEO    0xC8040339u
+#define MGB_GRAPHICS 0xE87CB6E7u /* CRC-32 of "B_ControllerScheme" */
+static const struct gfx_layout {
+    const char *screen;
+    uint32_t offset, size, hash; /* the file in common.dat and its common.fat hash */
+    uint32_t count_at;           /* the screen's child count (a byte) */
+    uint8_t count;
+    uint32_t copy_from, insert_at; /* DISPLAY's record from the "01 <id>" before it to its up link's end */
+    uint32_t up_link;              /* the copy's up link (last 4 bytes) as found: the button above DISPLAY */
+    uint32_t link_site;            /* the link that pointed back to DISPLAY and now points to GRAPHICS */
+    uint8_t x;                     /* the buttons' x */
+    uint16_t y_old, y_new;         /* the copy's position; the step to the next button is y_new - y_old */
+    uint32_t below_to;             /* the records after it, moved down one step, end here (0: none) */
+} gfx_layouts[] = {
+        {"Instincts profile", 0x55F7FF, 65434, 0x64D56760, 0x1B90, 10, 0x20CE, 0x21B6, 0x5FC27D09, 0x22AE,
+         0x3C, 0xF5, 0x118, 0x22B7},
+        {"Instincts pause options", 0x4B8647, 30236, 0x14653EE6, 0x54E3, 6, 0x57B4, 0x58AE, 0x7765E2D2,
+         0x57B0, 0x3E, 0xAF, 0xD2, 0},
+        /* Evolution's DISPLAY is GAME OPTIONS, with MULTIPLAYER OPTIONS and RESET DEFAULTS below it */
+        {"Evolution profile", 0x6E93BC, 75837, 0x64D56760, 0x1FF0, 10, 0x242A, 0x251B, 0x7765E2D2, 0x2610,
+         0x30, 0xC3, 0xE6, 0x2744},
+        {"Evolution pause options", 0x63061E, 34349, 0x14653EE6, 0x571B, 7, 0x5B00, 0x5C29, 0x7765E2D2,
+         0x5AFC, 0x30, 0xAF, 0xD2, 0},
+};
+#define N_GFX_LAYOUTS (sizeof gfx_layouts / sizeof *gfx_layouts)
+
+static uint32_t get32(const uint8_t *p)
+{
+    uint32_t v;
+    memcpy(&v, p, 4);
+    return v;
+}
+static void put32(uint8_t *p, uint32_t v) { memcpy(p, &v, 4); }
+
+/* the (x, y, float 1.0) position sub-records in [from, to) with y >= y_min move down by step; how many */
+static int move_records(uint8_t *b, uint32_t from, uint32_t to, uint8_t x, uint16_t y_min, uint16_t step)
+{
+    int n = 0;
+    for (uint32_t i = from; i + 8 <= to; i++) {
+        const uint16_t y = (uint16_t)(b[i + 2] | b[i + 3] << 8);
+        if (b[i] == x && b[i + 1] == 0 && y >= y_min && y < 0x200 && get32(b + i + 4) == 0x3F800000u) {
+            b[i + 2] = (uint8_t)((y + step) & 0xFF);
+            b[i + 3] = (uint8_t)((y + step) >> 8);
+            n++;
+            i += 7;
+        }
+    }
+    return n;
+}
+
+static void add_graphics_button(void *buffer, uint32_t bytes)
+{
+    uint8_t *b = buffer;
+    for (size_t l = 0; l < N_GFX_LAYOUTS; l++) {
+        const struct gfx_layout *g = &gfx_layouts[l];
+        const uint32_t rec = g->insert_at - g->copy_from, grown = g->size + rec;
+        /* common.fat: the game reads the header, then each 12-byte entry (offset, size, hash) on its own */
+        if (bytes == 12) {
+            if (get32(b) == g->offset && get32(b + 4) == g->size && get32(b + 8) == g->hash) {
+                put32(b + 4, grown);
+                fprintf(stderr, "[FCI] menu: %s screen file lengthened for GRAPHICS\n", g->screen);
+                return;
+            }
+            continue;
+        }
+        /* common.dat: the longer read holds the original file and the next file's first bytes */
+        if (bytes != grown || memcmp(b, "MAGMA", 5) || b[g->count_at] != g->count || b[g->copy_from] != 1
+            || get32(b + g->copy_from + 1) != MGB_VIDEO || get32(b + g->insert_at - 4) != g->up_link
+            || b[g->insert_at] != 1 || get32(b + g->link_site) != MGB_VIDEO)
+            continue;
+        memmove(b + g->insert_at + rec, b + g->insert_at, g->size - g->insert_at);
+        memcpy(b + g->insert_at, b + g->copy_from, rec);
+        uint8_t *c = b + g->insert_at;
+        put32(c + 1, MGB_GRAPHICS);    /* DISPLAY's down link, and the record's id */
+        put32(c + 0x10, MGB_GRAPHICS); /* the record's id again */
+        put32(c + rec - 4, MGB_VIDEO); /* its up link: DISPLAY */
+        put32(b + g->link_site + (g->link_site > g->insert_at ? rec : 0), MGB_GRAPHICS);
+        b[g->count_at] = (uint8_t)(g->count + 1);
+        const uint16_t step = (uint16_t)(g->y_new - g->y_old);
+        int moved = move_records(b, g->insert_at, g->insert_at + rec, g->x, g->y_old, step);
+        if (g->below_to)
+            moved += move_records(b, g->insert_at + rec, g->below_to + rec, g->x, g->y_new, step);
+        fprintf(stderr, "[FCI] menu: GRAPHICS added to the %s screen (%d positions)\n", g->screen, moved);
+        fflush(stderr);
+        return;
+    }
+}
+
+/* the pause menu's string table has no spare row for GRAPHICS: the unused CHEATS (DEBUG) row (same length)
+ * moves into the P_EditProfile section after DISPLAY's, the rows between shifting up */
+static void label_pause_graphics(void *buffer, uint32_t bytes)
+{
+    static const char cheat[] = "<string enum=\"B_CheatDebug\" value=\"CHEATS (DEBUG)\"/>";
+    static const char gfx[] = "<string enum=\"B_ControllerScheme\" value=\"GRAPHICS\"/>";
+    static const char *const videos[] = {"<string enum=\"B_Video\" value=\"DISPLAY\"/>",
+                                         "<string enum=\"B_Video\" value=\"GAME OPTIONS\"/>"};
+    _Static_assert(sizeof cheat == sizeof gfx, "Menu XML row size changed");
+    char *b = buffer, *end = b + bytes, *row = NULL, *section = NULL, *after = NULL;
+    if (bytes > 4096 || bytes < sizeof cheat || memcmp(b, "<stringtable", 12))
+        return;
+    for (char *p = b; !after && p + sizeof cheat <= end; p++) {
+        if (!row && !memcmp(p, cheat, sizeof cheat - 1))
+            row = p;
+        else if (row && !section && !memcmp(p, "<section name=\"P_EditProfile\">", 30))
+            section = p;
+        else if (section && !memcmp(p, "</section>", 10))
+            break;
+        else if (section)
+            for (int v = 0; v < 2; v++)
+                if ((size_t)(end - p) >= strlen(videos[v]) && !memcmp(p, videos[v], strlen(videos[v])))
+                    after = p + strlen(videos[v]);
+    }
+    if (!after)
+        return;
+    memmove(row, row + sizeof cheat - 1, (size_t)(after - row) - (sizeof cheat - 1));
+    memcpy(after - (sizeof gfx - 1), gfx, sizeof gfx - 1);
+    fprintf(stderr, "[FCI] menu: GRAPHICS label added to the pause menu's strings\n");
+}
+
+/* Patch the copied XML before the UI caches its glyphs. Keep archive offsets and lengths intact.
+ * mp: the multiplayer rows (menu mode); quit: QUIT GAME's label and tooltip. */
+static void relabel_xml(HANDLE h, void *buffer, uint32_t bytes, int mp, int quit, int gfx)
+{
+    // clang-format off: the menu rows stay one per line (tests/test_lan_menu.py reads them).
+    static const char live[] = "<string enum=\"B_Live\" value=\"XBOX LIVE\"/>";
+    static const char internet[] = "<string enum=\"B_Live\" value=\"INTERNET\" />";
+    static const char system_link[] = "<string enum=\"B_SystemLink\" value=\"SYSTEM LINK\"/>";
+    static const char lan[] = "<string enum=\"B_SystemLink\" value=\"LAN\"        />";
+    static const char live_fci_desc_old[] = "<string enum=\"B_Live\" value=\"Prove your skills to the world in four exciting game modes\"/>";
+    static const char live_fci_desc_new[] = "<string enum=\"B_Live\" value=\"Connect and play with fci-recomp players across the world\" />";
+    static const char live_evo_desc_old[] = "<string enum=\"B_Live\" value=\"Prove your skills to the world in five exciting game modes\"/>";
+    static const char live_evo_desc_new[] = "<string enum=\"B_Live\" value=\"Connect and play with fci-recomp players across the world\" />";
+    static const char lan_desc_old[] = "<string enum=\"B_SystemLink\" value=\"Link 2 to 16 Xbox video game systems for multiplayer mayhem\"/>";
+    static const char lan_desc_new[] = "<string enum=\"B_SystemLink\" value=\"Play with other players across your local network.\"         />";
+    static const char lan_alt_desc_old[] = "<string enum=\"B_SystemLink_Alt\" value=\"Link 2 to 14 Xbox video game systems for multiplayer mayhem\"/>";
+    static const char lan_alt_desc_new[] = "<string enum=\"B_SystemLink_Alt\" value=\"Play with other players across your local network.\"         />";
+    _Static_assert(sizeof live == sizeof internet, "Menu XML row size changed");
+    _Static_assert(sizeof system_link == sizeof lan, "Menu XML row size changed");
+    _Static_assert(sizeof live_fci_desc_old == sizeof live_fci_desc_new, "Menu XML row size changed");
+    _Static_assert(sizeof live_evo_desc_old == sizeof live_evo_desc_new, "Menu XML row size changed");
+    _Static_assert(sizeof lan_desc_old == sizeof lan_desc_new, "Menu XML row size changed");
+    _Static_assert(sizeof lan_alt_desc_old == sizeof lan_alt_desc_new, "Menu XML row size changed");
+    static const char quit_old[] = "<string enum=\"B_CheatsDebug\" value=\"CHEATS (DEBUG)\"/>";
+    static const char quit_new[] = "<string enum=\"B_Quit\" value=\"QUIT GAME\"            />";
+    static const char quit_desc_old[] = "<string enum=\"B_CheatsDebug\" value=\"Debugging Cheats (DEBUG)\"/>";
+    static const char quit_desc_new[] = "<string enum=\"B_Quit\" value=\"Exit the game\"                  />";
+    _Static_assert(sizeof quit_old == sizeof quit_new, "Menu XML row size changed");
+    _Static_assert(sizeof quit_desc_old == sizeof quit_desc_new, "Menu XML row size changed");
+    static const char gfx_old[] = "<string enum=\"B_ControllerScheme\" value=\"CONTROLLER SCHEME\"/>";
+    static const char gfx_new[] = "<string enum=\"B_ControllerScheme\" value=\"GRAPHICS\"         />";
+    _Static_assert(sizeof gfx_old == sizeof gfx_new, "Menu XML row size changed");
+    // clang-format on
+    static const struct {
+        const char *old, *replacement;
+        size_t bytes;
+        int kind; /* 0: a multiplayer row, 1: QUIT GAME, 2: the profile screen's GRAPHICS button */
+    } rows[] = {
+            {live, internet, sizeof live - 1, 0},
+            {system_link, lan, sizeof system_link - 1, 0},
+            {live_fci_desc_old, live_fci_desc_new, sizeof live_fci_desc_old - 1, 0},
+            {live_evo_desc_old, live_evo_desc_new, sizeof live_evo_desc_old - 1, 0},
+            {lan_desc_old, lan_desc_new, sizeof lan_desc_old - 1, 0},
+            {lan_alt_desc_old, lan_alt_desc_new, sizeof lan_alt_desc_old - 1, 0},
+            {quit_old, quit_new, sizeof quit_old - 1, 1},
+            {quit_desc_old, quit_desc_new, sizeof quit_desc_old - 1, 1},
+            {gfx_old, gfx_new, sizeof gfx_old - 1, 2},
+    };
+    char *cursor = buffer;
+    const char *end = cursor + bytes;
+    int common_dat = 0;
+    while (end - cursor >= (ptrdiff_t)(sizeof live - 1)) { /* the shortest row */
+        cursor = memchr(cursor, '<', (size_t)(end - cursor));
+        if (!cursor)
+            break;
+        const char *replacement = NULL;
+        size_t row_size = 0;
+        for (size_t i = 0; i < sizeof rows / sizeof *rows; i++) {
+            if (!(rows[i].kind == 2 ? gfx : rows[i].kind ? quit : mp))
+                continue;
+            if ((size_t)(end - cursor) >= rows[i].bytes && !memcmp(cursor, rows[i].old, rows[i].bytes)) {
+                replacement = rows[i].replacement;
+                row_size = rows[i].bytes;
+                break;
+            }
+        }
+        if (replacement) {
+            if (!common_dat) {
+                char path[MAX_PATH];
+                if (!pak_file_name(h, path, sizeof path))
+                    return;
+                const char *base = strrchr(path, '\\');
+                if (_stricmp(base ? base + 1 : path, "common.dat"))
+                    return;
+                common_dat = 1;
+            }
+            memcpy(cursor, replacement, row_size);
+        }
+        cursor++;
+    }
+}
+
 uint32_t fci_partition_read_fill(HANDLE h, void *buf, uint32_t length, const LARGE_INTEGER *off,
                                  uint32_t status, uint32_t *got)
 {
     int p;
     ULONGLONG end;
+    extern int fci_nic_menu_mode(void);
+    extern int fci_menu_quit_enabled(void);
+    if (status == 0 && *got) {
+        extern int fci_settings_profile_button(void);
+        int mp = fci_nic_menu_mode(), quit = fci_menu_quit_enabled(), gfx = fci_settings_profile_button();
+        if (mp || quit || gfx)
+            relabel_xml(h, buf, *got, mp, quit, gfx);
+        add_quit_item(buf, *got);
+        if (gfx) {
+            add_graphics_button(buf, *got);
+            label_pause_graphics(buf, *got);
+        }
+    }
+    fci_pak_log_read(h, off, length, status, *got); /* inert unless RECOMP_FCI_PAK_LOG */
     if (*got >= length || (status != 0 && status != 0xC0000011u /* END_OF_FILE */) || !off)
         return status;
     if ((p = partition_of(h)) < 1 || p > 5)
@@ -236,4 +630,73 @@ int fci_gate_00220200(void)
     g_eax = 0;
     g_esp += 4; /* ret: the caller pops the arguments */
     return 1;
+}
+
+/* Delete a directory and its contents; log and leave anything that cannot be deleted. A junction or
+ * symbolic link is removed as a link, never followed. */
+static void fci_remove_tree(const char *path)
+{
+    WIN32_FIND_DATAA fd;
+    char sub[MAX_PATH], pattern[MAX_PATH];
+    HANDLE h;
+    snprintf(pattern, sizeof(pattern), "%s\\*", path);
+    h = FindFirstFileA(pattern, &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if (lstrcmpA(fd.cFileName, ".") == 0 || lstrcmpA(fd.cFileName, "..") == 0)
+                continue;
+            snprintf(sub, sizeof(sub), "%s\\%s", path, fd.cFileName);
+            if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+                && !(fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
+                fci_remove_tree(sub);
+            else if (!((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? RemoveDirectoryA(sub)
+                                                                        : DeleteFileA(sub)))
+                fprintf(stderr, "[FCI] cache heal: cannot delete %s (err %lu)\n", sub, GetLastError());
+        } while (FindNextFileA(h, &fd));
+        FindClose(h);
+    }
+    if (!RemoveDirectoryA(path))
+        fprintf(stderr, "[FCI] cache heal: cannot remove %s (err %lu)\n", path, GetLastError());
+}
+
+/* Remove the Z: cache (<save>\Cache) when the disc time changed since it was built, so the game
+ * re-copies it under the new time; the marker records the disc time. Why: research/docs/internals.md. */
+void fci_disk_cache_heal(const char *save_dir, uint64_t disc_time)
+{
+    char cache_dir[MAX_PATH], marker[MAX_PATH], buf[32];
+    DWORD written;
+    HANDLE hf;
+
+    if (!save_dir || !*save_dir)
+        return;
+    snprintf(cache_dir, sizeof(cache_dir), "%s\\Cache", save_dir);
+    snprintf(marker, sizeof(marker), "%s\\fci-cache-disc-time.txt", save_dir);
+
+    /* Current marker: the cache was built under this disc time, so leave it. */
+    hf = CreateFileA(marker, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (hf != INVALID_HANDLE_VALUE) {
+        DWORD got = 0;
+        if (ReadFile(hf, buf, sizeof(buf) - 1, &got, NULL)) {
+            buf[got] = 0;
+            if (strtoull(buf, NULL, 16) == disc_time) {
+                CloseHandle(hf);
+                return;
+            }
+        }
+        CloseHandle(hf);
+    }
+
+    /* Stale, or first boot: clear the cache and record the disc time it is built under. */
+    if (GetFileAttributesA(cache_dir) != INVALID_FILE_ATTRIBUTES) {
+        fprintf(stderr, "[FCI] cache heal: removing %s\n", cache_dir);
+        fci_remove_tree(cache_dir);
+    }
+    CreateDirectoryA(cache_dir, NULL);
+    hf = CreateFileA(marker, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+    if (hf != INVALID_HANDLE_VALUE) {
+        int len = snprintf(buf, sizeof(buf), "%llX\n", (unsigned long long)disc_time);
+        if (len > 0)
+            WriteFile(hf, buf, len, &written, NULL);
+        CloseHandle(hf);
+    }
 }

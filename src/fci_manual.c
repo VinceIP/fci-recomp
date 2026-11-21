@@ -13,6 +13,7 @@
 #include "fci_image.h"
 
 void fci_log_session_end(void); /* fci_config.c: a clean exit, for the log */
+void fci_exit_wait(void);       /* fci_exit.c: a user exit waits for a save to finish */
 
 /* audio buffers XAudio2 refused because its queue was full */
 int fci_apu_drops;
@@ -29,6 +30,8 @@ extern int fci_launch_argc;
 extern char **fci_launch_argv;
 unsigned long fci_window_handoff(void **frame); /* fci_xbr_glue.cpp */
 void fci_window_pass_on(void);                  /* fci_xbr_glue.cpp */
+void fci_nic_shutdown(void);                    /* fci_nic.c */
+void fci_nic_mac(uint8_t *mac);                 /* fci_nic.c */
 int fci_host_symbol(DWORD64 pc, char *name, size_t size, DWORD64 *disp,
                     DWORD64 *symbol_size); /* fci_threads.c */
 
@@ -114,6 +117,8 @@ void fci_relaunch(uint32_t page)
     int in_chain = getenv("RECOMP_FCI_CHAIN") != NULL;
     uint32_t i;
 
+    fci_exit_wait(); /* the relaunch ends this instance: not between a save's file writes (Q22c) */
+
     for (i = 0; i < sizeof(path) - 1 && MEM8(page + 8 + i); i++)
         path[i] = (char)MEM8(page + 8 + i);
     path[i] = 0;
@@ -198,6 +203,14 @@ void fci_relaunch(uint32_t page)
     si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
     fprintf(stderr, "[FCI] relaunch: %s -> %s with %s\n", path, exe, file);
     fflush(stderr);
+    fci_nic_shutdown(); /* the next instance re-binds RECOMP_FCI_NET_PEERS' port; this one must not hold it */
+    { /* the instance keeps its card's MAC across its relaunches, as a console keeps its through a reboot */
+        uint8_t m[6];
+        char mac[13];
+        fci_nic_mac(m);
+        snprintf(mac, sizeof mac, "%02X%02X%02X%02X%02X%02X", m[0], m[1], m[2], m[3], m[4], m[5]);
+        SetEnvironmentVariableA("RECOMP_FCI_MAC", mac);
+    }
     fci_window_pass_on(); /* the next instance's frame takes this one's place */
     if (!CreateProcessA(exe, cmd, NULL, NULL, TRUE, CREATE_SUSPENDED, NULL, NULL, &si, &pi)) {
         fprintf(stderr, "[FCI] relaunch: CreateProcess failed (%lu)\n", GetLastError());
@@ -327,6 +340,9 @@ void fci_unbridged_ordinal(unsigned ordinal, int slot)
 }
 
 void fci_thread_stop(const char *why, uint32_t routine) { stop(88, why, routine, NULL); }
+
+/* a kernel service asked for something its implementation does not do (src/fci_xcrypt.c) */
+void fci_kernel_unsupported(const char *what) { stop(87, what, g_esp >= 4 ? MEM32(g_esp - 4) : 0, NULL); }
 
 /* DirectSound's effects-image download (00580363) writes command 3 to the DSP doorbell at image + 0x810
  * (image = [[[this+8]+0x10]]) and spins until it clears: register that doorbell for acknowledgement */

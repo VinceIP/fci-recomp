@@ -1,0 +1,32 @@
+# Q23 two-instance LAN check, host (Evolution). The menu steps are the Evolution flow, verified on
+# the recorded run (build/qwen-in/q23/run); for Instincts they are unverified.
+# RECOMP_FCI_TELEMETRY is not here: tools/net_check.py injects it at run time (under the run's
+# output dir), so a fresh checkout runs with only FCI_TITLE, FCI_INSTALL and FCI_REGRESS set.
+--save user-play-nocache
+--opt RECOMP_FCI_NET_LAN=1
+--opt RECOMP_FCI_NET_LAN_PORT=47920
+--opt RECOMP_FCI_NET_LAN_BCPORTS=47920,47921
+--opt RECOMP_FCI_TELEMETRY_DEBUG=1
+--opt RECOMP_FCI_NET_TRACE=1
+wait:title
+pad:start:200
+sleep:3
+pad:down:200
+sleep:0.8
+pad:down:200
+sleep:0.8
+pad:a:200
+sleep:3
+pad:down:200
+sleep:1
+pad:a:200
+sleep:5
+pad:x:200
+sleep:3
+pad:a:200
+sleep:45
+pad:a:200
+sleep:3
+capture
+sleep:200
+capture

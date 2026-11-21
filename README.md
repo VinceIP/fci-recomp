@@ -16,21 +16,20 @@ This project was made using extensive AI assistance and LLM-related tools. A hum
 
 ## Status
 
-**Version 0.3.0.beta** - Active beta test pre-release version for online multiplayer support. Old, non-functioning Xbox Live
-menus have been replaced with an online server browser accessible from within the game. Hosting and joining games with other real players works. Sharing and playing on custom maps between peers works as it did in the original game. Hosting a dedicated server with rotating maps also works as it did in the original game. Various QOL improvements have been added, such as context-sensitive controller/input icons and controller rumble.
-
-**Version 0.2.4** - Current main, stable release. Story mode and map editors for Instincts and Evolution are working. Frame rates can be unlocked up to your display's refresh rate. Enhanced visual features powered by a DirectX 12 renderer are implemented. Mouse and keyboard controls drive the game's camera itself as opposed to manipulate the controller analog stick. Keybinds are customizable. Enhanced features and options are matched for both separate titles. Some visual glitches remain. Please continue to report crashes and issues in the Discord or Github!
+**Version 0.3.0** - Current stable release, supports Windows and Steam Deck via Proton. Far Cry Instincts and Far Cry Instincts Evolution are fully playable in single player campaign modes with working map editors, online multiplayer with built-in server browser, offline LAN multiplayer, and split screen multiplayer modes. Both titles are running on a D3D12 renderer with various visual enhancements.
 
 ## Features
 
 - 2 recomps in 1; both Far Cry Instincts and its follow-up sequel Far Cry Instincts: Evolution.
 - Single player story mode for both games as they were on the original Xbox.
+- Online and LAN multiplayer for both games through a server browser in the Multiplayer menu.
 - Map editors for both games as they were on the original Xbox. Building them is optional and can be skipped if you aren't interested in making maps. Enhancements to the map editors are planned!
-- Mouse and keyboard support. Keybinds and mouse settings can be adjusted by modifying fci.ini. The mouse manipulates the game camera directly, rather than simply driving a digital analog stick.
+- Quick save (F5) and quick load (F9) in Story Mode.
+- Mouse and keyboard support. The mouse manipulates the game camera directly, rather than simply driving a digital analog stick. Keybinds can be changed in fci.ini or the launcher.
 - Modern visual enhancements via a modified version of [Xbox XBE Recomp](https://github.com/TGP482/Xbox-XBERecomp)
 tailored for Far Cry Instincts and Evolution. Anisotropic filtering, anti-aliasing, screen-space ambient occlusion, scalable
-internal rendering resolution, soft shadows, scalable sun shadow resolution, borderless fullscreen, increased 
-draw distances, 16:9 widescreen, and more. Display & graphics options can be adjusted by modifying fci.ini.
+internal rendering resolution, soft shadows, scalable sun shadow resolution, borderless fullscreen, increased
+draw distances, adjustable field of view, various aspect ratios, experimental volumetric fog, and more.
 
 ## Roadmap
 
@@ -64,7 +63,7 @@ installed. Consider raising an issue if you have any errors during the recompila
 5. Start `FarCryInstincts\FarCryInstincts.exe`, or `FarCryEvolution\FarCryEvolution.exe`.
 6. Repeat the above steps for each title.
 
-Save data and log files are stored in `%APPDATA%\fci-recomp` by default. This directory can be changed by modifying `fci.ini`. Note that there are separate .ini files for each title. The `build` folder contains an object cache meant to keep future updates faster in some cases. It can be deleted safely, but keep it to speed up future updates.
+Save data and log files are stored in `%APPDATA%\fci-recomp` by default. This directory can be changed by modifying `fci.ini`. Note that there are separate .ini files for each title. If a damaged profile is repaired at startup, the save it set aside is kept in `save-backups` there. The `build` folder contains an object cache meant to keep future updates faster in some cases. It can be deleted safely, but keep it to speed up future updates.
 
 Developers can run the same steps via Python: `python fci-recomp.py setup <disc>`
 (`--help` lists the options).
@@ -74,7 +73,8 @@ A git checkout doesn't include the compiler and toolkit; the first build downloa
 
 ## Steam Deck (experimental)
 
-Both Instincts and Evolution run on the Steam deck via Proton, but this is experimental. Expect some issues here and there.
+Both Instincts and Evolution run on the Steam deck via Proton, but this is experimental. Expect some issues here and there. The FCI Launcher is not supported yet on Steam Deck, nor is building the game
+in Linux.
 
 1. Build the game (and the map editor, if you want it) on a Windows PC as above.
 2. Copy the whole game folder (`FarCryInstincts` or `FarCryEvolution`, with its `game` folder inside) to the Deck.
@@ -82,14 +82,10 @@ Both Instincts and Evolution run on the Steam deck via Proton, but this is exper
 4. In the game's Properties > Compatibility, force Proton 10, Proton stable, or newer.
 5. Launch it from Steam.
 
-A full Linux port is being planned at some point in the future, and the need for Proton will go away.
-
-The launcher (`FCI Launcher.exe`) doesn't run on the Deck yet, but it will be ported to work on Linux soon. You'll need to manually adjust your fci.ini to customize settings on the Steam Deck for now.
-Remember to remove semi-colons from the setting you want to adjust in the file.
-
 ## Configuration
 
-Adjust game settings under the `Settings` tab in `FCI Launcher`.
+Adjust game settings under the `Settings` tab in `FCI Launcher`, or in-game under the Options menus. Keybinds must be setup in the launcher
+or .ini file exclusively, for the moment.
 
 Alternatively - directories, display, graphics, keybinds, and other settings are configured by editing `fci.ini`,
 found next to the game executable. For more information on what each setting does, read the comments
@@ -100,8 +96,10 @@ to your desired settings. Save and relaunch the game.
 
 - Crashes may rarely occur during single player mode or elsewhere. Please report any crash and include your crash log to help improve the project.
 - Occasional freezes on Steam Deck/Linux under Proton, requiring a force quit.
-- Frame rates above 30 are experimental (see `display-frame-rate` in fci.ini). AI and physics may break or cause a game softlock, unless the engine update cap setting is enabled.
-- Some areas in single player appear too dark, don't light up correctly, have flickering shadows, or issues with vertices disappearing depending on where the player is standing.
+- Frame rates above 30 are experimental (see `display-frame-rate` in fci.ini). AI and physics may break or cause a game softlock, unless the engine update cap setting is enabled. Multiplayer always runs with the cap.
+- Minor visual glitches or performance dips in some areas.
+- At a wide field of view, the screen edges can show stale image strips indoors.
+- Volumetric fog is a work-in-progress, and may cause crashes or other glitches. Try it out and see if you like it.
 
 Logs of crashed sessions are kept in `%APPDATA%\fci-recomp\logs`. Consider raising an issue and attaching a crash
 log if your game crashes, or report any other technical issues.

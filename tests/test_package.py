@@ -18,7 +18,7 @@ def test_release_zip_has_the_build_and_not_the_developer_files(tmp_path, capsys)
     with zipfile.ZipFile(zip_path) as z:
         names = z.namelist()
         assert {"BuildGame.cmd", "BuildEditor.cmd", "fci-recomp.py", "tools/package.py", "LICENSE"} <= set(names)
-        assert not [n for n in names if n.split("/")[0] in package.EXCLUDE]
+        assert not [n for n in names if any(n == path or n.startswith(path + "/") for path in package.EXCLUDE)]
         assert package.LAUNCHER not in names
         assert z.read("BuildGame.cmd").startswith(b"@echo off\r\n")  # cmd.exe wants CRLF
     assert "sha256 " in capsys.readouterr().out

@@ -28,6 +28,7 @@ RUNTIME_SOURCES = {
         "kernel_rtl.c",
         "kernel_memory.c",
         "kernel_file.c",
+        "savelog.c",  # patches/runtime/0026-save-log.patch
         "kernel_thread.c",
         "kernel_sync.c",
         "kernel_hal.c",
@@ -87,6 +88,10 @@ SYSTEM_LIBS = [
     "propsys",
     "uuid",
     "d3d12",
+    "ws2_32",  # the network card's hub link (src/fci_nic.c)
+    "iphlpapi",  # the LAN transport's adapter list (src/fci_nic.c)
+    "winhttp",  # the host list worker (src/fci_net_worker.c)
+    "bcrypt",  # nonce generation (src/fci_net_worker.c)
 ]
 DEFINES = ["-DWIN32_LEAN_AND_MEAN", "-DNOMINMAX", "-D_CRT_SECURE_NO_WARNINGS", "-D_USE_MATH_DEFINES"]
 # the semantics the lifted and runtime code were written and tested against with MSVC: no type-based alias
@@ -124,11 +129,32 @@ REPLACE = {
         "until it reads 0; the hook registers that address with the APU "
         "acknowledgement (fci_manual.c)",
     ),
+    "sub_000675B0": (
+        "prehook",
+        "the UI input manager's router (ecx the manager, its vtable slot 1, from the game loop sub_001FCD40): "
+        "recorded, so typing stops while a popup takes the pad input (fci_vkb.c)",
+    ),
+    "sub_0010B500": (
+        "prehook",
+        "the on-screen keyboard's open (eax keyboard): typing on the PC keyboard starts (fci_vkb.c)",
+    ),
+    "sub_0010B5E0": ("prehook", "the on-screen keyboard's close: typing stops (fci_vkb.c)"),
     "sub_001F6C00": ("prehook", "Input_PollPads (re/symbols): counts polls for RECOMP_FCI_STATUS"),
     "sub_000F0500": (
         "prehook",
         "Camera_BuildViews (re/symbols): counts 3D frames for RECOMP_FCI_STATUS, a line per frame for "
         "RECOMP_FCI_TRACE (fci_trace.c)",
+    ),
+    "sub_002A84E0": (
+        "prehook",
+        "the camera update (ebx the camera, FOV in radians at +0x38): display-fov scales that field when "
+        "Camera_BuildViews calls it (the render camera), so projection, frustum and water agree (fci_fov.c)",
+    ),
+    "sub_005514C9": (
+        "prehook",
+        "the shared perspective matrix builder (param2 = vertical FOV in radians, at g_esp+8): "
+        "display-aspect scales the aspect; display-fov scales the fovy only where the camera build is not "
+        "hooked (Evolution), since Instincts scales the camera's field (fci_fov.c)",
     ),
     "sub_00098AE0": (
         "prehook",
@@ -160,6 +186,76 @@ REPLACE = {
         "the title's movie player (path, ...), cdecl; RECOMP_FCI_SKIP_INTROS / "
         "RECOMP_FCI_SKIP_MOVIES skip listed movies as if they had played (fci_disk.c, "
         "re/notes/MOVIES.md)",
+    ),
+    "sub_0051C5EA": (
+        "prehook",
+        "XNetCreateKey: only a host creates a key (a guest registers the host's), so this is host "
+        "started; the worker thread registers with the host list (fci_net_worker.c)",
+    ),
+    "sub_0051CDD4": (
+        "prehook",
+        "XNetRegisterKey: logs the session key; a host or a joining guest is in a System Link match (fci_net_worker.c)",
+    ),
+    "sub_002ACAF0": (
+        "prehook",
+        "pak name→hash: logs the looked-up name for RECOMP_FCI_PAK_LOG, paired with the "
+        "following .dat read by tools/pak_pairs.py (fci_disk.c)",
+    ),
+    "sub_0014EFF0": (
+        "gate",
+        "main menu action handler: logs the action hash for RECOMP_FCI_MENU_LOG; "
+        "QUIT GAME (B_Quit, 0x8bcdf569) closes the game; RECOMP_FCI_MENU_QUIT=0 leaves the item out (fci_menu.c)",
+    ),
+    "sub_00181F70": (
+        "gate",
+        "Controller Options' show (ecx screen, 1 argument; ret 4): the display and graphics page opened from the "
+        "profile screen gets its title and help line after the screen's labels (fci_settings_menu.c)",
+    ),
+    "sub_001937B0": (
+        "gate",
+        "the profile screen's buttons (eax event, ecx screen; ret): the added GRAPHICS button opens Controller "
+        "Options showing the display and graphics page (fci_settings_menu.c)",
+    ),
+    "sub_00056320": (
+        "gate",
+        "the save writer's room-maker (esi profile folder, game object and new name on the stack; ret): from the "
+        "menu, keeps a level file its checkpoint needs by setting its time past the checkpoint's (fci_saves.c)",
+    ),
+    "sub_0014CEB0": (
+        "gate",
+        "the pause menu's Options buttons (eax event, edi screen; ret): the added GRAPHICS button opens "
+        "Controller Options showing the display and graphics page (fci_settings_menu.c)",
+    ),
+    "sub_00182570": (
+        "gate",
+        "the Controller Options screen's fill (screen; ret 4): adds the control settings, and the DISPLAY AND "
+        "GRAPHICS row where no GRAPHICS button reaches the page (fci_settings_menu.c)",
+    ),
+    "sub_00152AF0": (
+        "gate",
+        "A on an option list's row (eax event, list; ret 4): DISPLAY AND GRAPHICS opens that page; a "
+        "changed setting is applied and saved to fci.ini (fci_settings_menu.c)",
+    ),
+    "sub_00152510": (
+        "gate",
+        "an option list's rows rebuilt ((list); ret 4): a setting picked in the value popup is applied and "
+        "saved (fci_settings_menu.c)",
+    ),
+    "sub_00151AB0": (
+        "gate",
+        "an option's value index set (ecx option, index; ret 4), as the value popup does: a recomp setting "
+        "is applied, saved and its row redrawn (fci_settings_menu.c)",
+    ),
+    "sub_00151FD0": (
+        "gate",
+        "the option value popup's input (ecx handler, event; ret 8): the GRAPHICS title is put back after "
+        "the popup closes (fci_settings_menu.c)",
+    ),
+    "sub_00109670": ("gate", "set the native browser title at the System Link call site (fci_lan_menu.c)"),
+    "sub_001536F0": ("gate", "render host-list status on the browser page (fci_lan_menu.c)"),
+    "sub_00148170": (
+        "prehook",
+        "MP pause menu action handler: logs the action hash for RECOMP_FCI_MENU_LOG (fci_menu.c)",
     ),
 }
 
@@ -504,6 +600,12 @@ def compile_groups(group, inputs, work, obj, tools, base, record):
     elif group == "host":
         for f in sorted((inputs / "host").glob("*.c")):
             flags = ["-O2", *DEBUG, "-Wall", "-Wno-unused", "-Werror=implicit-function-declaration"]
+            if f.name == "fci_net_worker.c" and os.environ.get("FCI_BUILD_VERSION"):
+                flags.append(f'-DFCI_BUILD_VERSION="{os.environ["FCI_BUILD_VERSION"]}"')  # tools/build.py
+            if f.name == "fci_net_worker.c" and os.environ.get("FCI_BETA_REPORTS") == "1":
+                flags.append("-DFCI_BETA_REPORTS")
+            if f.name == "fci_nic.c" and os.environ.get("FCI_NET_TEST") == "1":
+                flags.append("-DFCI_NET_TEST")  # the relay test switch (RECOMP_FCI_NET_PUNCH)
             jobs.append((cc + flags + inc([gen] + rt_inc) + out(f.stem + ".obj") + [str(f)], [f]))
     elif group == "xbr":
         # Xbox XBE Recomp's D3D8 and DirectSound layers and the Direct3D 12 renderer (src/xbr), with the

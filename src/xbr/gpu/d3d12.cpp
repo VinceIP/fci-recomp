@@ -44,6 +44,9 @@
 #include "gpu/vertex.h"
 #include "kernel/kernel.h"
 
+// FCI: the HUD remap at 16:10 (fci_display.c): the 16:9 layout fitted to the width
+extern "C" void fci_hud_fit(float a, float* sx, float* sy, float* ax, float* ay);
+
 using Microsoft::WRL::ComPtr;
 
 namespace gpu {
@@ -509,7 +512,7 @@ private:
     }
     // Pass, then its step
     void Pass(const char* hlsl, const char* entry, DXGI_FORMAT rtv, D3D12_CPU_DESCRIPTOR_HANDLE rh, uint32_t w,
-              uint32_t h, ID3D12Resource* const src[3], const DXGI_FORMAT fmt[3], const float p[8],
+              uint32_t h, ID3D12Resource* const src[4], const DXGI_FORMAT fmt[4], const float* p, size_t n,
               float blend) override;
     ID3D12PipelineState* EnsurePassPipeline(const char* hlsl, const char* entry, DXGI_FORMAT rtv, float blend);
     // Draw, in call order, each callee right after its caller
@@ -536,7 +539,9 @@ private:
     ID3D12PipelineState* EnsurePipeline(const PsoKey& k, ID3DBlob* vs, ID3DBlob* ps);
     void FillPipelineDesc(const PsoKey& k, ID3DBlob* vs, ID3DBlob* ps, D3D12_GRAPHICS_PIPELINE_STATE_DESC& d) const;
     void UploadConstants(const State& s, const DrawShaders& sh, const PsoKey& k, const DrawTextures& stages,
-                         GuestExtent size, DrawConstants& c);
+                         GuestExtent size, const Assembled& a, DrawConstants& c);
+    void FillHudBox(const State& s, const DrawShaders& sh, const DrawTextures& stages, const GuestExtent& size,
+                    const Assembled& a, DrawConstants& c);  // FCI: the pretransformed 2D's 16:9 -> A remap
     void FillTextureConstants(const State& s, const DrawTextures& stages, DrawConstants& c);
     void FillTexelConstants(int i, const TextureDesc& d, const DrawTextures& stages, DrawConstants& c);
     void CaptureDraw(const State& s, uint32_t prim, uint32_t count, const PsoKey& k, const DrawConstants& c,
@@ -805,9 +810,10 @@ private:
         std::vector<float> orig;  // the constants as drawn (replays write blends into the ring)
         std::vector<float> from;  // milestone 3: the match's, when the draw is blended
         std::bitset<192> pos;     // the registers its position depends on
+        std::bitset<192> direct;  // those read by number, not through a0 (a bone palette is the object's)
     };
     void ApplyBlend(double alpha);
-    std::unordered_map<uint64_t, std::bitset<192>> pos_regs_;  // by vertex program hash
+    std::unordered_map<uint64_t, std::pair<std::bitset<192>, std::bitset<192>>> pos_regs_;  // by program hash
     // registers holding one value for every draw that reads them for its position (the camera: Evolution's
     // view-projection c71-c74), this frame's and the frame before's, with that value
     std::bitset<192> shared_, prev_shared_;
@@ -912,10 +918,11 @@ bool D3D12Backend::Init(uint32_t width, uint32_t height) {
         } else {
             presenter_ = std::thread([this] { PresenterLoop(); });
         }
-        if (const char* d = std::getenv("RECOMP_FCI_XBR_REPLAY_DUMP")) {
-            unsigned long long from = 0, n = 0;
-            if (std::sscanf(d, "%llu,%llu", &from, &n) == 2) dump_from_ = from, dump_left_ = n;
-        }
+    }
+    // FCI: with or without replay: consecutive pictures show flicker that single captures miss
+    if (const char* d = std::getenv("RECOMP_FCI_XBR_REPLAY_DUMP")) {
+        unsigned long long from = 0, n = 0;
+        if (std::sscanf(d, "%llu,%llu", &from, &n) == 2) dump_from_ = from, dump_left_ = n;
     }
     LOGI("d3d12: %ux%u guest, %ux%u window, render scale %.3f x %.3f", width, height, bb_w_, bb_h_, scale_x_,
          scale_y_);
@@ -1020,9 +1027,9 @@ void D3D12Backend::CreateHeaps() {
 bool D3D12Backend::CreateRootSignature() {
     D3D12_DESCRIPTOR_RANGE ranges[2] = {};
     ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    ranges[0].NumDescriptors = 4;
+    ranges[0].NumDescriptors = 5;
     ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
-    ranges[1].NumDescriptors = 4;
+    ranges[1].NumDescriptors = 5;
     D3D12_ROOT_PARAMETER params[4] = {};
     params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
     params[0].Descriptor.ShaderRegister = 0;
@@ -1708,13 +1715,13 @@ uint32_t D3D12Backend::EnsureBlitSamplers() {
     auto it = samplers_.find(key);
     uint32_t si;
     if (it == samplers_.end()) {
-        if (smp_used_ + 4 > kSamplerCount) {
+        if (smp_used_ + 5 > kSamplerCount) {
             samplers_.clear();
             smp_used_ = 0;
         }
         si = smp_used_;
-        smp_used_ += 4;
-        for (int i = 0; i < 4; i++) {
+        smp_used_ += 5;  // FCI: the root table has 5 (s4: the volume fog's)
+        for (int i = 0; i < 5; i++) {
             D3D12_SAMPLER_DESC sd{};
             sd.Filter = i == 0 ? D3D12_FILTER_MIN_MAG_MIP_LINEAR : D3D12_FILTER_MIN_MAG_MIP_POINT;
             sd.AddressU = sd.AddressV = sd.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
@@ -1795,7 +1802,7 @@ ID3DBlob* D3D12Backend::Compile(const std::string& src, const char* entry, const
 namespace {
 constexpr char kShaderCacheMagic[8] = {'F', 'C', 'I', 'S', 'H', 'D', '0', '1'};
 // D3DCompile's flags and the record layout: a change makes the old file unusable, and it is started again
-constexpr uint64_t kShaderCacheSalt = D3DCOMPILE_OPTIMIZATION_LEVEL1 | 1ull << 32;
+constexpr uint64_t kShaderCacheSalt = D3DCOMPILE_OPTIMIZATION_LEVEL1 | 4ull << 32;
 struct ShaderRecord {
     uint64_t hash;
     uint64_t check;
@@ -1927,21 +1934,32 @@ ID3D12PipelineState* D3D12Backend::EnsurePassPipeline(const char* hlsl, const ch
 }
 
 void D3D12Backend::Pass(const char* hlsl, const char* entry, DXGI_FORMAT rtv, D3D12_CPU_DESCRIPTOR_HANDLE rh,
-                        uint32_t w, uint32_t h, ID3D12Resource* const src[3], const DXGI_FORMAT fmt[3],
-                        const float p[8], float blend) {
+                        uint32_t w, uint32_t h, ID3D12Resource* const src[4], const DXGI_FORMAT fmt[4],
+                        const float* p, size_t n, float blend) {
     ID3D12PipelineState* pso = EnsurePassPipeline(hlsl, entry, rtv, blend);
     if (!pso) return;
-    uint32_t slot = AllocSrvSlots(4);
+    uint32_t slot = AllocSrvSlots(5);
     for (int i = 0; i < 4; i++) {
         D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
-        sv.Format = i < 3 && src[i] ? fmt[i] : kBgra;
-        sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        sv.Format = src[i] ? fmt[i] : kBgra;
+        if (src[i] && src[i]->GetDesc().Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D) {
+            sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
+            sv.Texture3D.MipLevels = 1;
+        } else {
+            sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+            sv.Texture2D.MipLevels = 1;
+        }
         sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        sv.Texture2D.MipLevels = 1;
-        dev_->CreateShaderResourceView(i < 3 ? src[i] : nullptr, &sv, Cpu(srv_heap_.Get(), slot + i, srv_inc_));
+        dev_->CreateShaderResourceView(src[i], &sv, Cpu(srv_heap_.Get(), slot + i, srv_inc_));
     }
-    Alloc cb = Upload(256, 256);
-    std::memcpy(cb.cpu, p, 8 * sizeof(float));
+    D3D12_SHADER_RESOURCE_VIEW_DESC sv5{};
+    sv5.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    sv5.Format = kBgra;
+    sv5.Texture2D.MipLevels = 1;
+    sv5.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    dev_->CreateShaderResourceView(nullptr, &sv5, Cpu(srv_heap_.Get(), slot + 4, srv_inc_));
+    Alloc cb = Upload(512, 256);
+    std::memcpy(cb.cpu, p, std::min(n, size_t(128)) * sizeof(float));
     cl_->OMSetRenderTargets(1, &rh, FALSE, nullptr);
     SetFullViewport(w, h);
     if (blend >= 0) {
@@ -1992,7 +2010,8 @@ D3D12_PRIMITIVE_TOPOLOGY_TYPE TopologyType(uint32_t topo) {
 }
 
 constexpr uint32_t kFillWireframe = 0x1B01;  // D3DFILL_WIREFRAME
-constexpr uint32_t kCullCw = 0x900;          // D3DCULL_CW
+constexpr uint32_t kCullCw = 0x900;          // D3DCULL_CW, D3DFRONT_CW
+constexpr uint32_t kCullCcw = 0x901;         // D3DCULL_CCW, D3DFRONT_CCW
 
 void FillDepthStencilDesc(const PsoKey& k, D3D12_DEPTH_STENCIL_DESC& ds) {
     ds.DepthEnable = k.zen;
@@ -2022,7 +2041,7 @@ void D3D12Backend::FillPipelineDesc(const PsoKey& k, ID3DBlob* vs, ID3DBlob* ps,
     b.RenderTargetWriteMask = UINT8(k.wmask);
     d.SampleMask = UINT_MAX;
     d.RasterizerState.FillMode = k.fill == kFillWireframe ? D3D12_FILL_MODE_WIREFRAME : D3D12_FILL_MODE_SOLID;
-    d.RasterizerState.CullMode = k.cull ? D3D12_CULL_MODE_BACK : D3D12_CULL_MODE_NONE;
+    d.RasterizerState.CullMode = k.cull == 2 ? D3D12_CULL_MODE_FRONT : k.cull ? D3D12_CULL_MODE_BACK : D3D12_CULL_MODE_NONE;
     d.RasterizerState.FrontCounterClockwise = k.ccw;
     d.RasterizerState.DepthBias = k.zbias;
     d.RasterizerState.SlopeScaledDepthBias = k.zslope;
@@ -2330,19 +2349,23 @@ D3D12_SAMPLER_DESC StageSampler(const State& s, int i, const DrawTextures& stage
 }
 
 uint32_t D3D12Backend::EnsureStageSamplers(const State& s, const DrawTextures& stages, bool clamp) {
-    D3D12_SAMPLER_DESC sd[4];
+    D3D12_SAMPLER_DESC sd[5];
     uint32_t aniso = app::Get().aniso;
     for (int i = 0; i < 4; i++) sd[i] = StageSampler(s, i, stages, clamp, aniso);
+    sd[4] = {};
+    sd[4].Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    sd[4].AddressU = sd[4].AddressV = sd[4].AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    sd[4].MaxLOD = D3D12_FLOAT32_MAX;
     uint64_t key = Hash(sd, sizeof(sd));
     auto it = samplers_.find(key);
     if (it != samplers_.end()) return it->second;
-    if (smp_used_ + 4 > kSamplerCount) {
+    if (smp_used_ + 5 > kSamplerCount) {
         samplers_.clear();
         smp_used_ = 0;
     }
     uint32_t base = smp_used_;
-    smp_used_ += 4;
-    for (int i = 0; i < 4; i++) dev_->CreateSampler(&sd[i], Cpu(smp_heap_.Get(), base + i, smp_inc_));
+    smp_used_ += 5;
+    for (int i = 0; i < 5; i++) dev_->CreateSampler(&sd[i], Cpu(smp_heap_.Get(), base + i, smp_inc_));
     samplers_[key] = base;
     return base;
 }
@@ -2455,9 +2478,9 @@ void D3D12Backend::KeyDepthStencil(const State& s, const Assembled& a, PsoKey& k
         k.szfail = SimpleState(s, kMStencilZFail);
         k.spass = SimpleState(s, kMStencilPass);
     }
-    // polygon offset: bias in 24 bit depth units (the host target is float: D3D12 scales an integer bias by
-    // 2^(exponent - 23), 2^-24 for depths in [0.5, 1), where z / w depths sit); the slope is per console
-    // pixel, and an upscaled target's pixels are smaller
+    // polygon offset: bias in 24 bit depth units (the host target is float, so Draw moves it into the shader's
+    // z: D3D12 would scale it by 2^(exponent - 23)); the slope is per console pixel, and an upscaled target's
+    // pixels are smaller
     if (a.topology == Topology::Triangles && SimpleState(s, kMSolidOffsetEnable)) {
         k.zbias = int32_t(std::lround(Bits(SimpleState(s, kMDepthOffset)) * kDepth24Max / s.zscale));
         k.zslope = Bits(SimpleState(s, kMSlopeScale)) * (bound_ds_ ? float(bound_ds_->w) / bound_ds_->gw : 1.0f);
@@ -2465,9 +2488,11 @@ void D3D12Backend::KeyDepthStencil(const State& s, const Assembled& a, PsoKey& k
 }
 
 void KeyRasterizer(const State& s, const Assembled& a, PsoKey& k) {
-    uint32_t cull = s.rs[kRsCullMode];
-    k.cull = cull != 0 && a.topology == Topology::Triangles;
-    k.ccw = cull == kCullCw;  // culling clockwise leaves counter clockwise as the front
+    // as the XDK sets the NV2A: FrontFace names the front winding (clockwise by default); CullMode culls its
+    // winding, the front face when they match and the back face otherwise. Two-sided lighting reads the front.
+    uint32_t cull = s.rs[kRsCullMode], front = s.rs[kRsFrontFace] == kCullCcw ? kCullCcw : kCullCw;
+    k.cull = cull == 0 || a.topology != Topology::Triangles ? 0 : cull == front ? 2 : 1;
+    k.ccw = front != kCullCw;
     k.fill = s.rs[kRsFillMode];
 }
 
@@ -2690,8 +2715,128 @@ void FillLightConstants(const State& s, const FixedKey& fk, DrawConstants& c) {
     }
 }
 
+// RECOMP_FCI_HUD_LOG=1: the per-draw class and FVF counts, one line to stderr a second
+static void HudLog(int cls, uint32_t fvf, float ax = 0, float ay = 0) {
+    static bool on = [] {
+        const char* e = std::getenv("RECOMP_FCI_HUD_LOG");
+        return e && e[0] == '1';
+    }();
+    if (!on)
+        return;
+    static uint64_t n[5] = {};    // post-effect/fill, image, marker, hud-centred, hud-anchored
+    static uint64_t anch[9] = {};  // hud-anchored per anchor (3x3 grid)
+    static uint64_t fn[16] = {};   // per FVF (vs_handle, bit 0 clear)
+    static uint64_t last = 0;
+    if (cls < 5)
+        n[cls]++;
+    if (cls == 4) {
+        int i = int(ay / 240.0f + 0.5f) * 3 + int(ax / 320.0f + 0.5f);
+        if (i >= 0 && i < 9)
+            anch[i]++;
+    }
+    uint32_t f = fvf & ~1u;
+    if (f < 16)
+        fn[f]++;
+    uint64_t now = GetTickCount64();
+    if (now - last < 1000)
+        return;
+    last = now;
+    char fvf_s[96] = "";
+    size_t pos = 0;
+    for (uint32_t i = 0; i < 16 && pos < sizeof(fvf_s) - 16; i++)
+        if (fn[i])
+            pos = size_t(std::snprintf(fvf_s + pos, sizeof(fvf_s) - pos, " %X:%llu", i, (unsigned long long)fn[i]));
+    char anch_s[64] = "";
+    pos = 0;
+    for (int i = 0; i < 9 && pos < sizeof(anch_s) - 12; i++)
+        if (anch[i])
+            pos = size_t(std::snprintf(anch_s + pos, sizeof(anch_s) - pos, " %d%d:%llu", i / 3, i % 3,
+                                       (unsigned long long)anch[i]));
+    std::fprintf(stderr, "[FCI] hud: post=%llu img=%llu mark=%llu hudc=%llu huda=%llu%s%s\n",
+                 (unsigned long long)n[0], (unsigned long long)n[1], (unsigned long long)n[2],
+                 (unsigned long long)n[3], (unsigned long long)n[4], anch_s, fvf_s);
+}
+
+// the guest pixel box from the position register (0): the raw path reads the guest's vertices, the converted
+// path the CPU's float4 copy; a float format with x and y first, else false
+static bool GuestBox(const Assembled& a, float& minx, float& miny, float& maxx, float& maxy) {
+    constexpr uint32_t kCap = 4096;
+    if (!a.vertex_count || a.vertex_count > kCap || !(a.regs & 1))
+        return false;
+    const VertexElement& e = a.elements[0];
+    if (e.format != DXGI_FORMAT_R32G32B32A32_FLOAT && e.format != DXGI_FORMAT_R32G32B32_FLOAT &&
+        e.format != DXGI_FORMAT_R32G32_FLOAT)
+        return false;
+    const VertexBuffer& vb = a.buffers[e.buffer];
+    if (!vb.src || !vb.stride || uint64_t(a.vertex_count) * vb.stride > vb.bytes)
+        return false;
+    const float* p0 = reinterpret_cast<const float*>(vb.src + e.offset);
+    minx = maxx = p0[0];
+    miny = maxy = p0[1];
+    for (uint32_t v = 1; v < a.vertex_count; v++) {
+        const float* p = p0 + size_t(v) * (vb.stride / 4);
+        if (p[0] < minx) minx = p[0];
+        if (p[0] > maxx) maxx = p[0];
+        if (p[1] < miny) miny = p[1];
+        if (p[1] > maxy) maxy = p[1];
+    }
+    return true;
+}
+
+// the pretransformed 2D's 16:9 -> A remap (sx, sy, ax, ay) in guest pixels, (1,1,0,0) the identity. A quad
+// that samples a render target or has no texture (a fill, a fade) is never moved; a quad sampling ordinary
+// textures is an image; a world-derived marker (the lift's 0x34/0x304) is centred; the rest is the HUD
+void D3D12Backend::FillHudBox(const State& s, const DrawShaders& sh, const DrawTextures& stages,
+                              const GuestExtent& size, const Assembled& a, DrawConstants& c) {
+    c.hudbox[0] = c.hudbox[1] = 1.0f;
+    c.hudbox[2] = c.hudbox[3] = 0.0f;
+    if (!a.pretransformed || size.w != 640 || size.h != 480)
+        return;
+    float A = app::fci_host_aspect();
+    if (A <= 4.0f / 3.0f + 1e-4f || fabsf(A - 16.0f / 9.0f) < 1e-4f)
+        return;  // 4:3 and 16:9: the identity
+    float minx, miny, maxx, maxy;
+    if (!GuestBox(a, minx, miny, maxx, maxy))
+        return;  // no position: the identity
+    bool rt = false, any_res = false;
+    for (int i = 0; i < 4; i++) {
+        rt = rt || stages.rt[i];
+        any_res = any_res || stages.res[i];
+    }
+    if (sh.quad && (rt || !any_res)) {
+        HudLog(0, s.vs_handle);  // post-effect or fill: never moved
+        return;
+    }
+    float sx = (16.0f / 9.0f) / A;  // the 3D view's x scale: a 16:9 point moves to 320 + (x-320)*sx
+    if (sh.quad && any_res) {
+        if (A > 16.0f / 9.0f) {
+            c.hudbox[0] = sx;
+            c.hudbox[2] = 320.0f;  // the centred 16:9 box
+        } else {  // 16:10: as the HUD, since some glyphs are quads (backlog 73)
+            fci_hud_fit(A, &c.hudbox[0], &c.hudbox[1], &c.hudbox[2], &c.hudbox[3]);
+        }
+        HudLog(1, s.vs_handle);
+        return;
+    }
+    if (s.vs_handle == 0x34 || s.vs_handle == 0x304) {
+        c.hudbox[0] = sx;  // a world-derived marker: centred, y unchanged
+        c.hudbox[2] = 320.0f;
+        HudLog(2, s.vs_handle);
+        return;
+    }
+    if (A > 16.0f / 9.0f) {
+        c.hudbox[0] = sx;  // the HUD: the centred 16:9 box
+        c.hudbox[2] = 320.0f;
+        HudLog(3, s.vs_handle);
+        return;
+    }
+    // 16:10: one transform for every draw, so a string drawn a glyph at a time stays whole
+    fci_hud_fit(A, &c.hudbox[0], &c.hudbox[1], &c.hudbox[2], &c.hudbox[3]);
+    HudLog(4, s.vs_handle, c.hudbox[2], c.hudbox[3]);
+}
+
 void D3D12Backend::UploadConstants(const State& s, const DrawShaders& sh, const PsoKey& k, const DrawTextures& stages,
-                                   GuestExtent size, DrawConstants& c) {
+                                   GuestExtent size, const Assembled& a, DrawConstants& c) {
     Alloc vc = Upload(sizeof(s.vsc), 256);
     std::memcpy(vc.cpu, s.vsc.data(), sizeof(s.vsc));
     Alloc dc = Upload(sizeof(DrawConstants), 256);
@@ -2700,12 +2845,13 @@ void D3D12Backend::UploadConstants(const State& s, const DrawShaders& sh, const 
     FillFogConstants(s, sh.prog, c);
     std::memcpy(c.wbuf, wbuf_, sizeof(c.wbuf));
     FillCombinerConstants(s, c);
-    if (ext_) ext_->Constants(reinterpret_cast<float(*)[4]>(vc.cpu), c.ext, bound_rt_, k.blend ? k.src : 1);
+    if (ext_) ext_->Constants(reinterpret_cast<float(*)[4]>(vc.cpu), c.ext, c.vol, c.volsize, bound_rt_, k.blend ? k.src : 1, k.blend ? k.dst : 0);
     FillTextureConstants(s, stages, c);
     if (sh.fixed_transform) {
         FillTransformConstants(s, size, c);
         FillLightConstants(s, sh.fk, c);
     }
+    FillHudBox(s, sh, stages, size, a, c);  // the pretransformed 2D's 16:9 -> A remap
     std::memcpy(dc.cpu, &c, sizeof(c));
     cl_->SetGraphicsRootConstantBufferView(0, vc.gpu);
     cl_->SetGraphicsRootConstantBufferView(1, dc.gpu);
@@ -2766,6 +2912,15 @@ void D3D12Backend::CaptureDraw(const State& s, uint32_t prim, uint32_t count, co
     // FCI: the raw states the pipeline key reduces (ZEnable 2 is W-buffering), and the combiner constants
     fprintf(cap_, " rawz %u spec %u sign %X %X %X %X", s.rs[kRsZEnable], s.rs[kRsSpecularEnable],
             s.tss[0][kTssColorSign], s.tss[1][kTssColorSign], s.tss[2][kTssColorSign], s.tss[3][kTssColorSign]);
+    // FCI: fog as the draw uses it (Q69): enable, table mode, start, end, density, colour
+    fprintf(cap_, " fog %u %u %.3f %.3f %.6f %08X", s.rs[kRsFogEnable], s.rs[kRsFogTableMode], c.fog[0], c.fog[1],
+            c.fog[2], s.rs[kRsFogColor]);
+    if (s.rs[kRsFogEnable]) {   // and the camera the fog would need: the view transform, zscale
+        const float* vm = s.transforms[kTsView].data();
+        fprintf(cap_, " view");
+        for (int i = 0; i < 16; i++) fprintf(cap_, " %g", vm[i]);
+        fprintf(cap_, " zscale %g", s.zscale);
+    }
     if (s.ps)
         for (int i = 1; i < 18; i++)
             fprintf(cap_, " pc%d %.3f %.3f %.3f %.3f", i, c.pc[i][0], c.pc[i][1], c.pc[i][2], c.pc[i][3]);
@@ -2866,7 +3021,7 @@ bool UnitTexcoords(const Assembled& a) {
 
 // a stage without a texture gets a null view of its kind; the samplers read the views after
 void D3D12Backend::SetTextureViewsAndSamplers(const State& s, const Assembled& a, DrawTextures& stages) {
-    uint32_t slot = AllocSrvSlots(4);
+    uint32_t slot = AllocSrvSlots(5);
     for (int i = 0; i < 4; i++) {
         D3D12_SHADER_RESOURCE_VIEW_DESC& sv = stages.sv[i];
         if (!stages.res[i]) {
@@ -2875,6 +3030,13 @@ void D3D12Backend::SetTextureViewsAndSamplers(const State& s, const Assembled& a
         }
         dev_->CreateShaderResourceView(stages.res[i], &sv, Cpu(srv_heap_.Get(), slot + i, srv_inc_));
     }
+    ID3D12Resource* vol = ext_ ? ext_->Volume() : nullptr;
+    D3D12_SHADER_RESOURCE_VIEW_DESC sv5{};
+    sv5.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
+    sv5.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    sv5.Texture3D.MipLevels = 1;
+    sv5.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    dev_->CreateShaderResourceView(vol, &sv5, Cpu(srv_heap_.Get(), slot + 4, srv_inc_));
     cl_->SetGraphicsRootDescriptorTable(2, Gpu(srv_heap_.Get(), slot, srv_inc_));
     uint32_t samplers = EnsureStageSamplers(s, stages, UnitTexcoords(a));
     cl_->SetGraphicsRootDescriptorTable(3, Gpu(smp_heap_.Get(), samplers, smp_inc_));
@@ -3014,6 +3176,11 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
         wbuf_[2] = k.zslope;
         k.zbias = 0;
         k.zslope = 0;
+    } else if (k.zbias && !sh.quad) {
+        // FCI: a float target scales DepthBias by its depth's exponent (a quarter below 0.25, where the sun's
+        // shadow map sits); the vertex shader adds the console's fixed-point bias to z instead
+        wbuf_[3] = float(k.zbias) / kDepth24Max;
+        k.zbias = 0;
     }
     ID3D12PipelineState* pso = EnsurePipeline(k, sh.vs_code, sh.ps_code);
     if (!pso) return;
@@ -3023,7 +3190,7 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     GuestExtent size;
     SurfaceSize(bound_rt_ ? s.rt : s.zs, size.w, size.h);
     DrawConstants c{};
-    UploadConstants(s, sh, k, stages, size, c);
+    UploadConstants(s, sh, k, stages, size, a, c);
 
     if (cap_) {
         CaptureDraw(s, prim, count, k, c, stages);
@@ -3441,9 +3608,8 @@ void D3D12Backend::UploadGammaRamp() {
 }
 
 void D3D12Backend::BlitFrame(Target& t) {
-    // 16:9 when the console reports a widescreen display, else 4:3
-    bool wide = app::Widescreen();
-    float aspect = wide ? 16.0f / 9.0f : 4.0f / 3.0f;
+    // the host's display aspect A: the 3D view fills the output at its true aspect, letterboxed to A
+    float aspect = app::fci_host_aspect();
     float w = float(bb_w_);
     float h = float(bb_h_);
     float vw = std::min(w, h * aspect);
@@ -3535,7 +3701,8 @@ void D3D12Backend::ResetFrame() {
 
 // FCI: frame replay, milestone 3: the constant registers (hardware order) a vertex program's position depends
 // on, through its temporaries and a0. A read relative to a0 (a bone palette) takes every register from its base.
-std::bitset<192> PositionRegisters(const std::vector<uint32_t>& prog) {
+// relative false leaves out the a0-relative range.
+std::bitset<192> PositionRegisters(const std::vector<uint32_t>& prog, bool relative) {
     std::bitset<192> dep[13], a0, pos;  // R0-R11, R12 (oPos)
     auto f = [](const uint32_t* t, int sub, int bit, int len) { return (t[sub] >> bit) & ((1u << len) - 1); };
     auto src = [&](const uint32_t* t, int which, std::bitset<192>& out) {
@@ -3553,7 +3720,7 @@ std::bitset<192> PositionRegisters(const std::vector<uint32_t>& prog) {
             uint32_t cr = f(t, 1, 13, 8);
             if (f(t, 3, 1, 1)) {
                 out |= a0;
-                for (uint32_t i = cr; i < 192; i++) out.set(i);
+                for (uint32_t i = cr; i < 192 && relative; i++) out.set(i);
             } else if (cr < 192) {
                 out.set(cr);
             }
@@ -3640,10 +3807,16 @@ void D3D12Backend::RecordDraw(const State& s, uint32_t prim, uint32_t count, con
     r.key = Hash(exact, sizeof(exact), r.loose);
     r.vc = last_vc_;
     if (r.vc) r.orig.assign(reinterpret_cast<const float*>(r.vc), reinterpret_cast<const float*>(r.vc) + 192 * 4);
-    if ((s.vs_handle & 1) && s.vs && !s.vs->program.empty()) {
+    bool blend = !ext_ || ext_->Interpolated(bound_rt_, bound_ds_);
+    if (blend && (s.vs_handle & 1) && s.vs && !s.vs->program.empty()) {
         auto it = pos_regs_.find(s.vs->hash);
-        if (it == pos_regs_.end()) it = pos_regs_.emplace(s.vs->hash, PositionRegisters(s.vs->program)).first;
-        r.pos = it->second;
+        if (it == pos_regs_.end())
+            it = pos_regs_
+                     .emplace(s.vs->hash, std::make_pair(PositionRegisters(s.vs->program, true),
+                                                         PositionRegisters(s.vs->program, false)))
+                     .first;
+        r.pos = it->second.first;
+        r.direct = it->second.second;
     }
     draws_.push_back(std::move(r));
 }
@@ -3701,10 +3874,11 @@ void D3D12Backend::MatchDraws() {
     match(true);
     match(false);
     // milestone 3: the shared registers (one value across the frame's draws that read them for position)
-    std::bitset<192> seen;
+    std::bitset<192> seen, direct;
     shared_.reset();
     for (const DrawRec& d : draws_) {
         if (d.orig.empty()) continue;
+        direct |= d.direct;
         for (size_t r = 0; r < 192; r++) {
             if (!d.pos[r]) continue;
             const float* v = d.orig.data() + r * 4;
@@ -3717,7 +3891,8 @@ void D3D12Backend::MatchDraws() {
             }
         }
     }
-    std::bitset<192> camera = shared_ & prev_shared_;
+    // a register only ever read through a0 is a palette (lights, bones) whose entries can shift: not the camera
+    std::bitset<192> camera = shared_ & prev_shared_ & direct;
     std::unordered_map<uint64_t, std::vector<float>> object_from;  // by register block and its values
     // a loose key drawn once in both frames: the same mesh whatever its vertices (a weapon, a vehicle's body)
     std::unordered_map<uint64_t, int> loose_now, loose_before;
@@ -4074,7 +4249,7 @@ D3D12Backend::Picture D3D12Backend::ShowPicture() {
     float black[4] = {0, 0, 0, 1};
     l->ClearRenderTargetView(rh, black, 0, nullptr);
     l->OMSetRenderTargets(1, &rh, FALSE, nullptr);
-    float aspect = app::Widescreen() ? 16.0f / 9.0f : 4.0f / 3.0f;
+    float aspect = app::fci_host_aspect();  // the host's display aspect A
     float w = float(bb_w_), h = float(bb_h_);
     float vw = std::min(w, h * aspect), vh = vw / aspect;
     D3D12_VIEWPORT vp{(w - vw) / 2, (h - vh) / 2, vw, vh, 0, 1};
@@ -4249,6 +4424,7 @@ void D3D12Backend::Present(const Surface& front) {
     ResetFrame();
     DeliverQueries(false);  // FCI: visibility tests the GPU has finished, a frame or two late as on the console
     CountFps();
+    if (app::kGame.ui) app::kGame.ui(fps_);   // FCI: the fps readout (window title)
     if (diag::Perf()) LogPerf();
     ApplySettings();
 }

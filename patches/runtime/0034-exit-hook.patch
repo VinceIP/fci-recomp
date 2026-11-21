@@ -1,0 +1,62 @@
+Subject: An exit hook the project sets to clean up before a clean exit
+
+The kernel exits on a clean quit -- HalReturnToFirmware (the dashboard return) and
+HalInitiateShutdown (the shutdown) -- by calling ExitProcess directly. fci-recomp wants to
+leave the host list on those exits (src/fci_net_worker.c) so a leaving host's listing is
+removed instead of staying joinable until its 90-second TTL. A project sets xbox_exit_hook
+(NULL by default) to a function called once, on the exiting thread, just before ExitProcess
+in both.
+
+---
+diff --git a/src/kernel/kernel.h b/src/kernel/kernel.h
+index b9a02bc..2da70e7 100644
+--- a/src/kernel/kernel.h
++++ b/src/kernel/kernel.h
+@@ -566,6 +566,12 @@ BOOL xbox_translate_path(const char* xbox_path, xbox_host_char* host_path_buf, D
+  * do not. */
+ extern void (*g_xbox_path_hook)(const char *xbox_path);
+ 
++/* Optional: a project sets this to run once just before a clean exit (the
++ * dashboard return, HalReturnToFirmware, and the shutdown, HalInitiateShutdown),
++ * so it can clean up -- for example leave a host list -- before the process is
++ * torn down. NULL by default; called on the exiting thread. */
++extern void (*xbox_exit_hook)(void);
++
+ /* ============================================================================
+  * Pool Allocator (kernel_pool.c)
+  * ============================================================================ */
+diff --git a/src/kernel/kernel_hal.c b/src/kernel/kernel_hal.c
+index 5cd0d52..c5e65d5 100644
+--- a/src/kernel/kernel_hal.c
++++ b/src/kernel/kernel_hal.c
+@@ -537,7 +537,12 @@ VOID __stdcall xbox_HalReadWritePCISpace(
+  *
+  * HalReturnToFirmware returns to the Xbox dashboard. For us, this means
+  * exit the game cleanly.
++ *
++ * A project may set xbox_exit_hook to run once just before a clean exit (the
++ * dashboard return and the shutdown), so it can clean up -- for example leave a
++ * host list -- instead of leaving the process to be torn down. NULL by default.
+  * ============================================================================ */
++void (*xbox_exit_hook)(void) = NULL;
+ 
+ VOID __stdcall xbox_HalReturnToFirmware(ULONG Routine)
+ {
+@@ -547,6 +552,8 @@ VOID __stdcall xbox_HalReturnToFirmware(ULONG Routine)
+      * that ends itself otherwise leaves no trace in the run's own log. */
+     fprintf(stderr, "[EXIT] HalReturnToFirmware routine=%u\n", (unsigned)Routine);
+     { extern void fci_host_chain(const char *label); fci_host_chain("  host chain"); }
++    if (xbox_exit_hook)
++        xbox_exit_hook();
+     ExitProcess(8900u + (unsigned)Routine);
+ }
+ 
+@@ -554,6 +561,8 @@ VOID __stdcall xbox_HalInitiateShutdown(void)
+ {
+     xbox_log(XBOX_LOG_INFO, XBOX_LOG_HAL, "HalInitiateShutdown (exiting)");
+     fprintf(stderr, "[EXIT] HalInitiateShutdown\n");
++    if (xbox_exit_hook)
++        xbox_exit_hook();
+     ExitProcess(0);
+ }
+ 

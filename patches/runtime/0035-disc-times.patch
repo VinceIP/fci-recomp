@@ -1,0 +1,218 @@
+Subject: Disc file times: one fixed time for every game-disc file
+
+The game's Z: cache (save\Cache) holds copies of disc files, and the game decides it is stale by the
+files' times: it re-copies a cache file whose time differs from the disc file's. A disc file reported
+the host file's time (the install time), so after a fresh install every disc file was "newer" than the
+cache, the game re-copied the whole cache, and that re-copy fought the menu music streaming from the
+disc and failed on a sharing violation, stopping the loader thread. A disc is read-only and every
+install of the same disc agrees on its XBE header TimeDate, so the runtime now reports that one value
+(the host sets it with xbox_SetDiscTime before any guest file I/O) as the creation, access, write and
+change time of every game-disc file, as XDVDFS reports one volume time for the whole disc.
+xbox_host_path_is_disc tells the file layer which host paths are on the disc (the game folder) rather
+than the save folder; it strips the \\?\ extended-length prefix that GetFinalPathNameByHandleW puts on
+a handle's path, so the handle-based time queries stamp disc files too.
+
+---
+diff --git a/src/kernel/kernel.h b/src/kernel/kernel.h
+index a7f6d0b..6a8ebd6 100644
+--- a/src/kernel/kernel.h
++++ b/src/kernel/kernel.h
+@@ -569,6 +569,12 @@ const wchar_t *xbox_LastHostPath(void);
+ 
+ BOOL xbox_translate_path(const char* xbox_path, xbox_host_char* host_path_buf, DWORD buf_size);
+ 
++/* 1 if the host path is a file on the game disc (the game folder), 0 otherwise. */
++int xbox_host_path_is_disc(const xbox_host_char* host_path);
++
++/* Set the one time every game-disc file reports; zero turns the fixed time off. */
++void xbox_SetDiscTime(ULONGLONG filetime);
++
+ /* Optional: a project sets this to see the guest paths the kernel translates
+  * (for example to print who opened a file). NULL by default; called before the
+  * path is translated, on the calling guest thread. Only paths a drive or
+diff --git a/src/kernel/kernel_file.c b/src/kernel/kernel_file.c
+index 4384b42..7a6cba3 100644
+--- a/src/kernel/kernel_file.c
++++ b/src/kernel/kernel_file.c
+@@ -67,6 +67,31 @@ uint32_t xbox_LastFileError(void)
+     return g_xbox_last_file_error;
+ }
+ 
++/* One fixed time (FILETIME) reported for every game-disc file, in place of the host file's time;
++ * zero turns it off. Why: research/docs/internals.md (Disk and saves). */
++static ULONGLONG s_disc_time = 0;
++
++void xbox_SetDiscTime(ULONGLONG filetime)
++{
++    s_disc_time = filetime;
++}
++
++static void disc_stamp_fields(LARGE_INTEGER* creation)
++{
++    LONGLONG t = (LONGLONG)s_disc_time;
++    creation[0].QuadPart = t;
++    creation[1].QuadPart = t;
++    creation[2].QuadPart = t;
++    creation[3].QuadPart = t;
++}
++
++static void disc_stamp(LARGE_INTEGER* creation, const xbox_host_char* host_path)
++{
++    if (s_disc_time && host_path && xbox_host_path_is_disc(host_path))
++        disc_stamp_fields(creation);
++}
++
++
+ /* ====================  Save log (Q22b)  ================================= */
+ /*
+  * One stderr line per operation that changes a file below the save folder
+@@ -582,6 +607,11 @@ NTSTATUS __stdcall xbox_NtQueryInformationFile(
+             info->LastWriteTime.LowPart   = fi.ftLastWriteTime.dwLowDateTime;
+             info->LastWriteTime.HighPart  = fi.ftLastWriteTime.dwHighDateTime;
+             info->ChangeTime = info->LastWriteTime;
++            {
++                WCHAR hp[MAX_PATH];
++                if (GetFinalPathNameByHandleW(FileHandle, hp, MAX_PATH, 0))
++                    disc_stamp((LARGE_INTEGER*)&info->CreationTime, hp);
++            }
+             info->FileAttributes = fi.dwFileAttributes;
+             IoStatusBlock->Status = STATUS_SUCCESS;
+             IoStatusBlock->Information = sizeof(XBOX_FILE_BASIC_INFORMATION);
+@@ -633,6 +663,11 @@ NTSTATUS __stdcall xbox_NtQueryInformationFile(
+             info->LastWriteTime.LowPart   = fi.ftLastWriteTime.dwLowDateTime;
+             info->LastWriteTime.HighPart  = fi.ftLastWriteTime.dwHighDateTime;
+             info->ChangeTime = info->LastWriteTime;
++            {
++                WCHAR hp[MAX_PATH];
++                if (GetFinalPathNameByHandleW(FileHandle, hp, MAX_PATH, 0))
++                    disc_stamp((LARGE_INTEGER*)&info->CreationTime, hp);
++            }
+             info->EndOfFile.QuadPart = ((LONGLONG)fi.nFileSizeHigh << 32) | fi.nFileSizeLow;
+             info->AllocationSize.QuadPart = (info->EndOfFile.QuadPart + 4095) & ~4095LL;
+             info->FileAttributes = fi.dwFileAttributes;
+@@ -870,6 +905,7 @@ NTSTATUS __stdcall xbox_NtQueryFullAttributesFile(
+     FileInformation->LastWriteTime.LowPart   = fad.ftLastWriteTime.dwLowDateTime;
+     FileInformation->LastWriteTime.HighPart  = fad.ftLastWriteTime.dwHighDateTime;
+     FileInformation->ChangeTime = FileInformation->LastWriteTime;
++    disc_stamp((LARGE_INTEGER*)&FileInformation->CreationTime, win_path);
+     FileInformation->EndOfFile.QuadPart = ((LONGLONG)fad.nFileSizeHigh << 32) | fad.nFileSizeLow;
+     FileInformation->AllocationSize.QuadPart = (FileInformation->EndOfFile.QuadPart + 4095) & ~4095LL;
+     FileInformation->FileAttributes = fad.dwFileAttributes;
+@@ -881,6 +917,7 @@ typedef struct {
+     HANDLE file_handle;
+     HANDLE find_handle;
+     BOOL   first_done;
++    BOOL   is_disc;    /* the enumerated directory is on the game disc */
+     WIN32_FIND_DATAW find_data;
+ } DIR_CONTEXT;
+ 
+@@ -971,6 +1008,7 @@ NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
+         WCHAR* clean_path = dir_path;
+         if (wcsncmp(clean_path, L"\\\\?\\", 4) == 0)
+             clean_path += 4;
++        ctx->is_disc = xbox_host_path_is_disc(clean_path);
+         /* An empty name matches everything: XAPI's FindFirstFile passes one for "*.*" */
+         if (FileName && FileName->Buffer && FileName->Length) {
+             WCHAR pattern_wide[MAX_PATH];
+@@ -1026,6 +1064,8 @@ NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
+     entry->LastWriteTime.LowPart  = ctx->find_data.ftLastWriteTime.dwLowDateTime;
+     entry->LastWriteTime.HighPart = ctx->find_data.ftLastWriteTime.dwHighDateTime;
+     entry->ChangeTime = entry->LastWriteTime;
++    if (ctx->is_disc)
++        disc_stamp_fields((LARGE_INTEGER*)&entry->CreationTime);
+     entry->EndOfFile.QuadPart = ((LONGLONG)ctx->find_data.nFileSizeHigh << 32) | ctx->find_data.nFileSizeLow;
+     entry->AllocationSize.QuadPart = (entry->EndOfFile.QuadPart + 4095) & ~4095LL;
+     entry->FileAttributes = ctx->find_data.dwFileAttributes;
+@@ -1283,6 +1323,7 @@ NTSTATUS __stdcall xbox_NtQueryInformationFile(
+             unix_to_filetime(st.st_atime, 0, &info->LastAccessTime);
+             unix_to_filetime(st.st_mtime, 0, &info->LastWriteTime);
+             info->ChangeTime = info->LastWriteTime;
++            disc_stamp((LARGE_INTEGER*)&info->CreationTime, w32_handle_path(FileHandle));
+             info->FileAttributes = mode_to_xbox_attrs(st.st_mode);
+             IoStatusBlock->Status = STATUS_SUCCESS;
+             IoStatusBlock->Information = sizeof(XBOX_FILE_BASIC_INFORMATION);
+@@ -1314,6 +1355,7 @@ NTSTATUS __stdcall xbox_NtQueryInformationFile(
+             unix_to_filetime(st.st_atime, 0, &info->LastAccessTime);
+             unix_to_filetime(st.st_mtime, 0, &info->LastWriteTime);
+             info->ChangeTime = info->LastWriteTime;
++            disc_stamp((LARGE_INTEGER*)&info->CreationTime, w32_handle_path(FileHandle));
+             info->EndOfFile.QuadPart = st.st_size;
+             info->AllocationSize.QuadPart = (st.st_size + 4095) & ~4095LL;
+             info->FileAttributes = mode_to_xbox_attrs(st.st_mode);
+@@ -1477,6 +1519,7 @@ NTSTATUS __stdcall xbox_NtQueryFullAttributesFile(
+     unix_to_filetime(st.st_atime, 0, &FileInformation->LastAccessTime);
+     unix_to_filetime(st.st_mtime, 0, &FileInformation->LastWriteTime);
+     FileInformation->ChangeTime = FileInformation->LastWriteTime;
++    disc_stamp((LARGE_INTEGER*)&FileInformation->CreationTime, host_path);
+     FileInformation->EndOfFile.QuadPart = st.st_size;
+     FileInformation->AllocationSize.QuadPart = (st.st_size + 4095) & ~4095LL;
+     FileInformation->FileAttributes = mode_to_xbox_attrs(st.st_mode);
+@@ -1489,6 +1532,7 @@ typedef struct {
+     HANDLE handle;
+     DIR*   dir;
+     char   pattern[64];
++    int    is_disc;   /* the enumerated directory is on the game disc */
+ } DIR_CONTEXT;
+ 
+ static DIR_CONTEXT s_dir_contexts[MAX_DIR_CONTEXTS];
+@@ -1529,6 +1573,7 @@ NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
+         if (ctx->dir) { closedir(ctx->dir); ctx->dir = NULL; }
+         const char* dpath = w32_handle_path(FileHandle);
+         if (!dpath) { LeaveCriticalSection(&s_dir_cs); return STATUS_UNSUCCESSFUL; }
++        ctx->is_disc = xbox_host_path_is_disc(dpath);
+         ctx->dir = opendir(dpath);
+         if (!ctx->dir) {
+             LeaveCriticalSection(&s_dir_cs);
+@@ -1581,6 +1626,8 @@ NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
+     unix_to_filetime(st.st_atime, 0, &entry->LastAccessTime);
+     unix_to_filetime(st.st_mtime, 0, &entry->LastWriteTime);
+     entry->ChangeTime = entry->LastWriteTime;
++    if (ctx->is_disc)
++        disc_stamp_fields((LARGE_INTEGER*)&entry->CreationTime);
+     entry->EndOfFile.QuadPart = st.st_size;
+     entry->AllocationSize.QuadPart = (st.st_size + 4095) & ~4095LL;
+     entry->FileAttributes = mode_to_xbox_attrs(st.st_mode);
+diff --git a/src/kernel/kernel_path.c b/src/kernel/kernel_path.c
+index 18991ae..4150e41 100644
+--- a/src/kernel/kernel_path.c
++++ b/src/kernel/kernel_path.c
+@@ -519,6 +519,21 @@ translate:
+     }
+ }
+ 
++int xbox_host_path_is_disc(const xbox_host_char* host_path)
++{
++    if (!host_path)
++        return 0;
++    /* GetFinalPathNameByHandleW yields the \\?\ extended-length form; s_game_dir is plain. */
++    if (host_path[0] == L'\\' && host_path[1] == L'\\' && host_path[2] == L'?' && host_path[3] == L'\\')
++        host_path += 4;
++    size_t len = wcslen(s_game_dir);
++    if (!len)
++        return 0;
++    /* s_game_dir has no trailing separator (xbox_path_init strips it). */
++    return _wcsnicmp(host_path, s_game_dir, len) == 0 &&
++           (host_path[len] == L'\\' || host_path[len] == L'/');
++}
++
+ /* ======================================================================== */
+ #else /* !_WIN32  -- POSIX / Linux */
+ /* ======================================================================== */
+@@ -664,4 +679,17 @@ translate:
+     }
+ }
+ 
++int xbox_host_path_is_disc(const xbox_host_char* host_path)
++{
++    if (!host_path)
++        return 0;
++    if (host_path[0] == '\\' && host_path[1] == '\\' && host_path[2] == '?' && host_path[3] == '\\')
++        host_path += 4;
++    size_t len = strlen(s_game_dir);
++    if (!len)
++        return 0;
++    return strncmp(host_path, s_game_dir, len) == 0 &&
++           (host_path[len] == '/' || host_path[len] == '\\');
++}
++
+ #endif /* _WIN32 */

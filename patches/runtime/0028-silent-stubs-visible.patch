@@ -1,0 +1,139 @@
+Subject: The silent-success stubs say so, or stop being bridged
+
+A bridge whose whole body is `g_eax = 0` (or a no-op over an xbox_* stub) returns
+success without doing the job. Routed, that is invisible in a log: a title that
+imports the ordinal gets a clean 0 and carries on, and the missing work surfaces
+later as an unattributable failure. A stub is judged by its final implementation
+(the xbox_* it calls, and any fci_* that calls), not by the bridge's shape: the
+five crypto bridges (XcModExp, XcDESKeyParity, XcKeyTable, XcBlockCrypt,
+XcBlockCryptCBC) are on neither list: the online branch's 0030-kernel-crypto
+wires them to real DES and Montgomery exponentiation (src/fci_xcrypt.c). Q25 splits the
+96 genuine stubs in kernel_bridge.c into the two cases that matter.
+
+Imported by a title the toolkit ships for (13 of them): the call is real, so the
+stub must keep answering -- unbridging it would crash the title -- but it now
+prints one line the first time it is called, naming the ordinal and the work it
+skips (bridge_stub_log, driven by g_stub_imported in the dispatch). Once per
+process: a stub a title calls every frame must not log every frame.
+
+Imported by no known title (83 of them): unbridge them. bridge_for_ordinal now
+returns NULL for the g_stub_unimported set, so a title that ever imports one of
+these takes the standard unimplemented path the toolkit already has for an
+unbridged ordinal -- the fci_unbridged_ordinal hook, which in fci-recomp is
+STOP 87 naming the ordinal and its caller -- instead of a success that does
+nothing. Arg cleanup is unaffected: g_slot_arg_bytes comes from
+stdcall_args_for_ordinal, which is independent of the bridge.
+
+The lists are relative to the titles this toolkit is built for (the import
+tables in build/lift/{default,evolution}); a new title changes them.
+
+---
+diff --git a/src/kernel/kernel_bridge.c b/src/kernel/kernel_bridge.c
+--- a/src/kernel/kernel_bridge.c
++++ b/src/kernel/kernel_bridge.c
+@@ -8946,8 +8946,92 @@
+     }
+ }
+ 
++/* Q25: the silent-success stubs.
++ *
++ * A bridge whose whole body is `g_eax = 0` (or a no-op over an xbox_* stub)
++ * returns success without doing the job. Routed, that is invisible in a log: a
++ * title that imports the ordinal gets a clean 0 and carries on, and the missing
++ * work surfaces later as an unattributable failure. Two cases:
++ *
++ *  - imported by a title the toolkit ships for: the call is real, so the stub
++ *    must keep answering (unbridging it would crash the title) but it says so
++ *    on first call -- g_stub_imported.
++ *  - imported by no known title: unbridge it, so a title that ever imports it
++ *    takes the standard unimplemented path below (warning + return 0) instead
++ *    of a success that does nothing -- g_stub_unimported.
++ *
++ * A stub is judged by its final implementation, not the bridge's shape: the
++ * crypto bridges (345-349) run fci-recomp's real DES / Montgomery exponentiation
++ * (0030-kernel-crypto + src/fci_xcrypt.c) and RtlAssert (264) reports the
++ * assertion, so none of those are in either list. The lists are relative to the
++ * titles this toolkit is built for (build/lift/{default,evolution}); a new title
++ * changes them. */
++static const unsigned g_stub_unimported[] = {
++    7, 10, 11, 12, 13, 25, 26, 27, 28, 29, 36, 43, 60, 63, 73, 77, 78, 79,
++    80, 82, 90, 91, 92, 94, 101, 104, 114, 115, 116, 117, 121, 122, 133, 134,
++    135, 136, 141, 144, 147, 148, 155, 163, 191, 201, 206, 208, 209, 212,
++    213, 214, 216, 220, 223, 227, 229, 230, 237, 239, 241, 242, 243, 244,
++    248, 256, 257, 265, 266, 288, 297, 303, 319, 321, 332, 333, 334, 341,
++    342, 343, 350, 351, 365, 366, 377
++};
++static const unsigned g_stub_imported[] = {
++    47, 81, 83, 84, 85, 86, 87, 175, 178, 246, 253, 344, 359
++};
++static int stub_in_list(const unsigned *list, size_t n, unsigned ordinal)
++{
++    size_t i;
++    for (i = 0; i < n; i++)
++        if (list[i] == ordinal)
++            return 1;
++    return 0;
++}
++static int stub_unimported(unsigned ordinal)
++{
++    return stub_in_list(g_stub_unimported,
++                        sizeof g_stub_unimported / sizeof g_stub_unimported[0],
++                        ordinal);
++}
++static int stub_imported(unsigned ordinal)
++{
++    return stub_in_list(g_stub_imported,
++                        sizeof g_stub_imported / sizeof g_stub_imported[0],
++                        ordinal);
++}
++
++/* One line per imported stub, the first time it is called. The ordinal names
++ * the call; the note names the skipped work, which is the fact a log otherwise
++ * lacks. Once per process: a stub a title calls every frame must not log every
++ * frame. */
++static void bridge_stub_log(unsigned ordinal)
++{
++    static const struct { unsigned ordinal; const char *note; } notes[] = {
++        { 47,  "HalRegisterShutdownNotification: no shutdown callback registered" },
++        { 81,  "IoStartNextPacket: no driver, nothing started" },
++        { 83,  "IoStartPacket: no driver, nothing started" },
++        { 84,  "IoSynchronousDeviceIoControlRequest: no I/O performed" },
++        { 85,  "IoSynchronousFsdRequest: no I/O performed" },
++        { 86,  "IofCallDriver: no driver to call" },
++        { 87,  "IofCompleteRequest: nothing completed" },
++        { 175, "MmLockUnlockBufferPages: page locking is a no-op in user mode" },
++        { 178, "MmPersistContiguousMemory: nothing persisted" },
++        { 246, "ObReferenceObjectByHandle: no object lookup, out-pointer left NULL" },
++        { 253, "PhyInitialize: no network PHY, reported as initialised" },
++        { 344, "XcVerifyPKCS1Signature: signature not verified, reported valid" },
++        { 359, "IoMarkIrpMustComplete: no IRP marked" },
++    };
++    static uint8_t logged[XBOX_KERNEL_THUNK_TABLE_SIZE];
++    size_t i;
++    const char *note = "";
++    if (!logged[ordinal]) {
++        for (i = 0; i < sizeof notes / sizeof notes[0]; i++)
++            if (notes[i].ordinal == ordinal) { note = notes[i].note; break; }
++        logged[ordinal] = 1;
++        fprintf(stderr, "  [KERNEL] STUB ordinal %u: %s -- returning success\n",
++                ordinal, note);
++        fflush(stderr);
++    }
++}
++
+ static bridge_func_t bridge_for_ordinal(ULONG ordinal)
+ {
++    if (stub_unimported(ordinal))
++        return NULL;   /* Q25: take the standard unimplemented path, not a silent 0 */
+     switch (ordinal) {
+     /* Threading */
+     case 255: return bridge_PsCreateSystemThreadEx;
+@@ -9829,6 +9913,8 @@
+     }
+ 
+     if (bridge) {
++        if (stub_imported(ordinal))
++            bridge_stub_log(ordinal);   /* Q25: an imported stub says so once */
+         bridge();
+     } else {
+         /* No specific bridge - return 0. Warn once per ordinal rather than

@@ -21,6 +21,14 @@
   "D3DDevice_EndVisibilityTest": {
    "va": "0x003BA7D0",
    "evidence": "Instincts' 005072D0, first 64 bytes, addresses masked: unique match"
+  },
+  "D3DDevice_SetPalette": {
+   "va": "0x003BA5E0",
+   "evidence": "Evolution: stdcall (stage, palette), ret 8, 141 bytes; writes CDevice Palettes + stage * 4 (0xF98) with the AddRef/Release pair and pushes the stage's palette methods. The 5849 signature misses it. The same body as Instincts' 005070E0."
+  },
+  "D3DDevice_SetRenderTargetFast": {
+   "va": "0x003B9D20",
+   "evidence": "Evolution: stdcall (render target, depth stencil, flags), ret 12, 288 bytes; like SetRenderTarget (0x003B9AA0) it AddRefs the new surfaces, Releases the old and writes CDevice RenderTarget (0x1A04) and Depth (0x1A08), then pushes the surface methods (0x40210 colour, 0x40214 zeta, 0x4030C/0x4032C), without the viewport reset; 27 callers. The 5849 signatures miss it."
   }
  }
 }

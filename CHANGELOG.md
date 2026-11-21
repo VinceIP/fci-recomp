@@ -1,5 +1,49 @@
 # Changelog
 
+## [0.3.0] - 2026-11-20
+
+### Added
+
+- Added experimental online multiplayer for both Instincts and Evolution. Matches are found or hosted through the match list in Multiplayer.
+- Added experimental offline LAN multiplayer for both Instincts and Evolution.
+- Added quick save (F5) and quick load (F9) (rebind in settings) in Story Mode, in both games. Quick saving creates a custom checkpoint that overrides your previous save. Use with caution.
+- Added in-game settings menus to adjust display, graphics, and control settings.
+- Added a customizable player field of view setting (`display-fov`).
+- Added 16:10, 21:9, 32:9 and auto aspect ratios (`display-aspect`).
+- Added experimental volumetric fog, with light shafts, a ground layer and haze. Toggle it on and off by pressing F8 to see the difference. This key toggle will go away in future versions.
+- Added a toggleable bloom setting (`gfx-bloom`).
+- Added toggleable V-sync and frame rate display settings (`display-vsync`, `display-show-fps`). F11 now also toggles fullscreen.
+- Added a "Quit Game" main menu option.
+- Added typing with your keyboard in prompts that show the game's on-screen keyboard (cheat codes, profile names, and the map editor's Save Map name and description).
+- Added button prompts that follow your key bindings and change whether you're playing with a gamepad or mouse and keyboard.
+- Added controller vibration support.
+- Added toggleable aim assist. Aim assist is now off for mouse and keyboard by default, and stays on for gamepads. Turn on to enable aim assist for mouse and keyboard.
+- Debug logs are now kept by default, even when the game exits normally. The last 3 sessions are kept (`log-limit`), and a fixed `log =` path keeps earlier sessions too.
+
+### Fixed
+
+- Restored the bloom effect present in the original games.
+- Restored the distant fog effects present in the original games.
+- Fixed profiles reported as "damaged and cannot be used" after starting a level from Load a Map following a checkpoint, in both games. Profiles already affected are repaired at startup. The removed checkpoint is kept in the `save-backups` folder.
+- Fixed saves being reported as damaged after closing the game while it was saving (#59). Closing the game now waits for a save in progress to finish.
+- Fixed a crash when renaming a profile, which also broke its saves.
+- Fixed some bump-mapped surfaces drawn far too dark. They now show their lighting and detail.
+- Fixed some models drawn inside out or with missing faces.
+- Fixed geometry vanishing and coming back as the player moved, such as the wooden beams in the Rain Forest mines (#31).
+- Fixed an issue with jumping, jittery shadows caused by interpolation at high frame rates (#50).
+- Fixed ambient occlusion drawing over water, grass and distant fog.
+- Fixed Evolution loads occasionally hanging after installing into a new folder (on Start, or loading a System Link map).
+- Fixed a blurry game window on displays scaled above 100% (#4).
+
+### Known issues
+
+- At a wide field of view, the screen edges can show stale image strips indoors and a dark band in some places.
+- Joining online games by IP address, headless dedicated servers, or hosting private password-locked games isn't available yet.
+
+Built against xboxrecomp 193e2995 and Xbox XBE Recomp 65e959d4, with llvm-mingw 20261006 (LLVM 23.1.3).
+Supported discs: Far Cry Instincts title 55530008, version 1 (`data/disc.json`); Far Cry Instincts
+Evolution title 55530060, version 3 (`data/evolution/disc.json`).
+
 ## [0.2.4] - 2026-11-07
 
 ### Added

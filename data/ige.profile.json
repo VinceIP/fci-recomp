@@ -19,6 +19,21 @@
     "sub_0006A380": [
       "prehook",
       "Console_RegisterInt (re/symbols/ige.xbe.json): as Console_RegisterFloat, as the game's 001FDED0"
+    ],
+    "sub_000B56E0": [
+      "prehook",
+      "the on-screen keyboard's open (ecx keyboard; map name and description on Save Map), as the game's 0010B500: typing starts (fci_vkb.c)",
+      "0010B500"
+    ],
+    "sub_000B4B20": [
+      "prehook",
+      "the on-screen keyboard's close (clears the callback at +0x58), as the game's 0010B5E0: typing stops (fci_vkb.c)",
+      "0010B5E0"
+    ],
+    "sub_00061320": [
+      "prehook",
+      "the pad poll (pad handles at this+0x248, XInputGetState 005A95A2 at 000614BC, one caller 000616B1), the game's Input_PollPads: counts polls for RECOMP_FCI_STATUS and runs the keyboard typing each frame (fci_vkb.c)",
+      "001F6C00"
     ]
   },
   "evidence": "descriptor helper: the original 37 bytes compared (hash and masked) with the game's 004B03B4; allocator and push buffer pins verified independently.",
@@ -78,5 +93,39 @@
     "seh_epilog": "0x00497F4F",
     "setjmp": "0x0049B994",
     "longjmp": "0x0049B918"
+  },
+  "constants": {
+    "FCI_VKB_OBJECT": [
+      "0x0064AFC0",
+      "the keyboard object's pointer (stored at recomp_0000.c:4646 after its 0x104-byte allocation; Save Map opens it with ecx = [0x64AFC0])"
+    ],
+    "FCI_VKB_THISCALL": [
+      "0x00000001",
+      "the editor's keyboard methods take the keyboard in ecx (the game's in eax or esi)"
+    ],
+    "FCI_VKB_INSERT": [
+      "0x00000000",
+      "the editor takes the string on the stack (FCI_VKB_CHAR)"
+    ],
+    "FCI_VKB_CHAR": [
+      "0x000B5340",
+      "insert a string at the cursor (X's space, called at 000B5DBB): ecx keyboard, the string on the stack, ret 4"
+    ],
+    "FCI_VKB_DELETE": [
+      "0x000B5430",
+      "the keyboard's delete (Y): ecx keyboard"
+    ],
+    "FCI_VKB_A": [
+      "0x000B58D0",
+      "the keyboard's A: ecx keyboard; reads the wheel at +0xAC and its slot at +0x18, accepts on the first slot"
+    ],
+    "FCI_VKB_BACK": [
+      "0x000B4B30",
+      "the keyboard's back (B): ecx keyboard; calls the callback's vtable+4"
+    ],
+    "FCI_VKB_MODAL": [
+      "0x00000000",
+      "no popup check: the editor's input router is not hooked, so typing does not stop under a popup"
+    ]
   }
 }

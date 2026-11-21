@@ -12,10 +12,16 @@ as long as the game does and no longer.
   pad:<button>[+<button>][:<ms>]   live pad (RECOMP_PAD_LIVE syntax: a b x y start back lup rright ...)
   mouse:<dx>:<dy>       mouse motion in counts, as if captured (on foot: dx * 0.05 degrees of turn)
   set:<KEY>=<value>     change a graphics option now (RECOMP_FCI_XBR_*, src/xbr/fci_gfx.h)
+  post:<text>           a game command, posted at the next frame boundary (~ is a space)
+  checkpoint:<L>:<N>    post:StartLevel level=<L> mission=<L> checkpoint=<N> (Story Resume's command)
   capture               the next presented frame, under capture/
   dump:<name>           guest RAM now, memdump-<name>.bin
 
-  python -B tools/game_driver.py <name> [--editor] [--save <fixture>] [--opt RECOMP_X=v ...] <step> ...
+  python -B tools/game_driver.py <name> [--editor] [--save <fixture>] [--save-dir <folder>]
+      [--opt RECOMP_X=v ...] <step> ...
+
+--save-dir uses an existing save folder as it is (no copy): two runs given the same folder are two
+instances on one PC's save folder.
 
 An argument @<file> reads more arguments from a file, one a line (# starts a comment; "--opt X" and
 "--save X" on one line): tools/record2script.py writes such files from a recording.
@@ -76,6 +82,20 @@ def stage_builds():
 
 class StepFailed(Exception):
     pass
+
+
+# The RECOMP_FCI_CONTROL line of a control-file step (tests/test_driver_steps.py); StepFailed on a
+# malformed one
+def control_line(spec):
+    kind, _, arg = spec.partition(":")
+    if kind == "post":  # a game command, posted at the next frame boundary (~ is a space)
+        return f"post {arg.replace('~', ' ')}"
+    if kind == "checkpoint":  # LEVEL:NAME: Story Resume's command at the level's checkpoint
+        level, _, name = arg.partition(":")
+        if not level or not name:
+            raise StepFailed(f"checkpoint: want LEVEL:NAME, got {spec}")
+        return f"post StartLevel level={level} mission={level} checkpoint={name}"
+    raise StepFailed(f"unknown control step {spec}")
 
 
 # FCI_TEST_QUIET=1 (the default): the game runs below normal priority and its window is kept beyond the
@@ -143,7 +163,7 @@ def keep_off_screen(child):
 
 
 class Game:
-    def __init__(self, folder, editor=False, save=None, options=(), skip_intros=True):
+    def __init__(self, folder, editor=False, save=None, options=(), skip_intros=True, save_dir=None):
         self.folder = Path(folder)
         self.folder.mkdir(parents=True)
         self.pad = self.folder / "pad.txt"
@@ -155,9 +175,11 @@ class Game:
         (self.folder / "capture").mkdir()
         if editor:
             exe, xbe = EDITOR_EXE, GAME_DIR / "ige.xbe"
-            shutil.copytree(FIXTURES / "editor-save", self.folder / "save")
-            shutil.copy2(FIXTURES / "editor-launch.bin", self.folder / "launch.bin")
-            extra = ["RECOMP_LAUNCH_DATA=" + str(self.folder / "launch.bin")]
+            shutil.copytree(FIXTURES / (save or "editor-save"), self.folder / "save")
+            extra = []
+            if (FIXTURES / "editor-launch.bin").exists():  # the game's switch; without it, as the launcher starts it
+                shutil.copy2(FIXTURES / "editor-launch.bin", self.folder / "launch.bin")
+                extra = ["RECOMP_LAUNCH_DATA=" + str(self.folder / "launch.bin")]
         else:
             exe, xbe = GAME_EXE, GAME_DIR / "default.xbe"
             if save:
@@ -170,7 +192,7 @@ class Game:
                 str(exe),
                 str(xbe),
                 str(GAME_DIR),
-                str(self.folder / "save"),
+                str(save_dir or self.folder / "save"),
                 "RECOMP_USB=1",
                 "RECOMP_FCI_XBR=1",
                 "RECOMP_FCI_XBR_BACKGROUND=1",
@@ -222,6 +244,8 @@ class Game:
 
     def step(self, spec, timeout=90):
         t0 = self.elapsed()
+        if self.child.poll() is not None:  # otherwise pads and sleeps carry on against nothing
+            raise StepFailed(f"{spec}: the game exited ({self.child.returncode})")
         kind, _, arg = spec.partition(":")
         if kind == "wait":
             if arg == "title":
@@ -260,6 +284,14 @@ class Game:
             with open(self.control, "a") as f:
                 f.write(f"mouse {dx} {dy}\n")
             time.sleep(0.3)  # read within 100 ms, applied on the next frame
+        elif kind in ("type", "key"):  # type:TEXT (~ is a space), key:VK in hex (0D Enter, 1B Esc, 08 Backspace)
+            with open(self.control, "a") as f:
+                f.write(f"{kind} {arg.replace('~', ' ') if kind == 'type' else arg}\n")
+            time.sleep(0.3)  # read within 100 ms, replayed on the next frame
+        elif kind in ("post", "checkpoint"):
+            with open(self.control, "a") as f:
+                f.write(control_line(spec) + "\n")
+            time.sleep(0.3)  # read within 100 ms, posted at the next frame boundary
         elif kind == "set":
             with open(self.control, "a") as f:
                 f.write(f"set {arg}\n")
@@ -326,6 +358,8 @@ def main(argv):
             kw["editor"] = True
         elif a == "--save":
             kw["save"] = rest.pop(0)
+        elif a == "--save-dir":
+            kw["save_dir"] = rest.pop(0)
         elif a == "--opt":
             opts.append(rest.pop(0))
         elif a == "--intros":

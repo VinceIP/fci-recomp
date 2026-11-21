@@ -1,0 +1,71 @@
+Subject: A new guest thread does not run before its creator yields
+
+Every kernel call let go of the guest CPU, PsCreateSystemThreadEx too, and a new thread asked the
+holder to yield at once, so a new thread could run before its creator had returned from creating it.
+The console runs one CPU and a new thread of equal priority waits until its creator waits or its turn
+ends. The game leans on that: the map server's constructor starts the server thread, the caller stores
+the server's pointer afterwards, and the thread reads that pointer first. Run early it read the previous
+server, opened the map file without its folder, and a System Link host could not send its map. Now the
+creator keeps the guest CPU through the call, and the new thread waits for it without asking for a yield
+for 20 ms.
+
+---
+diff --git a/src/kernel/kernel_bridge.c b/src/kernel/kernel_bridge.c
+index 915f78c..a966c5d 100644
+--- a/src/kernel/kernel_bridge.c
++++ b/src/kernel/kernel_bridge.c
+@@ -491,7 +491,7 @@ static void bridge_run_thread_inline(recomp_func_t fn, uint32_t ctx1,
+     g_esp += 12;
+ }
+ 
+-void guest_cpu_join(void);
++void guest_cpu_join_new(void);
+ void guest_cpu_part(void);
+ 
+ static DWORD WINAPI bridge_thread_main(LPVOID param)
+@@ -523,7 +523,7 @@ static DWORD WINAPI bridge_thread_main(LPVOID param)
+         fci_register_guest_thread(ctx1, ctx2);
+     }
+ 
+-    guest_cpu_join();
++    guest_cpu_join_new();
+     bridge_run_thread_inline(fn, ctx1, ctx2);
+     guest_cpu_part();
+ 
+@@ -9575,6 +9575,26 @@ void guest_cpu_join(void)
+     }
+ }
+ 
++/* A new thread waits for its creator to wait or yield, as a console's equal-priority thread would; it
++ * asks for preemption only after 20 ms, in case the creator spins until the thread runs. */
++void guest_cpu_join_new(void)
++{
++    ULONGLONG start = GetTickCount64();
++    t_guest_thread = 1;
++    if (!guest_cpu_enabled() || t_guest_held)
++        return;
++    while (!TryEnterCriticalSection(&g_guest_cpu)) {
++        if (GetTickCount64() - start >= 20) {
++            extern volatile long g_fci_yield;
++            g_fci_yield = 1;
++            EnterCriticalSection(&g_guest_cpu);
++            break;
++        }
++        Sleep(1);
++    }
++    t_guest_held = 1;
++}
++
+ void guest_cpu_part(void)
+ {
+     if (t_guest_held) {
+@@ -9692,6 +9712,9 @@ static void kernel_thunk_dispatch(void)
+             case 103: case 129: case 130: case 160: case 161:
+                 keep = 1;
+                 break;
++            case 255:                  /* a new thread does not preempt its creator (an inline first call runs the game) */
++                keep = g_thread_mode == XBOX_THREAD_MODE_SPAWN || g_thread_call_count > 0;
++                break;
+             default:
+                 keep = xbox_IrqlCurrentRaised();
+             }

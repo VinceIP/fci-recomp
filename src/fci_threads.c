@@ -614,7 +614,12 @@ void fci_status_counts(long *presents, long *polls, long *frames3d, long *movies
     *frames3d = status_frames3d;
     *movies = status_movies;
 }
-void fci_prehook_001F6C00(void) { InterlockedIncrement(&status_polls); }
+void fci_vkb_frame(void); /* fci_vkb.c */
+void fci_prehook_001F6C00(void)
+{
+    InterlockedIncrement(&status_polls);
+    fci_vkb_frame();
+}
 static volatile uint32_t
         status_view; /* Camera_BuildViews' argument: the game view (re/notes/INPUT-CAMERA.md) */
 void fci_prehook_000F0500(void)
@@ -704,7 +709,7 @@ static DWORD WINAPI status_thread(LPVOID param)
         if (control) { /* new command lines since last time */
             FILE *c = fopen(control, "r");
             if (c) {
-                char line[128];
+                char line[256]; /* room for "post " + a 200-character command + the newline */
                 if (fseek(c, control_at, SEEK_SET) == 0)
                     while (fgets(line, sizeof line, c)) {
                         char *nl = strchr(line, '\n');
@@ -719,10 +724,35 @@ static DWORD WINAPI status_thread(LPVOID param)
                             int dx = 0, dy = 0;
                             if (sscanf(line + 6, "%d %d", &dx, &dy) == 2)
                                 fci_input_mouse_inject(dx, dy);
+                        } else if (!strncmp(line, "type ", 5)) { /* as WM_CHAR, one per character */
+                            extern void fci_vkb_char(unsigned c);
+                            for (const char *ch = line + 5; *ch; ch++)
+                                fci_vkb_char((unsigned char)*ch);
+                        } else if (!strncmp(line, "key ", 4)) { /* a key press, down then up (VK in hex) */
+                            extern int fci_vkb_key(int vk);
+                            extern void fci_input_key(int code, int down);
+                            int vk = (int)strtol(line + 4, NULL, 16);
+                            if (!fci_vkb_key(vk)) {
+                                fci_input_key(vk, 1);
+                                fci_input_key(vk, 0);
+                            }
                         } else if (!strncmp(line, "set ", 4)) {
                             extern int fci_gfx_set(const char *key_value);  /* xbr/fci_enhance.cpp */
                             extern int fci_cvar_set(const char *key_value); /* fci_cvars.c */
                             if (!fci_cvar_set(line + 4) && !fci_gfx_set(line + 4))
+                                fprintf(stderr, "[FCI] control: refused %s\n", line);
+                        } else if (!strncmp(line, "post ", 5)) { /* a game command at the frame boundary */
+                            const char *text = line + 5;
+                            size_t n = strlen(text);
+                            int ok = n > 0 && n <= 200;
+                            for (size_t i = 0; ok && i < n; i++)
+                                if ((unsigned char)text[i] < 0x20 || (unsigned char)text[i] > 0x7E)
+                                    ok = 0;
+                            if (ok) {
+                                extern void fci_quicksave_queue_post(
+                                        const char *text); /* xbr/fci_quicksave.cpp */
+                                fci_quicksave_queue_post(text);
+                            } else
                                 fprintf(stderr, "[FCI] control: refused %s\n", line);
                         } else if (!strncmp(line, "watch ", 6) || !strncmp(line, "watchrw ", 8)) {
                             extern void fci_data_watch_set(uint32_t va, int rw);
